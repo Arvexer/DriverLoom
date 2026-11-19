@@ -1,0 +1,32 @@
+# Build directories & CMake generated files
+/build/
+/out/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
+*.ninja
+.ninja_deps
+.ninja_log
+
+# Binaries, objects, and temporary artifacts
+*.exe
+*.dll
+*.lib
+*.a
+*.obj
+*.o
+*.res
+*.pdb
+*.bak
+*.log
+*.tmp
+*.pem
+*.specs
+
+# IDE & editor settings
+/.vs/
+/.vscode/
+/.idea/
+*.user
+*.suo

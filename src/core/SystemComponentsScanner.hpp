@@ -1,0 +1,98 @@
+#pragma once
+
+#include "common/AppCommon.hpp"
+#include "core/DeviceScanner.hpp"
+
+#include <atomic>
+#include <functional>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace hdm {
+
+enum class ComponentCategory {
+    GamingRuntime,
+    PeripheralSoftware,
+    MonitorAndGpu
+};
+
+struct SystemComponentItem {
+    std::string id;
+    ComponentCategory category{ComponentCategory::GamingRuntime};
+    std::string name;
+    std::string vendor;
+    std::string purposeDescription;
+    std::string detectedHardware;
+    std::string installedVersion;
+    std::string latestVersion;
+    std::string officialPageUrl;
+    std::string directInstallerUrl;
+    std::string installerArgs;
+    std::string statusText;
+    bool installed{false};
+    bool updateAvailable{false};
+    bool hardwareConnected{false};
+    bool onlineChecked{false};
+};
+
+class SystemComponentsScanner {
+public:
+    SystemComponentsScanner() = default;
+    ~SystemComponentsScanner();
+
+    SystemComponentsScanner(const SystemComponentsScanner&) = delete;
+    SystemComponentsScanner& operator=(const SystemComponentsScanner&) = delete;
+
+    // Fast local scan (<50ms): Registry + System32/SysWOW64 DLLs + matched PnP/EDID hardware.
+    // When autoCheckOnline is true, automatically resolves latest official versions & download URLs.
+    void StartLocalScanAsync(
+        std::vector<DeviceInfo> devicesSnapshot,
+        LogCallback onLog,
+        bool autoCheckOnline = true);
+
+    // Silent fast local re-check preserving previously fetched online versions & direct URLs.
+    void RefreshLocalPreserveOnlineAsync(std::vector<DeviceInfo> devicesSnapshot);
+
+    // Background WinHTTP check for latest official online versions (.NET, official endpoints).
+    void StartOnlineVersionCheckAsync(LogCallback onLog);
+
+    // Downloads official installer via WinHTTP, verifies Authenticode signature via WinVerifyTrust,
+    // runs installer, and refreshes local component status.
+    void DownloadAndInstallAsync(
+        const SystemComponentItem& item,
+        std::vector<DeviceInfo> devicesSnapshot,
+        LogCallback onLog);
+
+    [[nodiscard]] bool IsScanning() const noexcept { return scanning_.load(); }
+    [[nodiscard]] bool IsCheckingOnline() const noexcept { return checkingOnline_.load(); }
+    [[nodiscard]] bool IsInstalling() const noexcept { return installing_.load(); }
+    [[nodiscard]] float Progress() const noexcept { return progress_.load(); }
+    [[nodiscard]] uint64_t Generation() const noexcept { return generation_.load(); }
+    [[nodiscard]] std::string PhaseMessage() const;
+
+    std::vector<SystemComponentItem> GetItemsSnapshot() const;
+
+    static std::vector<SystemComponentItem> ScanLocalSynchronously(
+        const std::vector<DeviceInfo>& devicesSnapshot);
+
+private:
+    void SetPhaseMessage(const std::string& msg);
+
+    std::atomic<bool> scanning_{false};
+    std::atomic<bool> checkingOnline_{false};
+    std::atomic<bool> installing_{false};
+    std::atomic<float> progress_{0.0f};
+    std::atomic<uint64_t> generation_{0};
+
+    mutable std::mutex dataMutex_;
+    std::vector<SystemComponentItem> items_;
+    std::string phaseMessage_;
+
+    std::thread scanThread_;
+    std::thread onlineThread_;
+    std::thread installThread_;
+};
+
+} // namespace hdm
