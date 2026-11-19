@@ -5,9 +5,8 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
-#include <mutex>
+#include <memory>
 #include <string>
-#include <thread>
 #include <vector>
 
 namespace hdm {
@@ -36,13 +35,19 @@ struct WuInstallSummary {
     size_t installedCount{0};
     size_t failedCount{0};
     bool rebootRequired{false};
+    bool cancelled{false};
 };
 
 class WindowsUpdateManager {
 public:
     using InstallDoneCallback = std::function<void(const WuInstallSummary& summary)>;
+    using ItemUpdateCallback = std::function<void(
+        const std::string& updateId,
+        bool installedOk,
+        bool rebootRequired,
+        const std::string& statusText)>;
 
-    WindowsUpdateManager() = default;
+    WindowsUpdateManager();
     ~WindowsUpdateManager();
 
     WindowsUpdateManager(const WindowsUpdateManager&) = delete;
@@ -53,15 +58,16 @@ public:
         const std::vector<std::string>& selectedUpdateIds,
         bool createRestorePoint,
         LogCallback onLog,
-        InstallDoneCallback onComplete = nullptr);
+        InstallDoneCallback onComplete = nullptr,
+        bool driversOnly = true);
 
-    void RequestCancel() noexcept { cancelRequested_.store(true); }
+    void RequestCancel() noexcept;
 
-    [[nodiscard]] bool IsSearching() const noexcept { return searching_.load(); }
-    [[nodiscard]] bool IsInstalling() const noexcept { return installing_.load(); }
-    [[nodiscard]] bool IsBusy() const noexcept { return searching_.load() || installing_.load(); }
-    [[nodiscard]] float Progress() const noexcept { return progress_.load(); }
-    [[nodiscard]] uint64_t Generation() const noexcept { return generation_.load(); }
+    [[nodiscard]] bool IsSearching() const noexcept;
+    [[nodiscard]] bool IsInstalling() const noexcept;
+    [[nodiscard]] bool IsBusy() const noexcept;
+    [[nodiscard]] float Progress() const noexcept;
+    [[nodiscard]] uint64_t Generation() const noexcept;
     [[nodiscard]] std::string PhaseMessage() const;
 
     std::vector<DriverUpdateItem> GetUpdatesSnapshot() const;
@@ -75,23 +81,13 @@ public:
         const LogCallback& onLog,
         std::atomic<float>* outProgress = nullptr,
         std::atomic<bool>* cancelFlag = nullptr,
-        std::function<void(const std::string&)> onPhase = nullptr);
+        std::function<void(const std::string&)> onPhase = nullptr,
+        ItemUpdateCallback onItemUpdate = nullptr,
+        bool driversOnly = false);
 
 private:
-    void SetPhaseMessage(const std::string& msg);
-
-    std::atomic<bool> searching_{false};
-    std::atomic<bool> installing_{false};
-    std::atomic<bool> cancelRequested_{false};
-    std::atomic<float> progress_{0.0f};
-    std::atomic<uint64_t> generation_{0};
-
-    mutable std::mutex dataMutex_;
-    std::vector<DriverUpdateItem> updates_;
-    std::string phaseMessage_;
-
-    std::thread searchThread_;
-    std::thread installThread_;
+    struct Impl;
+    std::shared_ptr<Impl> impl_;
 };
 
 } // namespace hdm

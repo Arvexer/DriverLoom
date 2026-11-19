@@ -12,6 +12,7 @@
 #include <shellapi.h>
 #include <setupapi.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <filesystem>
@@ -193,6 +194,8 @@ public:
     }
     T* operator->() const noexcept { return ptr_; }
     explicit operator bool() const noexcept { return ptr_ != nullptr; }
+
+    T* Detach() noexcept { return std::exchange(ptr_, nullptr); }
 
 private:
     T* ptr_{nullptr};
@@ -435,17 +438,22 @@ inline std::wstring GetCurrentExePath() {
 
 struct ElevatedRunResult {
     bool launched{false};
+    bool cancelled{false};
+    bool timedOutWaiting{false};
     DWORD exitCode{1};
     DWORD launchError{0};
 };
 
 // Launches the current executable with UAC ("runas") using ShellExecuteExW.
-// When waitAndStreamLog is true, waits for the elevated process while tailing utf8LogPath in real time.
+// When waitForCompletion is true, waits for the elevated process while tailing utf8LogPath in real time.
 inline ElevatedRunResult ExecuteElevatedSelf(
     const std::wstring& arguments,
     bool waitForCompletion,
     const std::filesystem::path* utf8LogPath = nullptr,
-    const LogCallback& onLog = nullptr) {
+    const LogCallback& onLog = nullptr,
+    const std::function<void(const std::string&)>& onControlLine = nullptr,
+    const std::atomic<bool>* cancelFlag = nullptr,
+    const std::filesystem::path* cancelMarkerPath = nullptr) {
     ElevatedRunResult result;
     const std::wstring exePath = GetCurrentExePath();
     if (exePath.empty()) {
@@ -480,7 +488,7 @@ inline ElevatedRunResult ExecuteElevatedSelf(
     std::string pendingLine;
 
     auto flushLogFile = [&]() {
-        if (utf8LogPath == nullptr || !onLog) {
+        if (utf8LogPath == nullptr || (!onLog && !onControlLine)) {
             return;
         }
         std::ifstream ifs(*utf8LogPath, std::ios::binary);
@@ -504,6 +512,15 @@ inline ElevatedRunResult ExecuteElevatedSelf(
             if (line.empty()) {
                 continue;
             }
+            if (line.rfind("[META] ", 0) == 0) {
+                if (onControlLine) {
+                    onControlLine(line.substr(7));
+                }
+                continue;
+            }
+            if (!onLog) {
+                continue;
+            }
             LogLevel lvl = LogLevel::Info;
             if (line.rfind("[OK] ", 0) == 0) {
                 lvl = LogLevel::Success;
@@ -523,16 +540,43 @@ inline ElevatedRunResult ExecuteElevatedSelf(
     };
 
     if (proc.IsValid()) {
-        while (WaitForSingleObject(proc.Get(), 100) == WAIT_TIMEOUT) {
+        bool abortSignaled = false;
+        std::chrono::steady_clock::time_point abortDeadline;
+        while (WaitForSingleObject(proc.Get(), 150) == WAIT_TIMEOUT) {
             flushLogFile();
+            if (cancelFlag != nullptr && cancelFlag->load()) {
+                if (!abortSignaled) {
+                    abortSignaled = true;
+                    result.cancelled = true;
+                    if (cancelMarkerPath != nullptr) {
+                        std::ofstream marker(*cancelMarkerPath, std::ios::binary | std::ios::trunc);
+                    }
+                    abortDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+                } else if (std::chrono::steady_clock::now() >= abortDeadline) {
+                    result.timedOutWaiting = true;
+                    if (onLog) {
+                        onLog(
+                            LogLevel::Warning,
+                            "Фоновый процесс установки не завершился вовремя после отмены — разблокировка интерфейса.");
+                    }
+                    break;
+                }
+            }
         }
         flushLogFile();
-        if (!pendingLine.empty() && onLog) {
-            onLog(LogLevel::Info, pendingLine);
+        if (!pendingLine.empty()) {
+            if (pendingLine.rfind("[META] ", 0) == 0) {
+                if (onControlLine) {
+                    onControlLine(pendingLine.substr(7));
+                }
+            } else if (onLog) {
+                onLog(LogLevel::Info, pendingLine);
+            }
         }
         DWORD code = 1;
-        GetExitCodeProcess(proc.Get(), &code);
-        result.exitCode = code;
+        if (!result.timedOutWaiting && GetExitCodeProcess(proc.Get(), &code)) {
+            result.exitCode = code;
+        }
     }
     return result;
 }

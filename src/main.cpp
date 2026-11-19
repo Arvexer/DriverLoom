@@ -23,6 +23,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
@@ -361,8 +362,10 @@ int RunCliModeIfRequested() {
     Mode mode = Mode::None;
     std::wstring targetArg;
     std::wstring logPath;
+    std::wstring cancelFilePath;
     bool forceInf = false;
     bool restoreBefore = false;
+    bool driversOnly = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
@@ -377,10 +380,14 @@ int RunCliModeIfRequested() {
             targetArg = argv[++i];
         } else if (arg == L"--log" && i + 1 < argc) {
             logPath = argv[++i];
+        } else if (arg == L"--cancel-file" && i + 1 < argc) {
+            cancelFilePath = argv[++i];
         } else if (arg == L"--force") {
             forceInf = true;
         } else if (arg == L"--restore-before") {
             restoreBefore = true;
+        } else if (arg == L"--drivers-only") {
+            driversOnly = true;
         }
     }
 
@@ -390,17 +397,20 @@ int RunCliModeIfRequested() {
 
     std::mutex fileLogMutex;
     std::ofstream ofs(std::filesystem::path(logPath), std::ios::binary | std::ios::app);
-    hdm::LogCallback fileLogger = [&](hdm::LogLevel lvl, const std::string& msg) {
+    auto writeRawLine = [&](const std::string& rawLine) {
         std::lock_guard<std::mutex> lock(fileLogMutex);
         if (!ofs.is_open()) {
             return;
         }
+        ofs << rawLine << "\n";
+        ofs.flush();
+    };
+    hdm::LogCallback fileLogger = [&](hdm::LogLevel lvl, const std::string& msg) {
         const char* tag = "[INFO] ";
         if (lvl == hdm::LogLevel::Success) tag = "[OK] ";
         else if (lvl == hdm::LogLevel::Warning) tag = "[WARN] ";
         else if (lvl == hdm::LogLevel::Error) tag = "[ERR] ";
-        ofs << tag << msg << "\n";
-        ofs.flush();
+        writeRawLine(std::string(tag) + msg);
     };
 
     if (mode == Mode::RestorePoint) {
@@ -428,9 +438,64 @@ int RunCliModeIfRequested() {
                 ids.push_back(token);
             }
         }
+
+        auto sanitizeMeta = [](std::string text) {
+            for (char& ch : text) {
+                if (ch == '\r' || ch == '\n' || ch == '|') {
+                    ch = ' ';
+                }
+            }
+            return text;
+        };
+
+        std::atomic<float> workerProgress{0.0f};
+        std::atomic<bool> workerCancel{false};
+        std::atomic<bool> watchStop{false};
+        std::thread cancelWatcher;
+        if (!cancelFilePath.empty()) {
+            const std::filesystem::path marker(cancelFilePath);
+            cancelWatcher = std::thread([marker, &workerCancel, &watchStop]() {
+                while (!watchStop.load()) {
+                    std::error_code ec;
+                    if (std::filesystem::exists(marker, ec)) {
+                        workerCancel.store(true);
+                        break;
+                    }
+                    Sleep(200);
+                }
+            });
+        }
+
         const hdm::WuInstallSummary summary =
             hdm::WindowsUpdateManager::DownloadAndInstallSync(
-                ids, restoreBefore, fileLogger);
+                ids,
+                restoreBefore,
+                fileLogger,
+                &workerProgress,
+                &workerCancel,
+                [&](const std::string& phase) {
+                    const int milli = static_cast<int>(
+                        std::clamp(workerProgress.load(), 0.0f, 1.0f) * 1000.0f);
+                    writeRawLine(
+                        "[META] PROG|" + std::to_string(milli) + "|" + sanitizeMeta(phase));
+                },
+                [&](const std::string& updateId,
+                    bool installedOk,
+                    bool rebootReq,
+                    const std::string& statusText) {
+                    writeRawLine(
+                        std::string("[META] ITEM|") + sanitizeMeta(updateId) + "|" +
+                        (installedOk ? "1" : "0") + "|" +
+                        (rebootReq ? "1" : "0") + "|" +
+                        sanitizeMeta(statusText));
+                },
+                driversOnly);
+
+        watchStop.store(true);
+        if (cancelWatcher.joinable()) {
+            cancelWatcher.join();
+        }
+
         if (summary.failedCount > 0 && summary.installedCount == 0) {
             return 1;
         }
@@ -1195,9 +1260,23 @@ private:
     void RenderWindowsUpdateTab() {
         const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
         const uint64_t wuGen = wuManager_.Generation();
-        if (wuGen != lastWuGen_ || wuManager_.IsInstalling()) {
+        if (wuGen != lastWuGen_) {
+            std::string selectedUid;
+            if (selectedWuIndex_ >= 0 && selectedWuIndex_ < static_cast<int>(wuCache_.size())) {
+                selectedUid = wuCache_[static_cast<size_t>(selectedWuIndex_)].updateId;
+            }
             wuCache_ = wuManager_.GetUpdatesSnapshot();
             lastWuGen_ = wuGen;
+            wuSortDirty_ = true;
+            selectedWuIndex_ = -1;
+            if (!selectedUid.empty()) {
+                for (int i = 0; i < static_cast<int>(wuCache_.size()); ++i) {
+                    if (wuCache_[static_cast<size_t>(i)].updateId == selectedUid) {
+                        selectedWuIndex_ = i;
+                        break;
+                    }
+                }
+            }
         }
 
         const bool busy = wuManager_.IsBusy();
@@ -1209,12 +1288,12 @@ private:
         SameLineWrapIfNeeded(CalcButtonWidth("Выбрать все"));
         if (ImGui::Button("Выбрать все")) {
             wuManager_.SelectAll(true);
-            wuCache_ = wuManager_.GetUpdatesSnapshot();
+            for (auto& u : wuCache_) u.selected = true;
         }
         SameLineWrapIfNeeded(CalcButtonWidth("Снять все"));
         if (ImGui::Button("Снять все")) {
             wuManager_.SelectAll(false);
-            wuCache_ = wuManager_.GetUpdatesSnapshot();
+            for (auto& u : wuCache_) u.selected = false;
         }
         ImGui::EndDisabled();
 
@@ -1239,7 +1318,8 @@ private:
                     if (summary.installedCount > 0) {
                         pendingDeviceRescan_.store(true);
                     }
-                });
+                },
+                !wuIncludeSystemUpdates_);
         }
         ImGui::EndDisabled();
 
@@ -1300,9 +1380,13 @@ private:
             ImGui::TableHeadersRow();
 
             if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs()) {
-                if (sortSpecs->SpecsDirty && sortSpecs->SpecsCount > 0) {
+                if ((sortSpecs->SpecsDirty || wuSortDirty_) && sortSpecs->SpecsCount > 0) {
                     const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
                     const bool asc = (spec.SortDirection == ImGuiSortDirection_Ascending);
+                    std::string selectedUid;
+                    if (selectedWuIndex_ >= 0 && selectedWuIndex_ < static_cast<int>(wuCache_.size())) {
+                        selectedUid = wuCache_[static_cast<size_t>(selectedWuIndex_)].updateId;
+                    }
                     std::sort(
                         wuCache_.begin(),
                         wuCache_.end(),
@@ -1326,7 +1410,17 @@ private:
                             }
                             return asc ? (cmp < 0) : (cmp > 0);
                         });
+                    if (!selectedUid.empty()) {
+                        selectedWuIndex_ = -1;
+                        for (int i = 0; i < static_cast<int>(wuCache_.size()); ++i) {
+                            if (wuCache_[static_cast<size_t>(i)].updateId == selectedUid) {
+                                selectedWuIndex_ = i;
+                                break;
+                            }
+                        }
+                    }
                     sortSpecs->SpecsDirty = false;
+                    wuSortDirty_ = false;
                 }
             }
 
@@ -1622,6 +1716,7 @@ private:
     std::vector<hdm::DriverUpdateItem> wuCache_;
     uint64_t lastWuGen_{0};
     int selectedWuIndex_{-1};
+    bool wuSortDirty_{false};
     bool wuRestoreBefore_{true};
     bool wuIncludeSystemUpdates_{false};
 
