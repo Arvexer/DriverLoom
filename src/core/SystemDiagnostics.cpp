@@ -91,18 +91,68 @@ bool IsPlaceholderSystemString(const std::string& s) {
            ContainsCaseInsensitive(s, "Not Specified");
 }
 
+std::string TrimWhitespace(const std::string& s) {
+    size_t first = 0;
+    while (first < s.size() && std::isspace(static_cast<unsigned char>(s[first])) != 0) {
+        ++first;
+    }
+    size_t last = s.size();
+    while (last > first && std::isspace(static_cast<unsigned char>(s[last - 1])) != 0) {
+        --last;
+    }
+    return s.substr(first, last - first);
+}
+
+std::string UrlEncodeComponent(const std::string& s) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(s.size() * 3);
+    for (unsigned char c : s) {
+        const bool unreserved =
+            (c >= 'A' && c <= 'Z') ||
+            (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~';
+        if (unreserved) {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(kHex[(c >> 4) & 0x0F]);
+            out.push_back(kHex[c & 0x0F]);
+        }
+    }
+    return out;
+}
+
 std::string ResolveMotherboardSupportUrl(const std::string& mfg, const std::string& product) {
-    const std::string combined = mfg + " " + product;
+    const std::string cleanProduct = TrimWhitespace(product);
+    const bool hasProduct = !cleanProduct.empty() && !IsPlaceholderSystemString(cleanProduct);
+    const std::string combined = mfg + " " + cleanProduct;
     if (ContainsCaseInsensitive(combined, "ASUS")) {
+        if (hasProduct) {
+            return "https://www.asus.com/supportonly/" +
+                   UrlEncodeComponent(cleanProduct) +
+                   "/helpdesk_download/";
+        }
         return "https://www.asus.com/support/download-center/";
     }
     if (ContainsCaseInsensitive(combined, "MSI") || ContainsCaseInsensitive(combined, "Micro-Star")) {
+        if (hasProduct) {
+            return "https://www.msi.com/search/" + UrlEncodeComponent(cleanProduct);
+        }
         return "https://www.msi.com/support/download";
     }
     if (ContainsCaseInsensitive(combined, "Gigabyte")) {
+        if (hasProduct) {
+            return "https://www.gigabyte.com/Search?kw=" + UrlEncodeComponent(cleanProduct);
+        }
         return "https://www.gigabyte.com/Support";
     }
     if (ContainsCaseInsensitive(combined, "ASRock")) {
+        if (hasProduct) {
+            return "https://www.asrock.com/support/index.asp?Model=" +
+                   UrlEncodeComponent(cleanProduct);
+        }
         return "https://www.asrock.com/support/index.asp";
     }
     if (ContainsCaseInsensitive(combined, "Dell") || ContainsCaseInsensitive(combined, "Alienware")) {
@@ -215,6 +265,20 @@ WindowsReadinessInfo ReadWindowsReadiness() {
             if (ReadRegDwordVal(polKey.Get(), L"DisableSR", disableSr) && disableSr != 0) {
                 r.systemRestorePolicyDisabled = true;
                 r.systemRestoreEnabled = false;
+            }
+        }
+    }
+    {
+        RegKeyGuard fsKey;
+        if (RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                L"SYSTEM\\CurrentControlSet\\Control\\FileSystem",
+                0,
+                KEY_READ,
+                fsKey.Put()) == ERROR_SUCCESS) {
+            DWORD disableTrim = 0;
+            if (ReadRegDwordVal(fsKey.Get(), L"DisableDeleteNotify", disableTrim)) {
+                r.trimEnabled = (disableTrim == 0);
             }
         }
     }
@@ -413,16 +477,25 @@ std::vector<ControllerDiagnosticItem> AnalyzeKeyControllers(
                    !ContainsCaseInsensitive(d.infName, "machine.inf") &&
                    !ContainsCaseInsensitive(d.infName, "pci.inf") &&
                    !ContainsCaseInsensitive(d.infName, "volume.inf") &&
-                   !ContainsCaseInsensitive(d.infName, "hdaudbus.inf") &&
-                   !ContainsCaseInsensitive(d.infName, "stornvme.inf")) {
+                   !ContainsCaseInsensitive(d.infName, "hdaudbus.inf")) {
             if (d.pciVendorId == "1022" || d.pciVendorId == "8086" ||
                 ContainsCaseInsensitive(d.name, "SMBus") ||
                 ContainsCaseInsensitive(d.name, "Chipset") ||
                 ContainsCaseInsensitive(d.name, "GPIO") ||
                 ContainsCaseInsensitive(d.name, "PSP") ||
                 ContainsCaseInsensitive(d.name, "Management Engine") ||
-                clsLower == "scsiadapter") {
-                role = (clsLower == "scsiadapter") ? "Контроллер накопителей" : "Чипсет / плата";
+                clsLower == "scsiadapter" ||
+                clsLower == "hdc") {
+                if (clsLower == "scsiadapter") {
+                    role = (ContainsCaseInsensitive(d.infName, "stornvme") ||
+                            ContainsCaseInsensitive(d.name, "NVM"))
+                               ? "NVMe контроллер"
+                               : "Контроллер накопителей";
+                } else if (clsLower == "hdc") {
+                    role = "SATA / AHCI";
+                } else {
+                    role = "Чипсет / плата";
+                }
             }
         }
 
@@ -780,6 +853,181 @@ std::vector<RestorePointItem> QueryRecentRestorePoints() {
     return items;
 }
 
+std::vector<StorageDiagnosticItem> AnalyzeStorageSubsystem(
+    const std::vector<DeviceInfo>& devices,
+    bool trimEnabled) {
+    std::vector<StorageDiagnosticItem> items;
+    SYSTEMTIME now{};
+    GetLocalTime(&now);
+    const int currentYear = static_cast<int>(now.wYear);
+
+    for (const auto& d : devices) {
+        if (IsVirtualOrSoftwareAdapter(d)) {
+            continue;
+        }
+        const std::string clsLower = ToLowerAscii(d.deviceClass);
+        const bool isPci = ContainsCaseInsensitive(d.hardwareId, "PCI\\VEN_") ||
+                           ContainsCaseInsensitive(d.instanceId, "PCI\\VEN_");
+
+        if ((clsLower == "scsiadapter" || clsLower == "hdc") && isPci) {
+            StorageDiagnosticItem st;
+            st.isController = true;
+            st.role = (ContainsCaseInsensitive(d.infName, "stornvme") ||
+                       ContainsCaseInsensitive(d.name, "NVM"))
+                          ? "NVMe контроллер"
+                          : "SATA / AHCI контроллер";
+            st.deviceName = d.name;
+            st.manufacturer = d.manufacturer;
+            st.driverVersion = d.driverVersion;
+            st.driverDate = d.driverDate;
+            st.infName = d.infName;
+            st.hardwareId = d.hardwareId;
+            st.searchKey = d.searchHardwareKey;
+
+            const int drvYear = ParseDriverYear(d.driverDate);
+            const bool isMicrosoftGeneric2006 =
+                (drvYear == 2006) &&
+                (ContainsCaseInsensitive(d.driverProvider, "Microsoft") ||
+                 ContainsCaseInsensitive(d.manufacturer, "Стандарт") ||
+                 ContainsCaseInsensitive(d.manufacturer, "Standard"));
+
+            if (d.health != DeviceHealth::Ok) {
+                st.health = ControllerHealth::Problem;
+                st.statusText = d.statusText;
+            } else if (drvYear > 0 && !isMicrosoftGeneric2006 && (currentYear - drvYear) >= 5) {
+                st.health = ControllerHealth::Attention;
+                st.statusText = "Устаревший драйвер (" + std::to_string(drvYear) + " г.)";
+            } else {
+                st.health = ControllerHealth::Ok;
+                st.statusText = d.infName.empty() ? "Актуален" : ("Актуален (" + d.infName + ")");
+            }
+            items.push_back(std::move(st));
+        } else if (clsLower == "diskdrive") {
+            const bool isNvmeDisk =
+                ContainsCaseInsensitive(d.hardwareId, "DiskNVMe") ||
+                ContainsCaseInsensitive(d.name, "NVMe") ||
+                ContainsCaseInsensitive(d.name, "990") ||
+                ContainsCaseInsensitive(d.name, "980");
+
+            StorageDiagnosticItem st;
+            st.isController = false;
+            st.role = isNvmeDisk ? "Накопитель (NVMe)" : "Накопитель (SATA / Диск)";
+            st.deviceName = d.name;
+            st.manufacturer = d.manufacturer;
+            st.driverVersion = d.driverVersion;
+            st.driverDate = d.driverDate;
+            st.infName = d.infName;
+            st.hardwareId = d.hardwareId;
+            st.searchKey = d.searchHardwareKey;
+            if (d.health != DeviceHealth::Ok) {
+                st.health = ControllerHealth::Problem;
+                st.statusText = d.statusText;
+            } else {
+                st.health = ControllerHealth::Ok;
+                st.statusText = trimEnabled ? "Работает (TRIM активен)" : "Работает (TRIM отключён)";
+            }
+            items.push_back(std::move(st));
+        }
+    }
+
+    std::sort(items.begin(), items.end(), [](const StorageDiagnosticItem& a, const StorageDiagnosticItem& b) {
+        if (a.isController != b.isController) {
+            return a.isController > b.isController;
+        }
+        const bool aNvme = (a.role.find("NVMe") != std::string::npos);
+        const bool bNvme = (b.role.find("NVMe") != std::string::npos);
+        if (aNvme != bNvme) {
+            return aNvme > bNvme;
+        }
+        return a.deviceName < b.deviceName;
+    });
+    return items;
+}
+
+struct PowrprofGuard {
+    HMODULE mod{nullptr};
+    ~PowrprofGuard() {
+        if (mod != nullptr) {
+            FreeLibrary(mod);
+        }
+    }
+};
+
+using PowerGetActiveSchemeFn = DWORD(WINAPI*)(HKEY, GUID**);
+using PowerEnumerateFn = DWORD(WINAPI*)(HKEY, const GUID*, const GUID*, ULONG, ULONG, UCHAR*, DWORD*);
+using PowerReadFriendlyNameFn =
+    DWORD(WINAPI*)(HKEY, const GUID*, const GUID*, const GUID*, UCHAR*, DWORD*);
+using PowerSetActiveSchemeFn = DWORD(WINAPI*)(HKEY, const GUID*);
+
+std::vector<PowerSchemeItem> QueryPowerSchemes(std::string& outActiveName) {
+    outActiveName.clear();
+    std::vector<PowerSchemeItem> schemes;
+
+    PowrprofGuard pwr{LoadLibraryExW(L"powrprof.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+    if (pwr.mod == nullptr) {
+        return schemes;
+    }
+
+    auto getActive = reinterpret_cast<PowerGetActiveSchemeFn>(
+        reinterpret_cast<void*>(GetProcAddress(pwr.mod, "PowerGetActiveScheme")));
+    auto enumerate = reinterpret_cast<PowerEnumerateFn>(
+        reinterpret_cast<void*>(GetProcAddress(pwr.mod, "PowerEnumerate")));
+    auto readName = reinterpret_cast<PowerReadFriendlyNameFn>(
+        reinterpret_cast<void*>(GetProcAddress(pwr.mod, "PowerReadFriendlyName")));
+    if (getActive == nullptr || enumerate == nullptr || readName == nullptr) {
+        return schemes;
+    }
+
+    GUID* activeGuid = nullptr;
+    const bool hasActive = (getActive(nullptr, &activeGuid) == ERROR_SUCCESS && activeGuid != nullptr);
+
+    constexpr ULONG kAccessScheme = 16;
+    for (ULONG idx = 0; idx < 32; ++idx) {
+        GUID schemeGuid{};
+        DWORD bufSize = sizeof(schemeGuid);
+        if (enumerate(
+                nullptr,
+                nullptr,
+                nullptr,
+                kAccessScheme,
+                idx,
+                reinterpret_cast<UCHAR*>(&schemeGuid),
+                &bufSize) != ERROR_SUCCESS) {
+            break;
+        }
+
+        PowerSchemeItem item;
+        wchar_t guidW[64]{};
+        if (StringFromGUID2(schemeGuid, guidW, static_cast<int>(std::size(guidW))) > 0) {
+            item.guidString = WideToUtf8(guidW);
+        }
+
+        DWORD nameBytes = 0;
+        readName(nullptr, &schemeGuid, nullptr, nullptr, nullptr, &nameBytes);
+        if (nameBytes > 0 && nameBytes < 4096) {
+            std::vector<BYTE> nameBuf(nameBytes + 2, 0);
+            if (readName(nullptr, &schemeGuid, nullptr, nullptr, nameBuf.data(), &nameBytes) ==
+                ERROR_SUCCESS) {
+                item.friendlyName = WideToUtf8(reinterpret_cast<const wchar_t*>(nameBuf.data()));
+            }
+        }
+        if (item.friendlyName.empty()) {
+            item.friendlyName = item.guidString;
+        }
+
+        item.isActive = hasActive && IsEqualGUID(schemeGuid, *activeGuid);
+        if (item.isActive) {
+            outActiveName = item.friendlyName;
+        }
+        schemes.push_back(std::move(item));
+    }
+
+    if (activeGuid != nullptr) {
+        LocalFree(activeGuid);
+    }
+    return schemes;
+}
+
 } // namespace
 
 SystemDiagnostics::~SystemDiagnostics() {
@@ -818,6 +1066,8 @@ SystemDiagnosticsSnapshot SystemDiagnostics::CollectSynchronously(
     snap.services = QueryMonitoredServices(snap.disabledCriticalServices);
     snap.controllers = AnalyzeKeyControllers(devicesSnapshot, snap.attentionControllers);
     snap.restorePoints = QueryRecentRestorePoints();
+    snap.storageItems = AnalyzeStorageSubsystem(devicesSnapshot, snap.readiness.trimEnabled);
+    snap.powerSchemes = QueryPowerSchemes(snap.activePowerSchemeName);
     snap.valid = true;
     return snap;
 }
@@ -1192,6 +1442,84 @@ bool SystemDiagnostics::RunSystemToolSync(
               title + " завершилась с кодом " + std::to_string(exitCode) + ".");
     }
     return exitCode == 0;
+}
+
+bool SystemDiagnostics::SetActivePowerSchemeSync(
+    const std::string& schemeGuidStr,
+    const LogCallback& onLog) {
+    if (schemeGuidStr.empty()) {
+        return false;
+    }
+    GUID schemeGuid{};
+    const HRESULT hrParse = CLSIDFromString(Utf8ToWide(schemeGuidStr).c_str(), &schemeGuid);
+    if (FAILED(hrParse)) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Некорректный GUID схемы электропитания: " + schemeGuidStr);
+        }
+        return false;
+    }
+
+    PowrprofGuard pwr{LoadLibraryExW(L"powrprof.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+    PowerSetActiveSchemeFn setScheme = nullptr;
+    if (pwr.mod != nullptr) {
+        setScheme = reinterpret_cast<PowerSetActiveSchemeFn>(
+            reinterpret_cast<void*>(GetProcAddress(pwr.mod, "PowerSetActiveScheme")));
+    }
+    if (setScheme == nullptr) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Не удалось загрузить PowerSetActiveScheme из powrprof.dll.");
+        }
+        return false;
+    }
+
+    const DWORD rc = setScheme(nullptr, &schemeGuid);
+    if (rc != ERROR_SUCCESS) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Не удалось переключить схему электропитания: " + FormatWin32Error(rc));
+        }
+        return false;
+    }
+
+    std::string activeName;
+    (void)QueryPowerSchemes(activeName);
+    if (onLog) {
+        onLog(LogLevel::Success,
+              "Активная схема электропитания: " +
+                  (activeName.empty() ? schemeGuidStr : activeName) + ".");
+    }
+    return true;
+}
+
+void SystemDiagnostics::SetActivePowerSchemeAsync(
+    const std::string& schemeGuidStr,
+    std::vector<DeviceInfo> devicesSnapshot,
+    LogCallback onLog) {
+    (void)devicesSnapshot;
+    if (IsBusy() || schemeGuidStr.empty()) {
+        return;
+    }
+    runningAction_.store(true);
+    SetActionPhase("Переключение схемы электропитания...");
+    if (actionThread_.joinable()) {
+        actionThread_.join();
+    }
+
+    actionThread_ = std::thread([this, schemeGuidStr, log = std::move(onLog)]() {
+        (void)SetActivePowerSchemeSync(schemeGuidStr, log);
+        std::string activeName;
+        auto refreshedSchemes = QueryPowerSchemes(activeName);
+        {
+            std::lock_guard<std::mutex> lock(dataMutex_);
+            snapshot_.powerSchemes = std::move(refreshedSchemes);
+            snapshot_.activePowerSchemeName = std::move(activeName);
+        }
+        generation_.fetch_add(1);
+        SetActionPhase("");
+        runningAction_.store(false);
+    });
 }
 
 namespace {

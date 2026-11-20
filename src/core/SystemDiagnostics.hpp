@@ -29,8 +29,35 @@ struct WindowsReadinessInfo {
     bool pendingFileRenames{false};
     bool systemRestoreEnabled{false};
     bool systemRestorePolicyDisabled{false};
+    bool trimEnabled{true};
     uint32_t restoreDiskPercent{0};
     uint32_t restoreLastIndex{0};
+};
+
+enum class ControllerHealth {
+    Ok,
+    Attention, // Generic Windows driver or aged vendor driver
+    Problem    // Missing driver or SetupAPI problem code
+};
+
+struct PowerSchemeItem {
+    std::string guidString;
+    std::string friendlyName;
+    bool isActive{false};
+};
+
+struct StorageDiagnosticItem {
+    std::string role; // "NVMe контроллер", "SATA / AHCI контроллер", "Накопитель (NVMe)", "Накопитель (SATA / Диск)"
+    std::string deviceName;
+    std::string manufacturer;
+    std::string driverVersion;
+    std::string driverDate;
+    std::string infName;
+    std::string hardwareId;
+    std::string searchKey;
+    std::string statusText;
+    ControllerHealth health{ControllerHealth::Ok};
+    bool isController{false};
 };
 
 struct RestorePointItem {
@@ -39,12 +66,6 @@ struct RestorePointItem {
     std::string sourceProcess; // Sanitized process basename (no user paths)
     std::string categoryLabel; // "DriverLoom", "Windows Update", "Плановая точка", "Установщик"
     bool isDriverLoom{false};
-};
-
-enum class ControllerHealth {
-    Ok,
-    Attention, // Generic Windows driver or aged vendor driver
-    Problem    // Missing driver or SetupAPI problem code
 };
 
 struct ControllerDiagnosticItem {
@@ -83,6 +104,9 @@ struct SystemDiagnosticsSnapshot {
     std::vector<ControllerDiagnosticItem> controllers;
     std::vector<ServiceHealthItem> services;
     std::vector<RestorePointItem> restorePoints;
+    std::vector<StorageDiagnosticItem> storageItems;
+    std::vector<PowerSchemeItem> powerSchemes;
+    std::string activePowerSchemeName;
     size_t disabledCriticalServices{0};
     size_t attentionControllers{0};
     bool valid{false};
@@ -127,6 +151,15 @@ public:
         std::vector<DeviceInfo> devicesSnapshot,
         std::vector<SystemComponentItem> componentsSnapshot,
         LogCallback onLog);
+
+    void SetActivePowerSchemeAsync(
+        const std::string& schemeGuidStr,
+        std::vector<DeviceInfo> devicesSnapshot,
+        LogCallback onLog);
+
+    static bool SetActivePowerSchemeSync(
+        const std::string& schemeGuidStr,
+        const LogCallback& onLog = nullptr);
 
     void RequestCancel() noexcept { cancelRequested_.store(true); }
 

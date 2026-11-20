@@ -3207,6 +3207,9 @@ private:
                 if (RenderSecondaryButton("Сайт платы")) {
                     OpenUrlInBrowser(mb.supportUrl);
                 }
+                if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                    ImGui::SetTooltip("%s", mb.supportUrl.c_str());
+                }
                 ImGui::SameLine();
             }
             if (RenderSecondaryButton("Поиск драйверов")) {
@@ -3325,6 +3328,17 @@ private:
         SameLineWrapIfNeeded(CalcButtonWidth("Точки восстановления (99)"));
         if (RenderPillButton(rpPill, diagSectionIndex_ == 2)) {
             diagSectionIndex_ = 2;
+        }
+
+        char storPill[96];
+        std::snprintf(
+            storPill,
+            sizeof(storPill),
+            "Накопители и питание (%zu)###StorPill",
+            diagCache_.storageItems.size());
+        SameLineWrapIfNeeded(CalcButtonWidth("Накопители и питание (99)"));
+        if (RenderPillButton(storPill, diagSectionIndex_ == 3)) {
+            diagSectionIndex_ = 3;
         }
 
         const float footerPadY = std::round(7.0f * uiScale);
@@ -3496,7 +3510,7 @@ private:
                 }
                 ImGui::EndTable();
             }
-        } else {
+        } else if (diagSectionIndex_ == 2) {
             if (ImGui::BeginTable("##DiagRestorePointsTable", 4, kDiagTableFlags, ImVec2(0.0f, tableH))) {
                 ImGui::TableSetupScrollFreeze(0, 1);
                 ImGui::TableSetupColumn("Тип / Статус", ImGuiTableColumnFlags_WidthStretch, 0.85f);
@@ -3535,6 +3549,103 @@ private:
                 }
                 ImGui::EndTable();
             }
+        } else {
+            const float instW = CalcButtonWidth("Установить") + 6.0f * uiScale;
+            const float catW = CalcButtonWidth("Каталог") + 6.0f * uiScale;
+            const float actionColW = instW + style.ItemSpacing.x + catW + style.CellPadding.x * 2.0f + 4.0f;
+
+            if (ImGui::BeginTable("##DiagStorageTable", 5, kDiagTableFlags, ImVec2(0.0f, tableH))) {
+                ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableSetupColumn("Состояние", ImGuiTableColumnFlags_WidthStretch, 1.28f);
+                ImGui::TableSetupColumn("Тип", ImGuiTableColumnFlags_WidthStretch, 0.80f);
+                ImGui::TableSetupColumn("Устройство / Накопитель", ImGuiTableColumnFlags_WidthStretch, 1.30f);
+                ImGui::TableSetupColumn("Драйвер / INF", ImGuiTableColumnFlags_WidthStretch, 0.94f);
+                ImGui::TableSetupColumn("Действие", ImGuiTableColumnFlags_WidthFixed, actionColW);
+                ImGui::TableHeadersRow();
+
+                for (size_t i = 0; i < diagCache_.storageItems.size(); ++i) {
+                    const auto& st = diagCache_.storageItems[i];
+                    ImGui::TableNextRow();
+                    ImGui::PushID(static_cast<int>(i));
+
+                    ImGui::TableSetColumnIndex(0);
+                    ImVec4 col(0.20f, 0.83f, 0.60f, 1.00f);
+                    if (st.health == hdm::ControllerHealth::Problem) {
+                        col = ImVec4(0.97f, 0.44f, 0.44f, 1.00f);
+                    } else if (st.health == hdm::ControllerHealth::Attention) {
+                        col = ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
+                    }
+                    RenderStatusBadge(col, st.statusText.c_str(), true);
+
+                    ImGui::TableSetColumnIndex(1);
+                    RenderCellText(st.role, false, true);
+
+                    ImGui::TableSetColumnIndex(2);
+                    RenderCellText(st.deviceName, false, true);
+                    if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                        ImGui::BeginTooltip();
+                        ImGui::PushTextWrapPos(440.0f * uiScale);
+                        ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s", st.deviceName.c_str());
+                        ImGui::TextDisabled(
+                            "Поставщик: %s | INF: %s",
+                            st.manufacturer.empty() ? "—" : st.manufacturer.c_str(),
+                            st.infName.empty() ? "—" : st.infName.c_str());
+                        if (!st.hardwareId.empty()) {
+                            ImGui::TextWrapped("Hardware ID: %s", st.hardwareId.c_str());
+                        }
+                        ImGui::PopTextWrapPos();
+                        ImGui::EndTooltip();
+                    }
+
+                    ImGui::TableSetColumnIndex(3);
+                    std::string verInf = st.driverVersion.empty() ? "—" : st.driverVersion;
+                    if (!st.infName.empty()) {
+                        verInf += " (" + st.infName + ")";
+                    }
+                    RenderCellText(verInf, false, true);
+
+                    ImGui::TableSetColumnIndex(4);
+                    if (st.isController) {
+                        const bool hasKey = !st.searchKey.empty() || !st.hardwareId.empty();
+                        const bool instPrimary = (st.health != hdm::ControllerHealth::Ok);
+                        ImGui::BeginDisabled(busy || compInstalling || !hasKey);
+                        if (RenderActionButton("Установить", ImVec2(instW, 0.0f), instPrimary)) {
+                            componentsScanner_.SearchAndInstallFromCatalogAsync(
+                                st.deviceName,
+                                st.searchKey,
+                                st.hardwareId,
+                                st.driverVersion,
+                                devicesCache_,
+                                MakeLogger(),
+                                [this](bool ok, bool rebootReq) {
+                                    if (rebootReq) rebootRequired_.store(true);
+                                    if (ok) pendingDeviceRescan_.store(true);
+                                });
+                        }
+                        ImGui::EndDisabled();
+                        ImGui::SameLine();
+                        ImGui::BeginDisabled(st.searchKey.empty());
+                        if (RenderSecondaryButton("Каталог", ImVec2(catW, 0.0f))) {
+                            OpenUrlInBrowser(
+                                "https://www.catalog.update.microsoft.com/Search.aspx?q=" +
+                                UrlEncode(st.searchKey));
+                        }
+                        ImGui::EndDisabled();
+                    } else {
+                        const char* sysLbl = "Системный (disk.inf)";
+                        const float sysW = ImGui::CalcTextSize(sysLbl).x;
+                        const float availCell = ImGui::GetContentRegionAvail().x;
+                        if (availCell > sysW) {
+                            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availCell - sysW) * 0.5f);
+                        }
+                        ImGui::AlignTextToFramePadding();
+                        ImGui::TextDisabled("%s", sysLbl);
+                    }
+
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+            }
         }
 
         // Bottom Maintenance Dock (bordered card footer aligned symmetrically)
@@ -3544,7 +3655,38 @@ private:
             ImVec2(0.0f, footerH),
             true,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        if (diagSectionIndex_ == 2) {
+        if (diagSectionIndex_ == 3) {
+            const char* trimTxt =
+                diagCache_.readiness.trimEnabled ? "NTFS TRIM: Активен" : "NTFS TRIM: Отключён";
+            const float trimW = ImGui::CalcTextSize(trimTxt).x;
+            const float winRight = ImGui::GetWindowContentRegionMax().x;
+
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("Схема электропитания:");
+            ImGui::BeginDisabled(busy);
+            for (const auto& ps : diagCache_.powerSchemes) {
+                const float btnW = CalcButtonWidth(ps.friendlyName.c_str());
+                const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+                if (lastEnd + style.ItemSpacing.x + btnW > winRight - trimW - 16.0f) {
+                    break;
+                }
+                ImGui::SameLine();
+                ImGui::PushID(ps.guidString.c_str());
+                if (RenderPillButton(ps.friendlyName.c_str(), ps.isActive) && !ps.isActive) {
+                    diagnostics_.SetActivePowerSchemeAsync(
+                        ps.guidString, devicesCache_, MakeLogger());
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndDisabled();
+
+            const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+            if (winRight - trimW > lastEnd + 16.0f) {
+                ImGui::SameLine(winRight - trimW);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%s", trimTxt);
+            }
+        } else if (diagSectionIndex_ == 2) {
             auto launchSystem32Tool = [&](const wchar_t* exeName) {
                 wchar_t sysDir[MAX_PATH]{};
                 GetSystemDirectoryW(sysDir, MAX_PATH);
