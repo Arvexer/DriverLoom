@@ -579,6 +579,36 @@ std::pair<std::string, std::string> ParseAmdAdrenalinFromHtml(const std::string&
     return {};
 }
 
+std::pair<std::string, std::string> ParseAmdChipsetFromHtml(const std::string& html) {
+    const std::string prefix = "drivers.amd.com/drivers/amd_chipset_software_";
+    std::string bestVer;
+    size_t pos = 0;
+    while ((pos = html.find(prefix, pos)) != std::string::npos) {
+        const size_t vStart = pos + prefix.size();
+        const size_t exePos = html.find(".exe", vStart);
+        if (exePos == std::string::npos || exePos <= vStart || (exePos - vStart) > 40) {
+            pos = vStart;
+            continue;
+        }
+        const std::string ver = html.substr(vStart, exePos - vStart);
+        bool valid = !ver.empty() && std::isdigit(static_cast<unsigned char>(ver.front())) != 0;
+        for (char ch : ver) {
+            if (!std::isdigit(static_cast<unsigned char>(ch)) && ch != '.') {
+                valid = false;
+                break;
+            }
+        }
+        if (valid && (bestVer.empty() || IsVersionNewer(ver, bestVer))) {
+            bestVer = ver;
+        }
+        pos = exePos + 4;
+    }
+    if (bestVer.empty()) {
+        return {};
+    }
+    return {bestVer, "https://drivers.amd.com/drivers/amd_chipset_software_" + bestVer + ".exe"};
+}
+
 struct WingetManifestInfo {
     bool ok{false};
     std::string version;
@@ -1698,6 +1728,26 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                     }
                 });
             }
+
+            if (hasItem("chip_amd")) {
+                const HttpResponse resp = WinHttpRequest(
+                    L"https://www.amd.com/en/support/downloads/drivers.html/chipsets/am4/b550.html",
+                    L"GET",
+                    true,
+                    512 * 1024);
+                const auto [chipVer, chipUrl] = ParseAmdChipsetFromHtml(resp.body);
+                updateItem("chip_amd", [&](SystemComponentItem& item) {
+                    item.onlineChecked = true;
+                    if (!chipUrl.empty()) {
+                        item.directInstallerUrl = chipUrl;
+                    }
+                    if (!chipVer.empty()) {
+                        ApplyResolvedVersionToItem(item, chipVer, "Не установлен");
+                    } else if (!item.directInstallerUrl.empty()) {
+                        ApplyResolvedVersionToItem(item, "8.09.28.1124", "Не установлен");
+                    }
+                });
+            }
         });
 
         // Group 4: Parallel official winget-pkgs manifest lookups (VC++ 2015-2022,
@@ -2617,8 +2667,9 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
             chip.detectedHardware = "Чипсет Intel (PCI\\VEN_8086)";
             chip.officialPageUrl = "https://www.intel.com/content/www/us/en/support/detect.html";
             chip.directInstallerUrl = "https://dsadata.intel.com/installer";
+            chip.wingetRepoPath = "i/Intel/IntelDriverAndSupportAssistant";
             chip.preferredArch = "x64";
-            chip.latestVersion = "Портал Intel";
+            chip.latestVersion = "Поиск...";
             chip.hardwareConnected = true;
             const InstalledAppEntry* intelChipApp = FindInstalledApp(
                 apps, {"Intel(R) Chipset Device Software", "Intel Chipset", "Intel Driver & Support"});
@@ -2641,12 +2692,14 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
             chip.purposeDescription =
                 "Официальный пакет драйверов чипсета AMD Ryzen / AM4 / AM5 (энергосбережение, USB, PCIe, GPIO, PSP).";
             chip.detectedHardware = "Чипсет AMD (PCI\\VEN_1022)";
-            chip.officialPageUrl = "https://www.amd.com/en/support/download/drivers.html";
-            chip.wingetRepoPath = "a/AMD/RyzenMaster";
-            chip.preferredArch = "x64";
-            chip.latestVersion = "Портал AMD";
+            chip.officialPageUrl =
+                "https://www.amd.com/en/support/downloads/drivers.html/chipsets/am4/b550.html";
+            chip.directInstallerUrl =
+                "https://drivers.amd.com/drivers/amd_chipset_software_8.09.28.1124.exe";
+            chip.latestVersion = "Поиск...";
             chip.hardwareConnected = true;
             chip.installed = (amdChipApp != nullptr) || !amdChipsetVer.empty();
+            chip.compareVersions = (amdChipApp != nullptr && !amdChipApp->displayVersion.empty());
             if (amdChipApp && !amdChipApp->displayVersion.empty()) {
                 chip.installedVersion = amdChipApp->displayVersion;
             } else if (!amdChipsetVer.empty()) {

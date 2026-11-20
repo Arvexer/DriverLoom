@@ -547,6 +547,7 @@ int RunCliModeIfRequested() {
         None,
         RestorePoint,
         InstallInf,
+        RemoveOemInfs,
         WuInstall,
         EnableService,
         ResetWuCache,
@@ -570,6 +571,9 @@ int RunCliModeIfRequested() {
             targetArg = argv[++i];
         } else if (arg == L"--cli-install-inf" && i + 1 < argc) {
             mode = Mode::InstallInf;
+            targetArg = argv[++i];
+        } else if (arg == L"--cli-remove-oem-infs" && i + 1 < argc) {
+            mode = Mode::RemoveOemInfs;
             targetArg = argv[++i];
         } else if (arg == L"--cli-wu-install" && i + 1 < argc) {
             mode = Mode::WuInstall;
@@ -636,6 +640,26 @@ int RunCliModeIfRequested() {
             return 1;
         }
         return summary.rebootRequired ? 2 : 0;
+    }
+
+    if (mode == Mode::RemoveOemInfs) {
+        std::vector<std::string> names;
+        std::stringstream ss(hdm::WideToUtf8(targetArg));
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            if (!token.empty()) {
+                names.push_back(token);
+            }
+        }
+        size_t removed = 0;
+        size_t failed = 0;
+        bool rebootReq = false;
+        hdm::LocalDriverInstaller::RemoveDriverStorePackagesSync(
+            names, restoreBefore, fileLogger, &removed, &failed, &rebootReq);
+        if (failed > 0 && removed == 0) {
+            return 1;
+        }
+        return rebootReq ? 2 : 0;
     }
 
     if (mode == Mode::EnableService) {
@@ -861,10 +885,12 @@ public:
 
     bool ShouldExitApp() const noexcept { return exitRequested_; }
     void SetInitialDiagSection(int sec) noexcept { diagSectionIndex_ = sec; }
+    void SetInitialLocalSection(int sec) noexcept { localSectionIndex_ = sec; }
     bool IsInitialScanSettled() const noexcept {
         return lastDeviceGen_ > 0 && lastComponentsGen_ > 0 && lastDiagGen_ > 0 &&
+               lastDriverStoreGen_ > 0 &&
                !scanner_.IsScanning() && !componentsScanner_.IsScanning() &&
-               !diagnostics_.IsScanning();
+               !diagnostics_.IsScanning() && !localInstaller_.IsScanningStore();
     }
 
 private:
@@ -881,6 +907,13 @@ private:
         GamingRuntimes,
         Peripherals,
         MonitorsAndGpu
+    };
+
+    enum class DriverStoreFilterMode {
+        All,
+        OldDuplicates,
+        ActiveOnly,
+        UnusedOnly
     };
 
     hdm::LogCallback MakeLogger() {
@@ -912,6 +945,9 @@ private:
             if (!diagnostics_.IsBusy()) {
                 diagnostics_.StartScanAsync(devicesCache_, MakeLogger());
             }
+            if (!localInstaller_.IsScanningStore() && !localInstaller_.IsRemovingStorePackages()) {
+                localInstaller_.ScanDriverStoreAsync(devicesCache_, nullptr);
+            }
         }
 
         const uint64_t compGen = componentsScanner_.Generation();
@@ -925,6 +961,13 @@ private:
         if (diagGen != lastDiagGen_) {
             diagCache_ = diagnostics_.GetSnapshot();
             lastDiagGen_ = diagGen;
+        }
+
+        const uint64_t storeGen = localInstaller_.StoreGeneration();
+        if (storeGen != lastDriverStoreGen_) {
+            driverStoreCache_ = localInstaller_.GetDriverStoreSnapshot();
+            lastDriverStoreGen_ = storeGen;
+            storeViewDirty_ = true;
         }
 
         if (pendingDeviceRescan_.exchange(false) && !scanner_.IsScanning()) {
@@ -1880,14 +1923,409 @@ private:
         }
     }
 
+    void RebuildDriverStoreViewCache(ImGuiTableSortSpecs* sortSpecs) {
+        visibleStoreIndices_.clear();
+        visibleStoreIndices_.reserve(driverStoreCache_.packages.size());
+
+        for (size_t i = 0; i < driverStoreCache_.packages.size(); ++i) {
+            const auto& pkg = driverStoreCache_.packages[i];
+            if (storeFilterMode_ == DriverStoreFilterMode::OldDuplicates && !pkg.isOldDuplicate) {
+                continue;
+            }
+            if (storeFilterMode_ == DriverStoreFilterMode::ActiveOnly && !pkg.inUse) {
+                continue;
+            }
+            if (storeFilterMode_ == DriverStoreFilterMode::UnusedOnly && pkg.inUse) {
+                continue;
+            }
+            visibleStoreIndices_.push_back(i);
+        }
+
+        if (sortSpecs != nullptr && sortSpecs->SpecsCount > 0) {
+            const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
+            const bool asc = (spec.SortDirection == ImGuiSortDirection_Ascending);
+            std::sort(
+                visibleStoreIndices_.begin(),
+                visibleStoreIndices_.end(),
+                [&](size_t ia, size_t ib) {
+                    const auto& a = driverStoreCache_.packages[ia];
+                    const auto& b = driverStoreCache_.packages[ib];
+                    int cmp = 0;
+                    switch (spec.ColumnUserID) {
+                    case 0: {
+                        auto rank = [](const hdm::DriverStorePackageEntry& x) {
+                            return x.isOldDuplicate ? 0 : (x.inUse ? 1 : 2);
+                        };
+                        cmp = rank(a) - rank(b);
+                        break;
+                    }
+                    case 1: cmp = a.oemInfName.compare(b.oemInfName); break;
+                    case 2: cmp = a.originalInfName.compare(b.originalInfName); break;
+                    case 3: cmp = a.provider.compare(b.provider); break;
+                    case 4: cmp = a.className.compare(b.className); break;
+                    case 5: cmp = CompareVersionOrString(a.driverVersion, b.driverVersion); break;
+                    case 6:
+                        cmp = (a.sizeBytes < b.sizeBytes) ? -1 : (a.sizeBytes > b.sizeBytes ? 1 : 0);
+                        break;
+                    default: break;
+                    }
+                    if (cmp == 0) cmp = a.oemInfName.compare(b.oemInfName);
+                    return asc ? (cmp < 0) : (cmp > 0);
+                });
+        }
+        storeViewDirty_ = false;
+    }
+
+    void RenderDriverStoreSection() {
+        const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+        const ImGuiStyle& style = ImGui::GetStyle();
+        const bool isAppForeground = (GetForegroundWindow() == hwnd_);
+        const bool busy = localInstaller_.IsPickingFolder() ||
+                          localInstaller_.IsScanningStore() ||
+                          localInstaller_.IsExportingBackup() ||
+                          localInstaller_.IsRemovingStorePackages() ||
+                          localInstaller_.IsInstalling();
+
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button("Экспорт бэкапа в папку...")) {
+            localInstaller_.PickFolderAsync(
+                hwnd_,
+                MakeLogger(),
+                [this](bool picked, const std::wstring& path) {
+                    if (picked && !path.empty()) {
+                        const std::string utf8 = hdm::WideToUtf8(path);
+                        {
+                            std::lock_guard<std::mutex> lock(pendingPathMutex_);
+                            pendingFolderUtf8_ = utf8;
+                            hasPendingFolder_ = true;
+                        }
+                        localInstaller_.ExportDriverStoreBackupAsync(
+                            path,
+                            backupSkipDuplicates_,
+                            MakeLogger(),
+                            [this, path](bool ok, size_t exportedCount) {
+                                if (ok && exportedCount > 0) {
+                                    localInstaller_.ScanInfFilesAsync(path, nullptr);
+                                }
+                            });
+                    }
+                });
+        }
+        if (isAppForeground &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "Копирует установленные сторонние пакеты драйверов (FileRepository) в выбранную папку.\n"
+                "После переустановки Windows выберите эту папку во вкладке «Установка из папки (.inf)».");
+        }
+        ImGui::EndDisabled();
+
+        size_t selectedCount = 0;
+        uint64_t selectedBytes = 0;
+        for (const auto& pkg : driverStoreCache_.packages) {
+            if (!pkg.inUse && pkg.selected) {
+                ++selectedCount;
+                selectedBytes += pkg.sizeBytes;
+            }
+        }
+
+        char rmSelLbl[96];
+        if (selectedCount > 0) {
+            std::snprintf(
+                rmSelLbl,
+                sizeof(rmSelLbl),
+                "Удалить выбранные (%zu / %s)###RmDupBtn",
+                selectedCount,
+                hdm::FormatBytes(selectedBytes).c_str());
+        } else {
+            std::snprintf(rmSelLbl, sizeof(rmSelLbl), "Удалить выбранные (0)###RmDupBtn");
+        }
+        SameLineWrapIfNeeded(CalcButtonWidth("Удалить выбранные (99 / 999.9 МБ)") + 6.0f);
+        ImGui::BeginDisabled(busy || selectedCount == 0);
+        if (RenderSecondaryButton(rmSelLbl)) {
+            std::vector<std::string> targets;
+            targets.reserve(selectedCount);
+            for (const auto& pkg : driverStoreCache_.packages) {
+                if (!pkg.inUse && pkg.selected) {
+                    targets.push_back(pkg.oemInfName);
+                }
+            }
+            if (!targets.empty()) {
+                localInstaller_.RemoveDriverStorePackagesAsync(
+                    std::move(targets),
+                    storeRestoreBefore_,
+                    devicesCache_,
+                    MakeLogger(),
+                    [this](size_t removed, size_t failed, bool rebootReq) {
+                        (void)failed;
+                        if (rebootReq) rebootRequired_.store(true);
+                        if (removed > 0) pendingDeviceRescan_.store(true);
+                    });
+            }
+        }
+        ImGui::EndDisabled();
+
+        SameLineWrapIfNeeded(CalcButtonWidth("Выбрать дубликаты"));
+        ImGui::BeginDisabled(busy || driverStoreCache_.duplicateCount == 0);
+        if (RenderSecondaryButton("Выбрать дубликаты")) {
+            for (auto& pkg : driverStoreCache_.packages) {
+                pkg.selected = (!pkg.inUse && pkg.isOldDuplicate);
+            }
+        }
+        ImGui::EndDisabled();
+
+        SameLineWrapIfNeeded(CalcButtonWidth("Снять все"));
+        ImGui::BeginDisabled(busy || selectedCount == 0);
+        if (RenderSecondaryButton("Снять все")) {
+            for (auto& pkg : driverStoreCache_.packages) {
+                pkg.selected = false;
+            }
+        }
+        ImGui::EndDisabled();
+
+        SameLineWrapIfNeeded(CalcButtonWidth("Обновить"));
+        ImGui::BeginDisabled(busy);
+        if (RenderSecondaryButton("Обновить")) {
+            localInstaller_.ScanDriverStoreAsync(devicesCache_, MakeLogger());
+        }
+        ImGui::EndDisabled();
+
+        if (driverStoreCache_.valid) {
+            char storeSummary[128];
+            std::snprintf(
+                storeSummary,
+                sizeof(storeSummary),
+                "Всего: %s  |  Активных: %zu  |  Дубликатов: %zu",
+                hdm::FormatBytes(driverStoreCache_.totalStoreBytes).c_str(),
+                driverStoreCache_.activeCount,
+                driverStoreCache_.duplicateCount);
+            const float sumW = ImGui::CalcTextSize(storeSummary).x;
+            const float winRight = ImGui::GetWindowContentRegionMax().x;
+            const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+            if (winRight - sumW > lastEnd + 16.0f) {
+                ImGui::SameLine(winRight - sumW);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%s", storeSummary);
+            } else {
+                ImGui::TextDisabled("%s", storeSummary);
+            }
+        }
+
+        // Row 2: Filter pills + checkboxes
+        char allLbl[48], dupFiltLbl[48], actLbl[48];
+        std::snprintf(allLbl, sizeof(allLbl), "Все (%zu)###DsAll", driverStoreCache_.packages.size());
+        std::snprintf(dupFiltLbl, sizeof(dupFiltLbl), "Дубликаты (%zu)###DsDup", driverStoreCache_.duplicateCount);
+        std::snprintf(actLbl, sizeof(actLbl), "Активные (%zu)###DsAct", driverStoreCache_.activeCount);
+
+        if (RenderPillButton(allLbl, storeFilterMode_ == DriverStoreFilterMode::All)) {
+            storeFilterMode_ = DriverStoreFilterMode::All;
+            storeViewDirty_ = true;
+        }
+        SameLineWrapIfNeeded(CalcButtonWidth("Дубликаты (999)"));
+        if (RenderPillButton(dupFiltLbl, storeFilterMode_ == DriverStoreFilterMode::OldDuplicates)) {
+            storeFilterMode_ = DriverStoreFilterMode::OldDuplicates;
+            storeViewDirty_ = true;
+        }
+        SameLineWrapIfNeeded(CalcButtonWidth("Активные (999)"));
+        if (RenderPillButton(actLbl, storeFilterMode_ == DriverStoreFilterMode::ActiveOnly)) {
+            storeFilterMode_ = DriverStoreFilterMode::ActiveOnly;
+            storeViewDirty_ = true;
+        }
+        SameLineWrapIfNeeded(CalcButtonWidth("Неиспользуемые"));
+        if (RenderPillButton("Неиспользуемые", storeFilterMode_ == DriverStoreFilterMode::UnusedOnly)) {
+            storeFilterMode_ = DriverStoreFilterMode::UnusedOnly;
+            storeViewDirty_ = true;
+        }
+
+        SameLineWrapIfNeeded(CalcButtonWidth("Без дубликатов") + 36.0f * uiScale);
+        ImGui::Checkbox("Без дубликатов", &backupSkipDuplicates_);
+        if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip("Не включать старые дубликаты пакетов при экспорте бэкапа в папку.");
+        }
+        SameLineWrapIfNeeded(CalcButtonWidth("Точка восстановления") + 32.0f * uiScale);
+        ImGui::Checkbox("Точка восстановления", &storeRestoreBefore_);
+
+        if (localInstaller_.IsExportingBackup() || localInstaller_.IsRemovingStorePackages()) {
+            const float prog = localInstaller_.Progress();
+            const std::string statusMsg = localInstaller_.StatusMessage();
+            char overlay[128];
+            std::snprintf(overlay, sizeof(overlay), "%.0f%% — %s", prog * 100.0f, statusMsg.c_str());
+            ImGui::ProgressBar(prog, ImVec2(-1.0f, 18.0f * uiScale), overlay);
+        }
+
+        ImGui::Spacing();
+
+        if (!driverStoreCache_.valid) {
+            ImGui::TextDisabled("Выполняется анализ хранилища драйверов DriverStore (oem*.inf)...");
+            return;
+        }
+
+        constexpr ImGuiTableFlags kTableFlags =
+            ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable | ImGuiTableFlags_RowBg |
+            ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_ScrollY;
+
+        const float rmBtnW = CalcButtonWidth("Удалить") + 8.0f * uiScale;
+        const float actionColW = rmBtnW + style.CellPadding.x * 2.0f + 4.0f;
+
+        if (ImGui::BeginTable("##DriverStoreTable", 9, kTableFlags, ImGui::GetContentRegionAvail())) {
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableSetupColumn("Выбор", ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 54.0f * uiScale, 8);
+            ImGui::TableSetupColumn("Статус", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 1.44f, 0);
+            ImGui::TableSetupColumn("Пакет", ImGuiTableColumnFlags_WidthStretch, 0.66f, 1);
+            ImGui::TableSetupColumn("INF / Активное устройство", ImGuiTableColumnFlags_WidthStretch, 1.28f, 2);
+            ImGui::TableSetupColumn("Поставщик", ImGuiTableColumnFlags_WidthStretch, 0.76f, 3);
+            ImGui::TableSetupColumn("Класс", ImGuiTableColumnFlags_WidthStretch, 0.52f, 4);
+            ImGui::TableSetupColumn("Версия / Дата", ImGuiTableColumnFlags_WidthStretch, 1.14f, 5);
+            ImGui::TableSetupColumn("Размер", ImGuiTableColumnFlags_WidthStretch, 0.60f, 6);
+            ImGui::TableSetupColumn("Действие", ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, actionColW, 7);
+            ImGui::TableHeadersRow();
+
+            ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs();
+            if (sortSpecs != nullptr && sortSpecs->SpecsDirty) {
+                storeViewDirty_ = true;
+                sortSpecs->SpecsDirty = false;
+            }
+            if (storeViewDirty_) {
+                RebuildDriverStoreViewCache(sortSpecs);
+            }
+
+            const float frameH = ImGui::GetFrameHeight();
+            for (size_t vIdx = 0; vIdx < visibleStoreIndices_.size(); ++vIdx) {
+                const size_t origIdx = visibleStoreIndices_[vIdx];
+                auto& pkg = driverStoreCache_.packages[origIdx];
+
+                ImGui::TableNextRow();
+                ImGui::PushID(static_cast<int>(origIdx));
+
+                ImGui::TableSetColumnIndex(0);
+                const float cbOffset = std::max(0.0f, (ImGui::GetContentRegionAvail().x - frameH) * 0.5f);
+                if (cbOffset > 0.0f) {
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + cbOffset);
+                }
+                ImGui::BeginDisabled(busy || pkg.inUse);
+                ImGui::Checkbox("##dsSel", &pkg.selected);
+                ImGui::EndDisabled();
+
+                ImGui::TableSetColumnIndex(1);
+                if (pkg.isOldDuplicate) {
+                    RenderStatusBadge(ImVec4(0.98f, 0.75f, 0.14f, 1.00f), "Старый дубликат", true);
+                } else if (pkg.inUse) {
+                    RenderStatusBadge(ImVec4(0.20f, 0.83f, 0.60f, 1.00f), "Активен", true);
+                } else {
+                    RenderStatusBadge(ImVec4(0.58f, 0.68f, 0.86f, 1.00f), "В хранилище", true);
+                }
+
+                ImGui::TableSetColumnIndex(2);
+                RenderCellText(pkg.oemInfName, false, true);
+
+                ImGui::TableSetColumnIndex(3);
+                const std::string title =
+                    pkg.activeDeviceName.empty()
+                        ? pkg.originalInfName
+                        : (pkg.originalInfName + " — " + pkg.activeDeviceName);
+                RenderCellText(title, false, true);
+                if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                    ImGui::BeginTooltip();
+                    ImGui::PushTextWrapPos(460.0f * uiScale);
+                    ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s (%s)", pkg.originalInfName.c_str(), pkg.oemInfName.c_str());
+                    if (!pkg.activeDeviceName.empty()) {
+                        ImGui::Text("Устройство: %s", pkg.activeDeviceName.c_str());
+                    }
+                    ImGui::TextDisabled("Поставщик: %s  |  Класс: %s",
+                        pkg.provider.empty() ? "—" : pkg.provider.c_str(),
+                        pkg.className.empty() ? "—" : pkg.className.c_str());
+                    ImGui::PopTextWrapPos();
+                    ImGui::EndTooltip();
+                }
+
+                ImGui::TableSetColumnIndex(4);
+                RenderCellText(pkg.provider, pkg.provider.empty(), true);
+
+                ImGui::TableSetColumnIndex(5);
+                RenderCellText(pkg.className, pkg.className.empty(), true);
+
+                ImGui::TableSetColumnIndex(6);
+                std::string verDate = pkg.driverVersion.empty() ? "—" : pkg.driverVersion;
+                if (!pkg.driverDate.empty()) {
+                    verDate += " (" + pkg.driverDate + ")";
+                }
+                RenderCellText(verDate, pkg.driverVersion.empty(), true);
+
+                ImGui::TableSetColumnIndex(7);
+                RenderCellText(hdm::FormatBytes(pkg.sizeBytes), true, true);
+
+                ImGui::TableSetColumnIndex(8);
+                if (!pkg.inUse) {
+                    ImGui::BeginDisabled(busy);
+                    if (RenderSecondaryButton("Удалить", ImVec2(rmBtnW, 0.0f))) {
+                        localInstaller_.RemoveDriverStorePackagesAsync(
+                            {pkg.oemInfName},
+                            storeRestoreBefore_,
+                            devicesCache_,
+                            MakeLogger(),
+                            [this](size_t removed, size_t failed, bool rebootReq) {
+                                (void)failed;
+                                if (rebootReq) rebootRequired_.store(true);
+                                if (removed > 0) pendingDeviceRescan_.store(true);
+                            });
+                    }
+                    ImGui::EndDisabled();
+                } else {
+                    const float usedW = ImGui::CalcTextSize("Занят").x;
+                    const float availCell = ImGui::GetContentRegionAvail().x;
+                    if (availCell > usedW) {
+                        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availCell - usedW) * 0.5f);
+                    }
+                    ImGui::AlignTextToFramePadding();
+                    ImGui::TextDisabled("Занят");
+                }
+
+                ImGui::PopID();
+            }
+            ImGui::EndTable();
+        }
+    }
+
     void RenderLocalInstallerTab() {
         const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
         const ImGuiStyle& style = ImGui::GetStyle();
         const bool isAppForeground = (GetForegroundWindow() == hwnd_);
+
+        if (RenderPillButton("Установка из папки (.inf)", localSectionIndex_ == 0)) {
+            localSectionIndex_ = 0;
+        }
+        char storePill[96];
+        if (driverStoreCache_.duplicateCount > 0) {
+            std::snprintf(
+                storePill,
+                sizeof(storePill),
+                "Бэкап и хранилище DriverStore (%zu | %zu дубл.)###StorePill",
+                driverStoreCache_.packages.size(),
+                driverStoreCache_.duplicateCount);
+        } else {
+            std::snprintf(
+                storePill,
+                sizeof(storePill),
+                "Бэкап и хранилище DriverStore (%zu)###StorePill",
+                driverStoreCache_.packages.size());
+        }
+        SameLineWrapIfNeeded(CalcButtonWidth("Бэкап и хранилище DriverStore (999 | 99 дубл.)"));
+        if (RenderPillButton(storePill, localSectionIndex_ == 1)) {
+            localSectionIndex_ = 1;
+        }
+
+        ImGui::Separator();
+
+        if (localSectionIndex_ == 1) {
+            RenderDriverStoreSection();
+            return;
+        }
+
         const bool busy =
             localInstaller_.IsPickingFolder() ||
             localInstaller_.IsScanningInf() ||
-            localInstaller_.IsInstalling();
+            localInstaller_.IsInstalling() ||
+            localInstaller_.IsExportingBackup() ||
+            localInstaller_.IsRemovingStorePackages();
 
         const char* pickLbl = "Обзор папки...";
         const char* scanLbl = "Найти .inf";
@@ -2594,10 +3032,18 @@ private:
     bool wuRestoreBefore_{true};
     bool wuIncludeSystemUpdates_{false};
 
-    // Local INF UI state
+    // Local INF & DriverStore backup UI state
+    int localSectionIndex_{0};
     char localFolderBuf_[1024]{};
     bool localForceInstall_{false};
     bool localRestoreBefore_{true};
+    bool backupSkipDuplicates_{true};
+    bool storeRestoreBefore_{true};
+    hdm::DriverStoreSnapshot driverStoreCache_;
+    std::vector<size_t> visibleStoreIndices_;
+    uint64_t lastDriverStoreGen_{0};
+    DriverStoreFilterMode storeFilterMode_{DriverStoreFilterMode::All};
+    bool storeViewDirty_{true};
     std::mutex pendingPathMutex_;
     std::string pendingFolderUtf8_;
     bool hasPendingFolder_{false};
@@ -2696,6 +3142,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     int initialTab = -1;
     int initialDiagSection = 0;
+    int initialLocalSection = 0;
     std::wstring screenshotPath;
     {
         int argc = 0;
@@ -2706,6 +3153,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                     initialTab = _wtoi(argv[++i]);
                 } else if (arg == L"--diag-section" && i + 1 < argc) {
                     initialDiagSection = _wtoi(argv[++i]);
+                } else if (arg == L"--local-section" && i + 1 < argc) {
+                    initialLocalSection = _wtoi(argv[++i]);
                 } else if (arg == L"--screenshot" && i + 1 < argc) {
                     screenshotPath = argv[++i];
                 }
@@ -2717,6 +3166,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     {
         DriverLoomApp app(hwnd, initialTab);
         app.SetInitialDiagSection(initialDiagSection);
+        app.SetInitialLocalSection(initialLocalSection);
         const ImVec4 clearColor(0.059f, 0.071f, 0.098f, 1.00f);
 
         bool done = false;
