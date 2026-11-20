@@ -1100,7 +1100,12 @@ private:
         if (RenderSecondaryButton(srLabel, ImVec2(btnWidth, 0.0f))) {
             systemRestore_.CreateRestorePointAsync(
                 "DriverLoom (ручная точка восстановления)",
-                MakeLogger());
+                MakeLogger(),
+                [this](bool ok, const std::string&) {
+                    if (ok && !diagnostics_.IsBusy()) {
+                        diagnostics_.StartScanAsync(devicesCache_, nullptr);
+                    }
+                });
         }
         ImGui::EndDisabled();
 
@@ -3311,6 +3316,17 @@ private:
             diagSectionIndex_ = 1;
         }
 
+        char rpPill[96];
+        std::snprintf(
+            rpPill,
+            sizeof(rpPill),
+            "Точки восстановления (%zu)###RpPill",
+            diagCache_.restorePoints.size());
+        SameLineWrapIfNeeded(CalcButtonWidth("Точки восстановления (99)"));
+        if (RenderPillButton(rpPill, diagSectionIndex_ == 2)) {
+            diagSectionIndex_ = 2;
+        }
+
         const float footerPadY = std::round(7.0f * uiScale);
         const float footerH = ImGui::GetFrameHeight() + footerPadY * 2.0f;
         const float tableH = std::max(84.0f, ImGui::GetContentRegionAvail().y - footerH - style.ItemSpacing.y);
@@ -3413,7 +3429,7 @@ private:
                 }
                 ImGui::EndTable();
             }
-        } else {
+        } else if (diagSectionIndex_ == 1) {
             const float svcBtnW = CalcButtonWidth("Включить") + 10.0f * uiScale;
             const float svcActionW = svcBtnW + style.CellPadding.x * 2.0f + 4.0f;
             if (ImGui::BeginTable("##DiagServicesTable", 5, kDiagTableFlags, ImVec2(0.0f, tableH))) {
@@ -3480,6 +3496,45 @@ private:
                 }
                 ImGui::EndTable();
             }
+        } else {
+            if (ImGui::BeginTable("##DiagRestorePointsTable", 4, kDiagTableFlags, ImVec2(0.0f, tableH))) {
+                ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableSetupColumn("Тип / Статус", ImGuiTableColumnFlags_WidthStretch, 0.85f);
+                ImGui::TableSetupColumn("Дата и время", ImGuiTableColumnFlags_WidthStretch, 0.72f);
+                ImGui::TableSetupColumn("Описание точки восстановления", ImGuiTableColumnFlags_WidthStretch, 1.85f);
+                ImGui::TableSetupColumn("Источник", ImGuiTableColumnFlags_WidthStretch, 0.88f);
+                ImGui::TableHeadersRow();
+
+                for (size_t i = 0; i < diagCache_.restorePoints.size(); ++i) {
+                    const auto& rp = diagCache_.restorePoints[i];
+                    ImGui::TableNextRow();
+                    ImGui::PushID(static_cast<int>(i));
+
+                    ImGui::TableSetColumnIndex(0);
+                    ImVec4 col(0.58f, 0.68f, 0.86f, 1.00f);
+                    if (rp.isDriverLoom) {
+                        col = ImVec4(0.20f, 0.83f, 0.60f, 1.00f);
+                    } else if (rp.categoryLabel == "Windows Update") {
+                        col = ImVec4(0.38f, 0.68f, 0.98f, 1.00f);
+                    }
+                    RenderStatusBadge(col, rp.categoryLabel.c_str(), true);
+
+                    ImGui::TableSetColumnIndex(1);
+                    RenderCellText(rp.timestamp, false, true);
+
+                    ImGui::TableSetColumnIndex(2);
+                    if (RenderCellText(rp.description, false, true) && isAppForeground &&
+                        ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                        ImGui::SetTooltip("%s", rp.description.c_str());
+                    }
+
+                    ImGui::TableSetColumnIndex(3);
+                    RenderCellText(rp.sourceProcess, true, true);
+
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+            }
         }
 
         // Bottom Maintenance Dock (bordered card footer aligned symmetrically)
@@ -3489,39 +3544,87 @@ private:
             ImVec2(0.0f, footerH),
             true,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextDisabled("Проверка системных файлов:");
-        ImGui::BeginDisabled(busy);
-        ImGui::SameLine(0.0f, 10.0f);
-        if (RenderSecondaryButton("SFC /scannow")) {
-            diagnostics_.RunMaintenanceAsync(
-                hdm::MaintenanceAction::SfcScan, "", devicesCache_, MakeLogger());
-        }
-        if (isAppForeground &&
-            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("Запускает встроенную проверку и восстановление защищённых файлов Windows (sfc.exe /scannow).");
-        }
+        if (diagSectionIndex_ == 2) {
+            auto launchSystem32Tool = [&](const wchar_t* exeName) {
+                wchar_t sysDir[MAX_PATH]{};
+                GetSystemDirectoryW(sysDir, MAX_PATH);
+                const std::filesystem::path fullPath = std::filesystem::path(sysDir) / exeName;
+                ShellExecuteW(hwnd_, L"open", fullPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            };
 
-        ImGui::SameLine();
-        if (RenderSecondaryButton("DISM CheckHealth")) {
-            diagnostics_.RunMaintenanceAsync(
-                hdm::MaintenanceAction::DismCheckHealth, "", devicesCache_, MakeLogger());
-        }
-        if (isAppForeground &&
-            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("Быстрая проверка хранилища компонентов Windows без изменений (DISM /CheckHealth).");
-        }
+            ImGui::BeginDisabled(systemRestore_.IsBusy());
+            if (ImGui::Button("Создать точку восстановления")) {
+                systemRestore_.CreateRestorePointAsync(
+                    "DriverLoom (ручная точка восстановления)",
+                    MakeLogger(),
+                    [this](bool ok, const std::string&) {
+                        if (ok && !diagnostics_.IsBusy()) {
+                            diagnostics_.StartScanAsync(devicesCache_, nullptr);
+                        }
+                    });
+            }
+            ImGui::EndDisabled();
 
-        ImGui::SameLine();
-        if (RenderSecondaryButton("DISM RestoreHealth")) {
-            diagnostics_.RunMaintenanceAsync(
-                hdm::MaintenanceAction::DismRestoreHealth, "", devicesCache_, MakeLogger());
+            ImGui::SameLine();
+            if (RenderSecondaryButton("Запустить откат системы (rstrui.exe)")) {
+                launchSystem32Tool(L"rstrui.exe");
+            }
+
+            ImGui::SameLine();
+            if (RenderSecondaryButton("Настроить защиту диска")) {
+                launchSystem32Tool(L"SystemPropertiesProtection.exe");
+            }
+
+            char srMeta[96];
+            std::snprintf(
+                srMeta,
+                sizeof(srMeta),
+                "Резерв диска: %u%%  |  Индекс: #%u",
+                diagCache_.readiness.restoreDiskPercent,
+                diagCache_.readiness.restoreLastIndex);
+            const float metaW = ImGui::CalcTextSize(srMeta).x;
+            const float winRight = ImGui::GetWindowContentRegionMax().x;
+            const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+            if (winRight - metaW > lastEnd + 16.0f) {
+                ImGui::SameLine(winRight - metaW);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%s", srMeta);
+            }
+        } else {
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("Проверка системных файлов:");
+            ImGui::BeginDisabled(busy);
+            ImGui::SameLine(0.0f, 10.0f);
+            if (RenderSecondaryButton("SFC /scannow")) {
+                diagnostics_.RunMaintenanceAsync(
+                    hdm::MaintenanceAction::SfcScan, "", devicesCache_, MakeLogger());
+            }
+            if (isAppForeground &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("Запускает встроенную проверку и восстановление защищённых файлов Windows (sfc.exe /scannow).");
+            }
+
+            ImGui::SameLine();
+            if (RenderSecondaryButton("DISM CheckHealth")) {
+                diagnostics_.RunMaintenanceAsync(
+                    hdm::MaintenanceAction::DismCheckHealth, "", devicesCache_, MakeLogger());
+            }
+            if (isAppForeground &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("Быстрая проверка хранилища компонентов Windows без изменений (DISM /CheckHealth).");
+            }
+
+            ImGui::SameLine();
+            if (RenderSecondaryButton("DISM RestoreHealth")) {
+                diagnostics_.RunMaintenanceAsync(
+                    hdm::MaintenanceAction::DismRestoreHealth, "", devicesCache_, MakeLogger());
+            }
+            if (isAppForeground &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip("Глубокое восстановление хранилища компонентов Windows через Windows Update (DISM /RestoreHealth).");
+            }
+            ImGui::EndDisabled();
         }
-        if (isAppForeground &&
-            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip("Глубокое восстановление хранилища компонентов Windows через Windows Update (DISM /RestoreHealth).");
-        }
-        ImGui::EndDisabled();
         ImGui::EndChild();
         ImGui::PopStyleVar();
     }

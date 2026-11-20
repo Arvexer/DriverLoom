@@ -29,6 +29,16 @@ struct WindowsReadinessInfo {
     bool pendingFileRenames{false};
     bool systemRestoreEnabled{false};
     bool systemRestorePolicyDisabled{false};
+    uint32_t restoreDiskPercent{0};
+    uint32_t restoreLastIndex{0};
+};
+
+struct RestorePointItem {
+    std::string timestamp;
+    std::string description;
+    std::string sourceProcess; // Sanitized process basename (no user paths)
+    std::string categoryLabel; // "DriverLoom", "Windows Update", "Плановая точка", "Установщик"
+    bool isDriverLoom{false};
 };
 
 enum class ControllerHealth {
@@ -72,6 +82,7 @@ struct SystemDiagnosticsSnapshot {
     WindowsReadinessInfo readiness;
     std::vector<ControllerDiagnosticItem> controllers;
     std::vector<ServiceHealthItem> services;
+    std::vector<RestorePointItem> restorePoints;
     size_t disabledCriticalServices{0};
     size_t attentionControllers{0};
     bool valid{false};

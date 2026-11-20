@@ -187,6 +187,22 @@ WindowsReadinessInfo ReadWindowsReadiness() {
             if (ReadRegDwordVal(srKey.Get(), L"RPSessionInterval", rpInterval)) {
                 r.systemRestoreEnabled = (rpInterval != 0);
             }
+            DWORD lastIdx = 0;
+            if (ReadRegDwordVal(srKey.Get(), L"LastIndex", lastIdx)) {
+                r.restoreLastIndex = lastIdx;
+            }
+        }
+        RegKeyGuard cfgKey;
+        if (RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore\\cfg",
+                0,
+                KEY_READ,
+                cfgKey.Put()) == ERROR_SUCCESS) {
+            DWORD diskPct = 0;
+            if (ReadRegDwordVal(cfgKey.Get(), L"DiskPercent", diskPct)) {
+                r.restoreDiskPercent = diskPct;
+            }
         }
         RegKeyGuard polKey;
         if (RegOpenKeyExW(
@@ -582,6 +598,188 @@ bool StopServiceWithWait(SC_HANDLE scm, const wchar_t* svcName, const LogCallbac
     return false;
 }
 
+std::string SanitizePersonalPaths(std::string text) {
+    const std::string lower = ToLowerAscii(text);
+    std::string out;
+    out.reserve(text.size());
+
+    size_t i = 0;
+    while (i < text.size()) {
+        if (i + 6 <= lower.size() &&
+            lower.compare(i, 5, "users") == 0 &&
+            (lower[i + 5] == '\\' || lower[i + 5] == '/')) {
+            const bool boundaryBefore =
+                (i == 0 || text[i - 1] == '\\' || text[i - 1] == '/' ||
+                 text[i - 1] == ':' || std::isspace(static_cast<unsigned char>(text[i - 1])) != 0 ||
+                 text[i - 1] == '"' || text[i - 1] == '\'' || text[i - 1] == '(' ||
+                 text[i - 1] == ',' || text[i - 1] == ';');
+            if (boundaryBefore) {
+                const char sep = text[i + 5];
+                size_t segStart = i + 6;
+                size_t segEnd = segStart;
+                while (segEnd < text.size()) {
+                    const char c = text[segEnd];
+                    if (c == '\\' || c == '/' || c == '"' || c == '\'' ||
+                        c == '|' || c == ')' || c == ',' || c == ';' ||
+                        std::isspace(static_cast<unsigned char>(c)) != 0) {
+                        break;
+                    }
+                    ++segEnd;
+                }
+                if (segEnd > segStart) {
+                    out.append(text, i, 5);
+                    out.push_back(sep);
+                    out.append("<user>");
+                    i = segEnd;
+                    continue;
+                }
+            }
+        }
+        out.push_back(text[i]);
+        ++i;
+    }
+    return out;
+}
+
+struct EventLogGuard {
+    HANDLE handle{nullptr};
+    ~EventLogGuard() {
+        if (handle != nullptr) {
+            CloseEventLog(handle);
+        }
+    }
+};
+
+std::string ExtractExecutableBasename(std::string rawCmd) {
+    while (!rawCmd.empty() &&
+           (rawCmd.back() == ' ' || rawCmd.back() == '\t' ||
+            rawCmd.back() == '\r' || rawCmd.back() == '\n')) {
+        rawCmd.pop_back();
+    }
+    const std::string lower = ToLowerAscii(rawCmd);
+    const size_t exePos = lower.find(".exe");
+    std::string pathPart = (exePos != std::string::npos) ? rawCmd.substr(0, exePos + 4) : rawCmd;
+    const size_t slashPos = pathPart.find_last_of("\\/");
+    std::string base = (slashPos != std::string::npos) ? pathPart.substr(slashPos + 1) : pathPart;
+    const size_t spPos = base.find_first_of(" \t\"");
+    if (spPos != std::string::npos) {
+        base.resize(spPos);
+    }
+    return base.empty() ? "system" : base;
+}
+
+std::vector<RestorePointItem> QueryRecentRestorePoints() {
+    std::vector<RestorePointItem> items;
+    EventLogGuard log(OpenEventLogW(nullptr, L"Application"));
+    if (log.handle == nullptr) {
+        return items;
+    }
+
+    std::vector<BYTE> buf(65536);
+    DWORD bytesRead = 0;
+    DWORD minBytes = 0;
+    constexpr size_t kMaxPoints = 25;
+
+    while (items.size() < kMaxPoints &&
+           ReadEventLogW(
+               log.handle,
+               EVENTLOG_BACKWARDS_READ | EVENTLOG_SEQUENTIAL_READ,
+               0,
+               buf.data(),
+               static_cast<DWORD>(buf.size()),
+               &bytesRead,
+               &minBytes)) {
+        DWORD off = 0;
+        while (off + sizeof(EVENTLOGRECORD) <= bytesRead && items.size() < kMaxPoints) {
+            const auto* rec = reinterpret_cast<const EVENTLOGRECORD*>(buf.data() + off);
+            if (rec->Length < sizeof(EVENTLOGRECORD) || off + rec->Length > bytesRead) {
+                break;
+            }
+            const DWORD evId = rec->EventID & 0xFFFFu;
+            const auto* recEnd = reinterpret_cast<const BYTE*>(rec) + rec->Length;
+            const auto* srcStart = reinterpret_cast<const wchar_t*>(
+                reinterpret_cast<const BYTE*>(rec) + sizeof(EVENTLOGRECORD));
+            const size_t maxSrcChars =
+                static_cast<size_t>(recEnd - reinterpret_cast<const BYTE*>(srcStart)) / sizeof(wchar_t);
+            const size_t srcLen = wcsnlen(srcStart, maxSrcChars);
+            if (evId == 8194 && srcLen > 0 && _wcsicmp(srcStart, L"System Restore") == 0 &&
+                rec->NumStrings >= 2 && rec->StringOffset < rec->Length) {
+                const auto* strCursor = reinterpret_cast<const wchar_t*>(
+                    reinterpret_cast<const BYTE*>(rec) + rec->StringOffset);
+                const auto* wEnd = reinterpret_cast<const wchar_t*>(recEnd);
+
+                std::wstring rawProcW;
+                std::wstring descW;
+                if (strCursor < wEnd) {
+                    const size_t n0 = wcsnlen(strCursor, static_cast<size_t>(wEnd - strCursor));
+                    rawProcW.assign(strCursor, n0);
+                    strCursor += n0 + 1;
+                    if (strCursor < wEnd) {
+                        const size_t n1 = wcsnlen(strCursor, static_cast<size_t>(wEnd - strCursor));
+                        descW.assign(strCursor, n1);
+                    }
+                }
+
+                RestorePointItem rp;
+                ULARGE_INTEGER uli{};
+                uli.QuadPart =
+                    (static_cast<ULONGLONG>(rec->TimeGenerated) + 11644473600ULL) * 10000000ULL;
+                FILETIME ftUtc{uli.LowPart, uli.HighPart};
+                FILETIME ftLocal{};
+                SYSTEMTIME st{};
+                if (FileTimeToLocalFileTime(&ftUtc, &ftLocal) &&
+                    FileTimeToSystemTime(&ftLocal, &st)) {
+                    char timeBuf[32];
+                    std::snprintf(
+                        timeBuf,
+                        sizeof(timeBuf),
+                        "%04u-%02u-%02u %02u:%02u:%02u",
+                        st.wYear,
+                        st.wMonth,
+                        st.wDay,
+                        st.wHour,
+                        st.wMinute,
+                        st.wSecond);
+                    rp.timestamp = timeBuf;
+                }
+
+                const std::string rawProc = WideToUtf8(rawProcW);
+                if (ContainsCaseInsensitive(rawProc, "DriverLoom")) {
+                    rp.sourceProcess = "DriverLoom.exe";
+                    rp.categoryLabel = "DriverLoom";
+                    rp.isDriverLoom = true;
+                } else if (ContainsCaseInsensitive(rawProc, "wuauserv")) {
+                    rp.sourceProcess = "wuauserv (Windows Update)";
+                    rp.categoryLabel = "Windows Update";
+                } else if (ContainsCaseInsensitive(rawProc, "srtasks")) {
+                    rp.sourceProcess = "srtasks.exe";
+                    rp.categoryLabel = "Плановая точка";
+                } else if (ContainsCaseInsensitive(rawProc, "msiexec")) {
+                    rp.sourceProcess = "msiexec.exe";
+                    rp.categoryLabel = "Windows Installer";
+                } else {
+                    rp.sourceProcess = ExtractExecutableBasename(rawProc);
+                    rp.categoryLabel = "Системная точка";
+                }
+
+                rp.description = SanitizePersonalPaths(WideToUtf8(descW));
+                while (!rp.description.empty() &&
+                       (rp.description.back() == '\r' || rp.description.back() == '\n' ||
+                        rp.description.back() == ' ')) {
+                    rp.description.pop_back();
+                }
+                if (rp.description.empty()) {
+                    rp.description = "Контрольная точка восстановления";
+                }
+                rp.sourceProcess = SanitizePersonalPaths(rp.sourceProcess);
+                items.push_back(std::move(rp));
+            }
+            off += rec->Length;
+        }
+    }
+    return items;
+}
+
 } // namespace
 
 SystemDiagnostics::~SystemDiagnostics() {
@@ -619,6 +817,7 @@ SystemDiagnosticsSnapshot SystemDiagnostics::CollectSynchronously(
     snap.readiness = ReadWindowsReadiness();
     snap.services = QueryMonitoredServices(snap.disabledCriticalServices);
     snap.controllers = AnalyzeKeyControllers(devicesSnapshot, snap.attentionControllers);
+    snap.restorePoints = QueryRecentRestorePoints();
     snap.valid = true;
     return snap;
 }
@@ -996,49 +1195,6 @@ bool SystemDiagnostics::RunSystemToolSync(
 }
 
 namespace {
-
-std::string SanitizePersonalPaths(std::string text) {
-    const std::string lower = ToLowerAscii(text);
-    std::string out;
-    out.reserve(text.size());
-
-    size_t i = 0;
-    while (i < text.size()) {
-        if (i + 6 <= lower.size() &&
-            lower.compare(i, 5, "users") == 0 &&
-            (lower[i + 5] == '\\' || lower[i + 5] == '/')) {
-            const bool boundaryBefore =
-                (i == 0 || text[i - 1] == '\\' || text[i - 1] == '/' ||
-                 text[i - 1] == ':' || std::isspace(static_cast<unsigned char>(text[i - 1])) != 0 ||
-                 text[i - 1] == '"' || text[i - 1] == '\'' || text[i - 1] == '(' ||
-                 text[i - 1] == ',' || text[i - 1] == ';');
-            if (boundaryBefore) {
-                const char sep = text[i + 5];
-                size_t segStart = i + 6;
-                size_t segEnd = segStart;
-                while (segEnd < text.size()) {
-                    const char c = text[segEnd];
-                    if (c == '\\' || c == '/' || c == '"' || c == '\'' ||
-                        c == '|' || c == ')' || c == ',' || c == ';' ||
-                        std::isspace(static_cast<unsigned char>(c)) != 0) {
-                        break;
-                    }
-                    ++segEnd;
-                }
-                if (segEnd > segStart) {
-                    out.append(text, i, 5);
-                    out.push_back(sep);
-                    out.append("<user>");
-                    i = segEnd;
-                    continue;
-                }
-            }
-        }
-        out.push_back(text[i]);
-        ++i;
-    }
-    return out;
-}
 
 std::string CleanSingleLine(std::string_view sv) {
     std::string cleaned = SanitizePersonalPaths(std::string(sv));
