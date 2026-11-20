@@ -550,6 +550,8 @@ int RunCliModeIfRequested() {
         InstallInf,
         RemoveOemInfs,
         WuInstall,
+        WuHide,
+        WuUnhide,
         EnableService,
         ResetWuCache,
         SfcScan,
@@ -580,6 +582,12 @@ int RunCliModeIfRequested() {
             targetArg = argv[++i];
         } else if (arg == L"--cli-wu-install" && i + 1 < argc) {
             mode = Mode::WuInstall;
+            targetArg = argv[++i];
+        } else if (arg == L"--cli-wu-hide" && i + 1 < argc) {
+            mode = Mode::WuHide;
+            targetArg = argv[++i];
+        } else if (arg == L"--cli-wu-unhide" && i + 1 < argc) {
+            mode = Mode::WuUnhide;
             targetArg = argv[++i];
         } else if (arg == L"--cli-enable-service" && i + 1 < argc) {
             mode = Mode::EnableService;
@@ -751,6 +759,20 @@ int RunCliModeIfRequested() {
                    &cancelGuard.cancel)
                    ? 0
                    : 1;
+    }
+
+    if (mode == Mode::WuHide || mode == Mode::WuUnhide) {
+        std::vector<std::string> ids;
+        std::stringstream ss(hdm::WideToUtf8(targetArg));
+        std::string token;
+        while (std::getline(ss, token, ',')) {
+            if (!token.empty()) {
+                ids.push_back(token);
+            }
+        }
+        const bool ok = hdm::WindowsUpdateManager::SetUpdatesHiddenSync(
+            ids, mode == Mode::WuHide, fileLogger, driversOnly);
+        return ok ? 0 : 1;
     }
 
     if (mode == Mode::WuInstall) {
@@ -1855,20 +1877,37 @@ private:
         }
         SameLineWrapIfNeeded(CalcButtonWidth("Выбрать все"));
         if (RenderSecondaryButton("Выбрать все")) {
-            wuManager_.SelectAll(true);
-            for (auto& u : wuCache_) u.selected = true;
+            wuManager_.SelectAll(true, wuShowHidden_);
+            for (auto& u : wuCache_) {
+                if (!u.installedOk && (wuShowHidden_ || !u.isHidden)) {
+                    u.selected = true;
+                }
+            }
         }
         SameLineWrapIfNeeded(CalcButtonWidth("Снять все"));
         if (RenderSecondaryButton("Снять все")) {
-            wuManager_.SelectAll(false);
+            wuManager_.SelectAll(false, true);
             for (auto& u : wuCache_) u.selected = false;
         }
         ImGui::EndDisabled();
 
+        size_t hiddenCount = 0;
         std::vector<std::string> selectedIds;
+        std::vector<std::string> selectedToHide;
+        std::vector<std::string> selectedToUnhide;
         for (const auto& u : wuCache_) {
-            if (u.selected && !u.installedOk) {
-                selectedIds.push_back(u.updateId);
+            if (u.isHidden) {
+                ++hiddenCount;
+            }
+            if (!u.installedOk && u.selected) {
+                if (wuShowHidden_ || !u.isHidden) {
+                    selectedIds.push_back(u.updateId);
+                }
+                if (u.isHidden) {
+                    selectedToUnhide.push_back(u.updateId);
+                } else {
+                    selectedToHide.push_back(u.updateId);
+                }
             }
         }
 
@@ -1903,6 +1942,39 @@ private:
         }
         ImGui::EndDisabled();
 
+        char hideLbl[64];
+        if (!selectedToHide.empty()) {
+            std::snprintf(hideLbl, sizeof(hideLbl), "Скрыть (%zu)###WuHideBtn", selectedToHide.size());
+        } else {
+            std::snprintf(hideLbl, sizeof(hideLbl), "Скрыть###WuHideBtn");
+        }
+        const float hideBtnW = CalcButtonWidth(selectedToHide.empty() ? "Скрыть" : "Скрыть (99)");
+        SameLineWrapIfNeeded(hideBtnW);
+        ImGui::BeginDisabled(busy || selectedToHide.empty());
+        if (RenderSecondaryButton(hideLbl)) {
+            wuManager_.SetUpdatesHiddenAsync(
+                selectedToHide, true, MakeLogger(), !wuIncludeSystemUpdates_);
+        }
+        ImGui::EndDisabled();
+        if (isAppForeground &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "Запретить Windows Update предлагать и автоматически устанавливать выбранные обновления (IUpdate::put_IsHidden).");
+        }
+
+        if (wuShowHidden_ && !selectedToUnhide.empty()) {
+            char unhideLbl[64];
+            std::snprintf(
+                unhideLbl, sizeof(unhideLbl), "Вернуть (%zu)###WuUnhideBtn", selectedToUnhide.size());
+            SameLineWrapIfNeeded(CalcButtonWidth("Вернуть (99)"));
+            ImGui::BeginDisabled(busy);
+            if (RenderSecondaryButton(unhideLbl)) {
+                wuManager_.SetUpdatesHiddenAsync(
+                    selectedToUnhide, false, MakeLogger(), !wuIncludeSystemUpdates_);
+            }
+            ImGui::EndDisabled();
+        }
+
         if (busy) {
             SameLineWrapIfNeeded(CalcButtonWidth("Отмена"));
             if (RenderSecondaryButton("Отмена")) {
@@ -1930,6 +2002,16 @@ private:
         ImGui::Checkbox("Включать системные обновления и библиотеки (не только драйверы)", &wuIncludeSystemUpdates_);
         SameLineWrapIfNeeded(CalcButtonWidth("Точка восстановления перед установкой") + 32.0f * uiScale);
         ImGui::Checkbox("Точка восстановления перед установкой", &wuRestoreBefore_);
+        {
+            char showHidLbl[80];
+            std::snprintf(
+                showHidLbl, sizeof(showHidLbl), "Показывать скрытые (%zu)###WuShowHiddenCb", hiddenCount);
+            SameLineWrapIfNeeded(CalcButtonWidth("Показывать скрытые (99)") + 32.0f * uiScale);
+            ImGui::Checkbox(showHidLbl, &wuShowHidden_);
+            if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                ImGui::SetTooltip("Показать скрытые через IUpdate::IsHidden обновления, чтобы вернуть их в список.");
+            }
+        }
 
         if (wuManager_.IsInstalling() || wuManager_.IsSearching()) {
             if (wuManager_.IsSearching()) {
@@ -1945,11 +2027,12 @@ private:
 
         ImGui::Spacing();
 
+        const bool hasVisibleDetails =
+            (selectedWuIndex_ >= 0 && selectedWuIndex_ < static_cast<int>(wuCache_.size()) &&
+             (wuShowHidden_ || !wuCache_[static_cast<size_t>(selectedWuIndex_)].isHidden));
         const float availY = ImGui::GetContentRegionAvail().y;
         const float wuSpacingY = ImGui::GetStyle().ItemSpacing.y;
-        const float detailsH = (selectedWuIndex_ >= 0 && selectedWuIndex_ < static_cast<int>(wuCache_.size()))
-                                   ? 90.0f * uiScale
-                                   : 0.0f;
+        const float detailsH = hasVisibleDetails ? (90.0f * uiScale) : 0.0f;
         const float tableH = std::max(120.0f, availY - (detailsH > 0.0f ? detailsH + wuSpacingY : 0.0f));
 
         constexpr ImGuiTableFlags kTableFlags =
@@ -2020,6 +2103,9 @@ private:
             const float frameH = ImGui::GetFrameHeight();
             for (int i = 0; i < static_cast<int>(wuCache_.size()); ++i) {
                 auto& item = wuCache_[static_cast<size_t>(i)];
+                if (item.isHidden && !wuShowHidden_) {
+                    continue;
+                }
                 ImGui::TableNextRow();
                 ImGui::PushID(i);
 
@@ -2048,6 +2134,38 @@ private:
                         ImVec2(0.0f, frameH))) {
                     selectedWuIndex_ = i;
                 }
+                if (ImGui::BeginPopupContextItem("##WuRowCtx")) {
+                    selectedWuIndex_ = i;
+                    ImGui::TextDisabled("%s", EllipsizeUtf8(item.title, 340.0f * uiScale).c_str());
+                    ImGui::Separator();
+                    if (!item.isHidden) {
+                        if (ImGui::MenuItem(
+                                "Скрыть обновление (запретить автоустановку)",
+                                nullptr,
+                                false,
+                                !busy && !item.installedOk)) {
+                            wuManager_.SetUpdatesHiddenAsync(
+                                {item.updateId}, true, MakeLogger(), !wuIncludeSystemUpdates_);
+                        }
+                    } else {
+                        if (ImGui::MenuItem(
+                                "Вернуть обновление (разрешить установку)",
+                                nullptr,
+                                false,
+                                !busy)) {
+                            wuManager_.SetUpdatesHiddenAsync(
+                                {item.updateId}, false, MakeLogger(), !wuIncludeSystemUpdates_);
+                        }
+                    }
+                    ImGui::Separator();
+                    if (ImGui::MenuItem("Копировать название обновления", nullptr, false, !item.title.empty())) {
+                        ImGui::SetClipboardText(item.title.c_str());
+                    }
+                    if (ImGui::MenuItem("Копировать Update ID", nullptr, false, !item.updateId.empty())) {
+                        ImGui::SetClipboardText(item.updateId.c_str());
+                    }
+                    ImGui::EndPopup();
+                }
                 if (shownTitle != item.title && isAppForeground &&
                     ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                     ImGui::SetTooltip("%s", item.title.c_str());
@@ -2068,9 +2186,12 @@ private:
                 RenderCellText(item.sizeFormatted, true, true);
 
                 ImGui::TableSetColumnIndex(4);
-                const ImVec4 col = item.installedOk
-                                       ? ImVec4(0.20f, 0.83f, 0.60f, 1.00f)
-                                       : ImVec4(0.60f, 0.72f, 0.90f, 1.00f);
+                ImVec4 col(0.60f, 0.72f, 0.90f, 1.00f);
+                if (item.installedOk) {
+                    col = ImVec4(0.20f, 0.83f, 0.60f, 1.00f);
+                } else if (item.isHidden) {
+                    col = ImVec4(0.58f, 0.68f, 0.86f, 1.00f);
+                }
                 RenderStatusBadge(col, item.statusText.c_str(), true);
 
                 ImGui::PopID();
@@ -3268,6 +3389,7 @@ private:
     bool wuSortDirty_{false};
     bool wuRestoreBefore_{true};
     bool wuIncludeSystemUpdates_{false};
+    bool wuShowHidden_{false};
 
     // Local INF & DriverStore backup UI state
     int localSectionIndex_{0};

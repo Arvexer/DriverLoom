@@ -666,10 +666,14 @@ void WindowsUpdateManager::SetUpdateSelected(const std::string& updateId, bool s
     }
 }
 
-void WindowsUpdateManager::SelectAll(bool selected) {
+void WindowsUpdateManager::SelectAll(bool selected, bool includeHidden) {
     std::lock_guard<std::mutex> lock(impl_->dataMutex);
     for (auto& item : impl_->updates) {
-        item.selected = selected;
+        if (!selected) {
+            item.selected = false;
+        } else if (includeHidden || !item.isHidden) {
+            item.selected = true;
+        }
     }
 }
 
@@ -717,7 +721,10 @@ void WindowsUpdateManager::StartSearchAsync(LogCallback onLog, bool driversOnly)
             return;
         }
 
-        const wchar_t* queryW = driversOnly ? L"IsInstalled=0 and Type='Driver'" : L"IsInstalled=0";
+        const wchar_t* queryW =
+            driversOnly
+                ? L"IsInstalled=0 and Type='Driver' and IsHidden=0 or IsInstalled=0 and Type='Driver' and IsHidden=1"
+                : L"IsInstalled=0 and IsHidden=0 or IsInstalled=0 and IsHidden=1";
         if (log) {
             log(LogLevel::Info,
                 driversOnly
@@ -844,6 +851,10 @@ void WindowsUpdateManager::StartSearchAsync(LogCallback onLog, bool driversOnly)
                 if (SUCCEEDED(upd->get_IsDownloaded(&downloaded))) {
                     item.isDownloaded = (downloaded == VARIANT_TRUE);
                 }
+                VARIANT_BOOL hidden = VARIANT_FALSE;
+                if (SUCCEEDED(upd->get_IsHidden(&hidden))) {
+                    item.isHidden = (hidden == VARIANT_TRUE);
+                }
 
                 item.driverModel = TryGetDispatchStringProperty(upd.Get(), L"DriverModel");
                 item.driverManufacturer = TryGetDispatchStringProperty(upd.Get(), L"DriverManufacturer");
@@ -864,8 +875,11 @@ void WindowsUpdateManager::StartSearchAsync(LogCallback onLog, bool driversOnly)
                     }
                 }
 
-                item.statusText = item.isDownloaded ? "Загружен (готов к установке)" : "Доступен";
-                item.selected = true;
+                item.statusText =
+                    item.isHidden
+                        ? "Скрыто (заблокировано)"
+                        : (item.isDownloaded ? "Загружен (готов к установке)" : "Доступен");
+                item.selected = !item.isHidden;
                 found.push_back(std::move(item));
             }
         }
@@ -1210,7 +1224,7 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
         hr = RunAsyncSearch(
             session,
             searcher,
-            L"IsInstalled=0",
+            L"IsInstalled=0 and IsHidden=0 or IsInstalled=0 and IsHidden=1",
             false,
             kSearchOfflineTimeout,
             cancelFlag,
@@ -1795,6 +1809,233 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
         outProgress->store(1.0f);
     }
     return summary;
+}
+
+bool WindowsUpdateManager::SetUpdatesHiddenSync(
+    const std::vector<std::string>& updateIds,
+    bool hide,
+    const LogCallback& onLog,
+    bool driversOnly) {
+    (void)driversOnly;
+    if (updateIds.empty()) {
+        return false;
+    }
+
+    CoInitGuard comInit(COINIT_MULTITHREADED);
+    if (!comInit.Succeeded()) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Ошибка CoInitializeEx (MTA): " + FormatHResult(comInit.Result()));
+        }
+        return false;
+    }
+
+    ComPtr<IUpdateSession> session;
+    HRESULT hr = CoCreateInstance(
+        CLSID_UpdateSession,
+        nullptr,
+        CLSCTX_INPROC_SERVER,
+        IID_IUpdateSession,
+        reinterpret_cast<void**>(session.Put()));
+    if (FAILED(hr) || !session) {
+        if (onLog) {
+            onLog(LogLevel::Error, "Не удалось создать IUpdateSession: " + FormatHResult(hr));
+        }
+        return false;
+    }
+
+    BstrGuard appId(L"DriverLoom");
+    session->put_ClientApplicationID(appId.Get());
+
+    ComPtr<IUpdateSearcher> searcher;
+    hr = session->CreateUpdateSearcher(searcher.Put());
+    if (FAILED(hr) || !searcher) {
+        if (onLog) {
+            onLog(LogLevel::Error, "Не удалось создать IUpdateSearcher: " + FormatHResult(hr));
+        }
+        return false;
+    }
+
+    std::set<std::string> requestedSet(updateIds.begin(), updateIds.end());
+    std::map<std::string, ComPtr<IUpdate>> matchedById;
+    auto collectMatches = [&](ISearchResult* sr) {
+        if (sr == nullptr) return;
+        ComPtr<IUpdateCollection> coll;
+        if (FAILED(sr->get_Updates(coll.Put())) || !coll) return;
+        LONG cnt = 0;
+        coll->get_Count(&cnt);
+        for (LONG i = 0; i < cnt; ++i) {
+            ComPtr<IUpdate> upd;
+            if (FAILED(coll->get_Item(i, upd.Put())) || !upd) continue;
+            const std::string uid = GetUpdateIdentityId(upd.Get());
+            if (!uid.empty() && requestedSet.count(uid) > 0 &&
+                matchedById.find(uid) == matchedById.end()) {
+                matchedById.emplace(uid, std::move(upd));
+            }
+        }
+    };
+
+    const wchar_t* criteriaW = L"IsInstalled=0 and IsHidden=0 or IsInstalled=0 and IsHidden=1";
+    {
+        ComPtr<ISearchResult> offlineRes;
+        bool aborted = true;
+        JobWaitOutcome outcome = JobWaitOutcome::Completed;
+        hr = RunAsyncSearch(
+            session,
+            searcher,
+            criteriaW,
+            false,
+            kSearchOfflineTimeout,
+            nullptr,
+            offlineRes,
+            &aborted,
+            &outcome);
+        if (SUCCEEDED(hr) && offlineRes) {
+            collectMatches(offlineRes.Get());
+        }
+    }
+    if (matchedById.size() < requestedSet.size() && session && searcher) {
+        ComPtr<ISearchResult> onlineRes;
+        bool aborted = true;
+        JobWaitOutcome outcome = JobWaitOutcome::Completed;
+        hr = RunAsyncSearch(
+            session,
+            searcher,
+            criteriaW,
+            true,
+            kSearchOnlineTimeout,
+            nullptr,
+            onlineRes,
+            &aborted,
+            &outcome);
+        if (SUCCEEDED(hr) && onlineRes) {
+            collectMatches(onlineRes.Get());
+        }
+    }
+
+    size_t changedCount = 0;
+    size_t failedCount = 0;
+    for (const auto& uid : updateIds) {
+        auto it = matchedById.find(uid);
+        if (it == matchedById.end()) {
+            ++failedCount;
+            if (onLog) {
+                onLog(LogLevel::Warning,
+                      "Обновление " + uid + " больше не найдено в кэше Windows Update.");
+            }
+            continue;
+        }
+        IUpdate* upd = it->second.Get();
+        const std::string title = GetUpdateTitle(upd);
+        const HRESULT hrPut = upd->put_IsHidden(hide ? VARIANT_TRUE : VARIANT_FALSE);
+        if (SUCCEEDED(hrPut)) {
+            ++changedCount;
+            if (onLog) {
+                onLog(LogLevel::Success,
+                      std::string(hide ? "Скрыто обновление Windows Update: "
+                                       : "Возвращено обновление Windows Update: ") +
+                          (title.empty() ? uid : title));
+            }
+        } else {
+            ++failedCount;
+            if (onLog) {
+                onLog(LogLevel::Error,
+                      "Не удалось изменить статус скрытия («" +
+                          (title.empty() ? uid : title) + "»): " +
+                          FormatWuErrorDiagnostic(hrPut));
+            }
+        }
+    }
+    return changedCount > 0 && failedCount == 0;
+}
+
+void WindowsUpdateManager::SetUpdatesHiddenAsync(
+    const std::vector<std::string>& updateIds,
+    bool hide,
+    LogCallback onLog,
+    bool driversOnly) {
+    if (IsBusy() || updateIds.empty()) {
+        return;
+    }
+    if (impl_->installThread.joinable()) {
+        impl_->installThread.join();
+    }
+
+    auto setPhase = [state = impl_](const std::string& msg) {
+        std::lock_guard<std::mutex> lock(state->dataMutex);
+        state->phaseMessage = msg;
+    };
+
+    impl_->cancelRequested.store(false);
+    impl_->installing.store(true);
+    impl_->progress.store(0.20f);
+    if (impl_->installDoneEvent.IsValid()) {
+        ResetEvent(impl_->installDoneEvent.Get());
+    }
+    setPhase(hide ? "Скрытие выбранных обновлений..." : "Возврат скрытых обновлений...");
+
+    std::shared_ptr<Impl> state = impl_;
+    impl_->installThread = std::thread(
+        [state, setPhase, updateIds, hide, driversOnly, log = std::move(onLog)]() {
+            struct DoneSignal {
+                HANDLE ev;
+                std::atomic<bool>& flag;
+                ~DoneSignal() {
+                    flag.store(false);
+                    if (ev != nullptr) SetEvent(ev);
+                }
+            } guard{state->installDoneEvent.Get(), state->installing};
+
+            bool ok = false;
+            if (IsProcessElevated()) {
+                ok = SetUpdatesHiddenSync(updateIds, hide, log, driversOnly);
+            } else {
+                const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_wuhide");
+                std::wstring args =
+                    std::wstring(hide ? L"--cli-wu-hide \"" : L"--cli-wu-unhide \"") +
+                    Utf8ToWide(JoinUpdateIds(updateIds)) + L"\"";
+                if (driversOnly) {
+                    args += L" --drivers-only";
+                }
+                args += L" --log \"" + tempLog.wstring() + L"\"";
+
+                const ElevatedRunResult run = ExecuteElevatedSelf(args, true, &tempLog, log);
+                std::error_code ec;
+                std::filesystem::remove(tempLog, ec);
+                if (!run.launched) {
+                    if (log) {
+                        log(run.launchError == ERROR_CANCELLED ? LogLevel::Warning : LogLevel::Error,
+                            run.launchError == ERROR_CANCELLED
+                                ? "Операция скрытия отменена пользователем (UAC)."
+                                : "Не удалось запустить elevated-процесс: " +
+                                      FormatWin32Error(run.launchError));
+                    }
+                } else {
+                    ok = (run.exitCode == 0);
+                }
+            }
+
+            if (ok) {
+                std::set<std::string> idSet(updateIds.begin(), updateIds.end());
+                {
+                    std::lock_guard<std::mutex> lock(state->dataMutex);
+                    for (auto& item : state->updates) {
+                        if (idSet.count(item.updateId) > 0) {
+                            item.isHidden = hide;
+                            item.selected = !hide;
+                            item.statusText =
+                                hide ? "Скрыто (заблокировано)"
+                                     : (item.isDownloaded ? "Загружен (готов к установке)" : "Доступен");
+                        }
+                    }
+                }
+                state->generation.fetch_add(1);
+                setPhase(hide ? "Выбранные обновления скрыты" : "Обновления возвращены в список");
+            } else {
+                setPhase(hide ? "Не удалось скрыть обновления" : "Не удалось вернуть обновления");
+            }
+            state->progress.store(1.0f);
+        });
 }
 
 } // namespace hdm

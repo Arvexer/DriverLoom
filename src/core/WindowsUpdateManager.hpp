@@ -24,6 +24,7 @@ struct DriverUpdateItem {
     uint64_t maxSizeBytes{0};
     std::string sizeFormatted;
     bool isDownloaded{false};
+    bool isHidden{false};
     bool selected{true};
     bool installedOk{false};
     bool rebootRequired{false};
@@ -72,7 +73,19 @@ public:
 
     std::vector<DriverUpdateItem> GetUpdatesSnapshot() const;
     void SetUpdateSelected(const std::string& updateId, bool selected);
-    void SelectAll(bool selected);
+    void SelectAll(bool selected, bool includeHidden = false);
+
+    void SetUpdatesHiddenAsync(
+        const std::vector<std::string>& updateIds,
+        bool hide,
+        LogCallback onLog,
+        bool driversOnly = true);
+
+    static bool SetUpdatesHiddenSync(
+        const std::vector<std::string>& updateIds,
+        bool hide,
+        const LogCallback& onLog,
+        bool driversOnly = false);
 
     // Synchronous execution used directly (when elevated) or inside the elevated CLI worker.
     static WuInstallSummary DownloadAndInstallSync(
