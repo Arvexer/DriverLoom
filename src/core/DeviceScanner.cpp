@@ -1,12 +1,15 @@
 #include "core/DeviceScanner.hpp"
 
 #include <cfgmgr32.h>
+#include <dxgi.h>
 #include <newdev.h>
 #include <setupapi.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 
@@ -244,6 +247,31 @@ void ReadMonitorEdid(const std::wstring& instanceId, DeviceInfo& out) {
             out.name = out.edidModel;
         }
     }
+
+    // Physical screen size in centimeters at EDID bytes 21..22 -> diagonal in inches
+    int diagInches = 0;
+    if (edid[21] >= 15 && edid[21] <= 200 && edid[22] >= 10 && edid[22] <= 150) {
+        const double diag =
+            std::hypot(static_cast<double>(edid[21]), static_cast<double>(edid[22])) / 2.54;
+        diagInches = static_cast<int>(std::lround(diag));
+    }
+    const std::string diagSuffix =
+        (diagInches > 0) ? (" (" + std::to_string(diagInches) + "\")") : std::string();
+
+    // Preferred timing descriptor at offset 54..71 (pixel clock != 0)
+    if (edid[54] != 0 || edid[55] != 0) {
+        const unsigned hActive =
+            static_cast<unsigned>(edid[56]) | ((static_cast<unsigned>(edid[58] & 0xF0u)) << 4);
+        const unsigned vActive =
+            static_cast<unsigned>(edid[59]) | ((static_cast<unsigned>(edid[61] & 0xF0u)) << 4);
+        if (hActive >= 640 && hActive <= 16384 && vActive >= 480 && vActive <= 8640) {
+            out.displayModeText =
+                std::to_string(hActive) + "x" + std::to_string(vActive) + diagSuffix;
+        }
+    }
+    if (out.displayModeText.empty() && diagInches > 0) {
+        out.displayModeText = std::to_string(diagInches) + "\"";
+    }
 }
 
 std::string MapUsbVendorBrand(std::string_view vidUpper, std::string_view devName) {
@@ -341,12 +369,190 @@ std::wstring BuildLowerSearchIndex(const DeviceInfo& d) {
     const std::string combined =
         d.name + "\n" + d.manufacturer + "\n" + d.deviceClass + "\n" +
         d.driverVersion + "\n" + d.hardwareId + "\n" + d.edidModel + "\n" +
-        d.peripheralBrand + "\n" + d.infName;
+        d.peripheralBrand + "\n" + d.infName + "\n" + d.displayModeText + "\n" +
+        d.connectedGpuName;
     std::wstring wide = Utf8ToWide(combined);
     if (!wide.empty()) {
         CharLowerBuffW(wide.data(), static_cast<DWORD>(wide.size()));
     }
     return wide;
+}
+
+std::string ExtractInstanceIdFromDisplayInterface(std::string_view ifPath) {
+    if (ifPath.empty()) {
+        return {};
+    }
+    if (ifPath.rfind("\\\\?\\", 0) == 0) {
+        ifPath.remove_prefix(4);
+    }
+    const size_t guidSep = ifPath.rfind("#{");
+    if (guidSep != std::string_view::npos) {
+        ifPath = ifPath.substr(0, guidSep);
+    }
+    std::string out(ifPath);
+    for (char& ch : out) {
+        if (ch == '#') {
+            ch = '\\';
+        }
+    }
+    return out;
+}
+
+void ApplyActiveDisplayMode(
+    DeviceInfo& d,
+    DWORD width,
+    DWORD height,
+    DWORD freqHz,
+    const std::string& gpuName) {
+    std::string diagPart;
+    const size_t openParen = d.displayModeText.find('(');
+    if (openParen != std::string::npos && d.displayModeText.back() == ')') {
+        diagPart = " " + d.displayModeText.substr(openParen);
+    } else if (!d.displayModeText.empty() && d.displayModeText.back() == '"') {
+        diagPart = " (" + d.displayModeText + ")";
+    }
+
+    if (freqHz > 0) {
+        d.displayModeText = std::to_string(width) + "x" + std::to_string(height) +
+                            " @ " + std::to_string(freqHz) + " Hz" + diagPart;
+    } else {
+        d.displayModeText = std::to_string(width) + "x" + std::to_string(height) + diagPart;
+    }
+    if (!gpuName.empty()) {
+        d.connectedGpuName = gpuName;
+    }
+}
+
+void EnrichMonitorsAndGpus(std::vector<DeviceInfo>& devices) {
+    CoInitGuard coInit(COINIT_MULTITHREADED);
+
+    // 1. DXGI Dedicated Video Memory (VRAM) for GPU devices
+    {
+        ComPtr<IDXGIFactory1> factory;
+        if (SUCCEEDED(CreateDXGIFactory1(
+                __uuidof(IDXGIFactory1),
+                reinterpret_cast<void**>(factory.Put()))) &&
+            factory) {
+            for (UINT i = 0;; ++i) {
+                ComPtr<IDXGIAdapter1> adapter;
+                if (factory->EnumAdapters1(i, adapter.Put()) == DXGI_ERROR_NOT_FOUND) {
+                    break;
+                }
+                DXGI_ADAPTER_DESC1 desc{};
+                if (FAILED(adapter->GetDesc1(&desc))) {
+                    continue;
+                }
+                if ((desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE) != 0) {
+                    continue;
+                }
+                const uint64_t vram = static_cast<uint64_t>(desc.DedicatedVideoMemory);
+                if (vram < (64ull * 1024ull * 1024ull)) {
+                    continue;
+                }
+
+                const std::string adapterDescUtf8 = WideToUtf8(desc.Description);
+                bool matchedByPciId = false;
+                for (auto& d : devices) {
+                    if (ToLowerAscii(d.deviceClass) != "display" || d.pciVendorId.empty()) {
+                        continue;
+                    }
+                    const std::string upperHw = ToUpperAscii(d.hardwareId);
+                    const std::string devHex = ExtractHex4AfterTag(upperHw, "DEV_");
+                    if (devHex.empty()) {
+                        continue;
+                    }
+                    const unsigned long pnpVen = std::strtoul(d.pciVendorId.c_str(), nullptr, 16);
+                    const unsigned long pnpDev = std::strtoul(devHex.c_str(), nullptr, 16);
+                    if (pnpVen == desc.VendorId && pnpDev == desc.DeviceId) {
+                        if (d.gpuVramBytes == 0) {
+                            d.gpuVramBytes = vram;
+                        }
+                        matchedByPciId = true;
+                    }
+                }
+                if (!matchedByPciId && !adapterDescUtf8.empty()) {
+                    for (auto& d : devices) {
+                        if (ToLowerAscii(d.deviceClass) == "display" && d.gpuVramBytes == 0 &&
+                            (ContainsCaseInsensitive(d.name, adapterDescUtf8) ||
+                             ContainsCaseInsensitive(adapterDescUtf8, d.name))) {
+                            d.gpuVramBytes = vram;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Active GDI display modes (resolution, Hz, connected GPU) for Monitor devices
+    DISPLAY_DEVICEW adapterDev{};
+    adapterDev.cb = sizeof(DISPLAY_DEVICEW);
+    for (DWORD dispIdx = 0; EnumDisplayDevicesW(nullptr, dispIdx, &adapterDev, 0); ++dispIdx) {
+        if ((adapterDev.StateFlags & DISPLAY_DEVICE_ACTIVE) != 0) {
+            DEVMODEW dm{};
+            dm.dmSize = sizeof(DEVMODEW);
+            if (EnumDisplaySettingsExW(adapterDev.DeviceName, ENUM_CURRENT_SETTINGS, &dm, 0) &&
+                dm.dmPelsWidth > 0 && dm.dmPelsHeight > 0) {
+                const std::string gpuStr = WideToUtf8(adapterDev.DeviceString);
+                DISPLAY_DEVICEW monDev{};
+                monDev.cb = sizeof(DISPLAY_DEVICEW);
+                for (DWORD monIdx = 0;
+                     EnumDisplayDevicesW(
+                         adapterDev.DeviceName,
+                         monIdx,
+                         &monDev,
+                         EDD_GET_DEVICE_INTERFACE_NAME);
+                     ++monIdx) {
+                    if ((monDev.StateFlags & DISPLAY_DEVICE_ACTIVE) != 0) {
+                        const std::string ifPath = WideToUtf8(monDev.DeviceID);
+                        const std::string monInstance = ExtractInstanceIdFromDisplayInterface(ifPath);
+                        const std::string upperInst = ToUpperAscii(monInstance);
+
+                        bool matched = false;
+                        if (!upperInst.empty()) {
+                            for (auto& d : devices) {
+                                if (d.category != DeviceCategory::Monitor || d.instanceId.empty()) {
+                                    continue;
+                                }
+                                if (ToUpperAscii(d.instanceId) == upperInst) {
+                                    ApplyActiveDisplayMode(
+                                        d, dm.dmPelsWidth, dm.dmPelsHeight, dm.dmDisplayFrequency, gpuStr);
+                                    matched = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!matched && upperInst.rfind("DISPLAY\\", 0) == 0) {
+                            const size_t secondSlash = upperInst.find('\\', 8);
+                            const std::string hwPrefix =
+                                (secondSlash != std::string::npos)
+                                    ? upperInst.substr(0, secondSlash)
+                                    : upperInst;
+                            if (hwPrefix.size() > 8) {
+                                for (auto& d : devices) {
+                                    if (d.category == DeviceCategory::Monitor &&
+                                        d.connectedGpuName.empty() &&
+                                        ContainsCaseInsensitive(d.hardwareId, hwPrefix)) {
+                                        ApplyActiveDisplayMode(
+                                            d,
+                                            dm.dmPelsWidth,
+                                            dm.dmPelsHeight,
+                                            dm.dmDisplayFrequency,
+                                            gpuStr);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    std::memset(&monDev, 0, sizeof(monDev));
+                    monDev.cb = sizeof(DISPLAY_DEVICEW);
+                }
+            }
+        }
+        std::memset(&adapterDev, 0, sizeof(adapterDev));
+        adapterDev.cb = sizeof(DISPLAY_DEVICEW);
+    }
 }
 
 bool OpenDeviceByInstanceId(
@@ -549,8 +755,12 @@ std::vector<DeviceInfo> DeviceScanner::ScanSynchronously(const LogCallback& onLo
             info.statusText = "Базовый монитор (monitor.inf)";
         }
 
-        info.searchIndexLower = BuildLowerSearchIndex(info);
         list.push_back(std::move(info));
+    }
+
+    EnrichMonitorsAndGpus(list);
+    for (auto& d : list) {
+        d.searchIndexLower = BuildLowerSearchIndex(d);
     }
 
     std::sort(list.begin(), list.end(), [](const DeviceInfo& a, const DeviceInfo& b) {

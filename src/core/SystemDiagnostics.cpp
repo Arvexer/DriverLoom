@@ -521,7 +521,10 @@ std::vector<ControllerDiagnosticItem> AnalyzeKeyControllers(
 
         ControllerDiagnosticItem item;
         item.role = role;
-        item.deviceName = d.name;
+        item.deviceName =
+            (clsLower == "display" && d.gpuVramBytes >= (64ull * 1024ull * 1024ull))
+                ? (d.name + "  [" + FormatBytes(d.gpuVramBytes) + "]")
+                : d.name;
         item.manufacturer = d.manufacturer;
         item.driverVersion = d.driverVersion;
         item.driverDate = d.driverDate;
@@ -1774,13 +1777,17 @@ std::string BuildMarkdownReport(
     } else {
         oss << "| " << Tr("Название", "Назва", "Name")
             << " | " << Tr("Модель (EDID)", "Модель (EDID)", "Model (EDID)")
+            << " | " << Tr("Режим", "Режим", "Mode")
+            << " | GPU"
             << " | " << Tr("Производитель", "Виробник", "Manufacturer")
             << " | " << Tr("Драйвер / Дата", "Драйвер / Дата", "Driver / Date")
             << " | INF | " << Tr("Статус", "Статус", "Status") << " |\n";
-        oss << "| --- | --- | --- | --- | --- | --- |\n";
+        oss << "| --- | --- | --- | --- | --- | --- | --- | --- |\n";
         for (const DeviceInfo* m : s.monitors) {
             oss << "| " << MdCell(m->name)
                 << " | " << MdCell(m->edidModel)
+                << " | " << MdCell(m->displayModeText)
+                << " | " << MdCell(m->connectedGpuName)
                 << " | " << MdCell(m->manufacturer)
                 << " | " << MdCell(FormatVersionAndDate(m->driverVersion, m->driverDate))
                 << " | " << MdCell(m->infName)
@@ -1921,6 +1928,8 @@ std::string BuildTextReport(
         for (const DeviceInfo* m : s.monitors) {
             oss << "  - " << TxtVal(m->name)
                 << " | EDID: " << TxtVal(m->edidModel)
+                << " | " << Tr("Режим: ", "Режим: ", "Mode: ") << TxtVal(m->displayModeText)
+                << " | GPU: " << TxtVal(m->connectedGpuName)
                 << " | " << Tr("Производитель: ", "Виробник: ", "Manufacturer: ") << TxtVal(m->manufacturer)
                 << " | " << Tr("Версия: ", "Версія: ", "Version: ") << TxtVal(FormatVersionAndDate(m->driverVersion, m->driverDate))
                 << " | INF: " << TxtVal(m->infName)
@@ -2037,6 +2046,8 @@ std::string BuildJsonReport(
             << "      \"name\": \"" << JsonEscape(m->name) << "\",\n"
             << "      \"edidModel\": \"" << JsonEscape(m->edidModel) << "\",\n"
             << "      \"edidManufacturer\": \"" << JsonEscape(m->edidManufacturer) << "\",\n"
+            << "      \"displayMode\": \"" << JsonEscape(m->displayModeText) << "\",\n"
+            << "      \"connectedGpu\": \"" << JsonEscape(m->connectedGpuName) << "\",\n"
             << "      \"manufacturer\": \"" << JsonEscape(m->manufacturer) << "\",\n"
             << "      \"driverVersion\": \"" << JsonEscape(m->driverVersion) << "\",\n"
             << "      \"driverDate\": \"" << JsonEscape(m->driverDate) << "\",\n"

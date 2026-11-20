@@ -2637,7 +2637,13 @@ private:
                     // Col 1: Device Name
                     ImGui::TableSetColumnIndex(1);
                     const std::string devNameShown = hdm::TrDyn(dev.name);
-                    RenderCellText(devNameShown);
+                    std::string devTitleCell = devNameShown;
+                    if (!dev.displayModeText.empty()) {
+                        devTitleCell += "  [" + dev.displayModeText + "]";
+                    } else if (dev.gpuVramBytes >= (64ull * 1024ull * 1024ull)) {
+                        devTitleCell += "  [VRAM: " + hdm::FormatBytes(dev.gpuVramBytes) + "]";
+                    }
+                    RenderCellText(devTitleCell);
                     if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                         ImGui::BeginTooltip();
                         ImGui::PushTextWrapPos(460.0f * uiScale);
@@ -2669,6 +2675,21 @@ private:
                             ImGui::Text(
                                 hdm::Tr("Модель (EDID): %s", "Модель (EDID): %s", "Model (EDID): %s"),
                                 dev.edidModel.c_str());
+                        }
+                        if (!dev.displayModeText.empty()) {
+                            ImGui::Text(
+                                hdm::Tr("Режим: %s", "Режим: %s", "Mode: %s"),
+                                dev.displayModeText.c_str());
+                            if (!dev.connectedGpuName.empty()) {
+                                ImGui::TextDisabled(
+                                    hdm::Tr("Видеокарта: %s", "Відеокарта: %s", "GPU: %s"),
+                                    dev.connectedGpuName.c_str());
+                            }
+                        }
+                        if (dev.gpuVramBytes >= (64ull * 1024ull * 1024ull)) {
+                            ImGui::Text(
+                                hdm::Tr("Видеопамять (VRAM): %s", "Відеопам'ять (VRAM): %s", "Video Memory (VRAM): %s"),
+                                hdm::FormatBytes(dev.gpuVramBytes).c_str());
                         }
                         ImGui::PopTextWrapPos();
                         ImGui::EndTooltip();
@@ -2737,7 +2758,7 @@ private:
                 PopFontSafe(g_fontSecondaryHeader);
             }
             ImGui::SameLine(0.0f, 12.0f);
-            const std::string metaLine =
+            std::string metaLine =
                 g_isAdvancedMode
                     ? (std::string(hdm::Tr("Статус: ", "Статус: ", "Status: ")) +
                        hdm::TrDyn(selectedDev->statusText) +
@@ -2750,6 +2771,15 @@ private:
                        (selectedDev->deviceClass.empty() ? "—" : selectedDev->deviceClass) +
                        hdm::Tr("  |  Производитель: ", "  |  Виробник: ", "  |  Vendor: ") +
                        (selectedDev->manufacturer.empty() ? "—" : selectedDev->manufacturer));
+            if (!selectedDev->displayModeText.empty()) {
+                metaLine += std::string(hdm::Tr("  |  Режим: ", "  |  Режим: ", "  |  Mode: ")) +
+                            selectedDev->displayModeText;
+                if (!selectedDev->connectedGpuName.empty()) {
+                    metaLine += "  |  GPU: " + selectedDev->connectedGpuName;
+                }
+            } else if (selectedDev->gpuVramBytes >= (64ull * 1024ull * 1024ull)) {
+                metaLine += "  |  VRAM: " + hdm::FormatBytes(selectedDev->gpuVramBytes);
+            }
             RenderCellText(metaLine, true);
 
             if (g_isAdvancedMode) {

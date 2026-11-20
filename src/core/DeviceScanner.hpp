@@ -3,6 +3,7 @@
 #include "common/AppCommon.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -57,6 +58,9 @@ struct DeviceInfo {
     bool hasDriver{false};
     bool isGenericMonitorDriver{false};
     std::string statusText;
+    std::string displayModeText;
+    std::string connectedGpuName;
+    uint64_t gpuVramBytes{0};
 };
 
 class DeviceScanner {
