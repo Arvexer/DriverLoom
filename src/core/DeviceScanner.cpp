@@ -1,12 +1,14 @@
 #include "core/DeviceScanner.hpp"
 
 #include <cfgmgr32.h>
+#include <newdev.h>
 #include <setupapi.h>
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 
 namespace hdm {
 
@@ -347,11 +349,86 @@ std::wstring BuildLowerSearchIndex(const DeviceInfo& d) {
     return wide;
 }
 
+bool OpenDeviceByInstanceId(
+    const std::wstring& instanceId,
+    DevInfoSetGuard& outSet,
+    SP_DEVINFO_DATA& outData) {
+    if (instanceId.empty()) {
+        return false;
+    }
+
+    outSet.Reset(SetupDiCreateDeviceInfoList(nullptr, nullptr));
+    if (outSet.IsValid()) {
+        SP_DEVINFO_DATA data{};
+        data.cbSize = sizeof(SP_DEVINFO_DATA);
+        if (SetupDiOpenDeviceInfoW(
+                outSet.Get(), instanceId.c_str(), nullptr, 0, &data)) {
+            outData = data;
+            return true;
+        }
+    }
+
+    outSet.Reset(
+        SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT));
+    if (!outSet.IsValid()) {
+        return false;
+    }
+
+    SP_DEVINFO_DATA data{};
+    data.cbSize = sizeof(SP_DEVINFO_DATA);
+    for (DWORD idx = 0; SetupDiEnumDeviceInfo(outSet.Get(), idx, &data); ++idx) {
+        const std::wstring curId = GetDeviceInstanceIdString(outSet.Get(), &data);
+        if (!curId.empty() && _wcsicmp(curId.c_str(), instanceId.c_str()) == 0) {
+            outData = data;
+            return true;
+        }
+    }
+
+    outSet.Reset();
+    return false;
+}
+
+bool CheckDevNodeNeedsReboot(HDEVINFO devInfoSet, PSP_DEVINFO_DATA devInfoData) {
+    SP_DEVINSTALL_PARAMS_W params{};
+    params.cbSize = sizeof(SP_DEVINSTALL_PARAMS_W);
+    if (!SetupDiGetDeviceInstallParamsW(devInfoSet, devInfoData, &params)) {
+        return false;
+    }
+    return (params.Flags & (DI_NEEDRESTART | DI_NEEDREBOOT)) != 0;
+}
+
+struct NewdevModuleGuard {
+    HMODULE mod{nullptr};
+    ~NewdevModuleGuard() {
+        if (mod != nullptr) {
+            FreeLibrary(mod);
+        }
+    }
+};
+
+using DiRollbackDriverFn = BOOL(WINAPI*)(HDEVINFO, PSP_DEVINFO_DATA, HWND, DWORD, PBOOL);
+using DiUninstallDeviceFn = BOOL(WINAPI*)(HWND, HDEVINFO, PSP_DEVINFO_DATA, DWORD, PBOOL);
+
+const char* DeviceActionDisplayLabel(DeviceAction action) noexcept {
+    switch (action) {
+    case DeviceAction::Restart: return "Перезапуск устройства";
+    case DeviceAction::Enable: return "Включение устройства";
+    case DeviceAction::Disable: return "Отключение устройства";
+    case DeviceAction::RollbackDriver: return "Откат драйвера";
+    case DeviceAction::UninstallDevice: return "Удаление устройства";
+    case DeviceAction::Reenumerate: return "Опрос шины PnP";
+    }
+    return "Операция с устройством";
+}
+
 } // namespace
 
 DeviceScanner::~DeviceScanner() {
     if (worker_.joinable()) {
         worker_.join();
+    }
+    if (actionWorker_.joinable()) {
+        actionWorker_.join();
     }
 }
 
@@ -497,6 +574,318 @@ std::vector<DeviceInfo> DeviceScanner::ScanSynchronously(const LogCallback& onLo
                   ", требуют внимания — " + std::to_string(problemCount) + ".");
     }
     return list;
+}
+
+std::string DeviceScanner::DeviceActionToCliVerb(DeviceAction action) {
+    switch (action) {
+    case DeviceAction::Restart: return "restart";
+    case DeviceAction::Enable: return "enable";
+    case DeviceAction::Disable: return "disable";
+    case DeviceAction::RollbackDriver: return "rollback";
+    case DeviceAction::UninstallDevice: return "uninstall";
+    case DeviceAction::Reenumerate: return "rescan";
+    }
+    return {};
+}
+
+bool DeviceScanner::ParseDeviceActionCliVerb(const std::string& verb, DeviceAction& outAction) {
+    const std::string lower = ToLowerAscii(verb);
+    if (lower == "restart") {
+        outAction = DeviceAction::Restart;
+        return true;
+    }
+    if (lower == "enable") {
+        outAction = DeviceAction::Enable;
+        return true;
+    }
+    if (lower == "disable") {
+        outAction = DeviceAction::Disable;
+        return true;
+    }
+    if (lower == "rollback") {
+        outAction = DeviceAction::RollbackDriver;
+        return true;
+    }
+    if (lower == "uninstall") {
+        outAction = DeviceAction::UninstallDevice;
+        return true;
+    }
+    if (lower == "rescan") {
+        outAction = DeviceAction::Reenumerate;
+        return true;
+    }
+    return false;
+}
+
+bool DeviceScanner::RunDeviceActionSync(
+    DeviceAction action,
+    const std::string& instanceId,
+    const LogCallback& onLog,
+    bool* outRebootRequired) {
+    if (outRebootRequired != nullptr) {
+        *outRebootRequired = false;
+    }
+
+    if (action == DeviceAction::Reenumerate) {
+        DEVINST rootInst = 0;
+        CONFIGRET cr = CM_Locate_DevNodeW(&rootInst, nullptr, CM_LOCATE_DEVNODE_NORMAL);
+        if (cr == CR_SUCCESS) {
+            cr = CM_Reenumerate_DevNode(rootInst, CM_REENUMERATE_NORMAL);
+        }
+        if (cr != CR_SUCCESS) {
+            if (onLog) {
+                if (cr == CR_ACCESS_DENIED) {
+                    onLog(LogLevel::Error,
+                          "Ошибка опроса шины PnP: требуются права администратора (CR_ACCESS_DENIED).");
+                } else {
+                    char buf[96];
+                    std::snprintf(
+                        buf,
+                        sizeof(buf),
+                        "Ошибка опроса шины PnP (CM_Reenumerate_DevNode: 0x%08lX).",
+                        static_cast<unsigned long>(cr));
+                    onLog(LogLevel::Error, buf);
+                }
+            }
+            return false;
+        }
+        if (onLog) {
+            onLog(LogLevel::Success, "Повторный опрос шины PnP (CM_Reenumerate_DevNode) завершён.");
+        }
+        return true;
+    }
+
+    const std::wstring wInstance = Utf8ToWide(instanceId);
+    if (wInstance.empty()) {
+        if (onLog) {
+            onLog(LogLevel::Error, "Не указан Instance ID устройства.");
+        }
+        return false;
+    }
+
+    DevInfoSetGuard devInfoSet;
+    SP_DEVINFO_DATA devInfoData{};
+    if (!OpenDeviceByInstanceId(wInstance, devInfoSet, devInfoData)) {
+        if (onLog) {
+            onLog(LogLevel::Error, "Устройство с Instance ID «" + instanceId + "» не найдено.");
+        }
+        return false;
+    }
+
+    if (action == DeviceAction::Restart ||
+        action == DeviceAction::Enable ||
+        action == DeviceAction::Disable) {
+        SP_PROPCHANGE_PARAMS pcp{};
+        pcp.ClassInstallHeader.cbSize = sizeof(SP_CLASSINSTALL_HEADER);
+        pcp.ClassInstallHeader.InstallFunction = DIF_PROPERTYCHANGE;
+        pcp.Scope = DICS_FLAG_GLOBAL;
+        pcp.HwProfile = 0;
+        if (action == DeviceAction::Enable) {
+            pcp.StateChange = DICS_ENABLE;
+        } else if (action == DeviceAction::Disable) {
+            pcp.StateChange = DICS_DISABLE;
+        } else {
+            pcp.StateChange = DICS_PROPCHANGE;
+        }
+
+        if (!SetupDiSetClassInstallParamsW(
+                devInfoSet.Get(), &devInfoData, &pcp.ClassInstallHeader, sizeof(pcp)) ||
+            !SetupDiCallClassInstaller(
+                DIF_PROPERTYCHANGE, devInfoSet.Get(), &devInfoData)) {
+            const DWORD err = GetLastError();
+            if (onLog) {
+                onLog(LogLevel::Error,
+                      std::string(DeviceActionDisplayLabel(action)) + " (" + instanceId +
+                          ") завершилось ошибкой: " + FormatWin32Error(err));
+            }
+            return false;
+        }
+
+        const bool rebootNeeded = CheckDevNodeNeedsReboot(devInfoSet.Get(), &devInfoData);
+        if (outRebootRequired != nullptr && rebootNeeded) {
+            *outRebootRequired = true;
+        }
+        if (onLog) {
+            std::string okMsg;
+            if (action == DeviceAction::Restart) {
+                okMsg = "Устройство перезапущено (" + instanceId + ").";
+            } else if (action == DeviceAction::Enable) {
+                okMsg = "Устройство включено (" + instanceId + ").";
+            } else {
+                okMsg = "Устройство отключено (" + instanceId + ").";
+            }
+            if (rebootNeeded) {
+                okMsg += " Требуется перезагрузка Windows.";
+            }
+            onLog(LogLevel::Success, okMsg);
+        }
+        return true;
+    }
+
+    if (action == DeviceAction::RollbackDriver) {
+        NewdevModuleGuard newdev{
+            LoadLibraryExW(L"newdev.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+        DiRollbackDriverFn diRollbackDriver = nullptr;
+        if (newdev.mod != nullptr) {
+            diRollbackDriver = reinterpret_cast<DiRollbackDriverFn>(
+                reinterpret_cast<void*>(GetProcAddress(newdev.mod, "DiRollbackDriver")));
+        }
+        if (diRollbackDriver == nullptr) {
+            const DWORD err = GetLastError();
+            if (onLog) {
+                onLog(LogLevel::Error,
+                      "Не удалось загрузить DiRollbackDriver из newdev.dll: " +
+                          FormatWin32Error(err));
+            }
+            return false;
+        }
+
+        BOOL needReboot = FALSE;
+        if (!diRollbackDriver(
+                devInfoSet.Get(), &devInfoData, nullptr, ROLLBACK_FLAG_NO_UI, &needReboot)) {
+            const DWORD err = GetLastError();
+            if (onLog) {
+                if (err == ERROR_NO_MORE_ITEMS) {
+                    onLog(LogLevel::Warning,
+                          "Для устройства «" + instanceId +
+                              "» нет сохранённой предыдущей версии драйвера для отката.");
+                } else {
+                    onLog(LogLevel::Error,
+                          "Не удалось откатить драйвер (" + instanceId + "): " +
+                              FormatWin32Error(err));
+                }
+            }
+            return false;
+        }
+        const bool rebootNeeded =
+            (needReboot != FALSE) || CheckDevNodeNeedsReboot(devInfoSet.Get(), &devInfoData);
+        if (outRebootRequired != nullptr && rebootNeeded) {
+            *outRebootRequired = true;
+        }
+        if (onLog) {
+            onLog(LogLevel::Success,
+                  "Выполнен откат драйвера для «" + instanceId + "»" +
+                      (rebootNeeded ? " (требуется перезагрузка Windows)." : "."));
+        }
+        return true;
+    }
+
+    if (action == DeviceAction::UninstallDevice) {
+        NewdevModuleGuard newdev{
+            LoadLibraryExW(L"newdev.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+        DiUninstallDeviceFn diUninstallDevice = nullptr;
+        if (newdev.mod != nullptr) {
+            diUninstallDevice = reinterpret_cast<DiUninstallDeviceFn>(
+                reinterpret_cast<void*>(GetProcAddress(newdev.mod, "DiUninstallDevice")));
+        }
+        if (diUninstallDevice == nullptr) {
+            const DWORD err = GetLastError();
+            if (onLog) {
+                onLog(LogLevel::Error,
+                      "Не удалось загрузить DiUninstallDevice из newdev.dll: " +
+                          FormatWin32Error(err));
+            }
+            return false;
+        }
+
+        BOOL needReboot = FALSE;
+        if (!diUninstallDevice(nullptr, devInfoSet.Get(), &devInfoData, 0, &needReboot)) {
+            const DWORD err = GetLastError();
+            if (onLog) {
+                onLog(LogLevel::Error,
+                      "Не удалось удалить устройство (" + instanceId + "): " +
+                          FormatWin32Error(err));
+            }
+            return false;
+        }
+        const bool rebootNeeded =
+            (needReboot != FALSE) || CheckDevNodeNeedsReboot(devInfoSet.Get(), &devInfoData);
+        if (outRebootRequired != nullptr && rebootNeeded) {
+            *outRebootRequired = true;
+        }
+        if (onLog) {
+            onLog(LogLevel::Success,
+                  "Устройство удалено (" + instanceId +
+                      "). Для повторного обнаружения нажмите «Обновить PnP»" +
+                      (rebootNeeded ? " (требуется перезагрузка)." : "."));
+        }
+        return true;
+    }
+
+    return false;
+}
+
+void DeviceScanner::RunDeviceActionAsync(
+    DeviceAction action,
+    const std::string& instanceId,
+    const std::string& deviceName,
+    LogCallback onLog,
+    ActionCallback onComplete) {
+    if (IsBusy()) {
+        return;
+    }
+    runningAction_.store(true);
+    if (actionWorker_.joinable()) {
+        actionWorker_.join();
+    }
+
+    actionWorker_ = std::thread(
+        [this,
+         action,
+         instanceId,
+         deviceName,
+         log = std::move(onLog),
+         cb = std::move(onComplete)]() {
+            const std::string label = DeviceActionDisplayLabel(action);
+            if (log) {
+                log(LogLevel::Info,
+                    label + (deviceName.empty() ? std::string("...") : (": " + deviceName + "...")));
+            }
+
+            bool ok = false;
+            bool rebootReq = false;
+            if (IsProcessElevated()) {
+                ok = RunDeviceActionSync(action, instanceId, log, &rebootReq);
+            } else {
+                const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_dev_");
+                std::wstring args =
+                    L"--cli-device-action " + Utf8ToWide(DeviceActionToCliVerb(action));
+                if (!instanceId.empty()) {
+                    args += L" --instance \"" + Utf8ToWide(instanceId) + L"\"";
+                }
+                args += L" --log \"" + tempLog.wstring() + L"\"";
+
+                const ElevatedRunResult res =
+                    ExecuteElevatedSelf(args, true, &tempLog, log);
+                std::error_code ec;
+                std::filesystem::remove(tempLog, ec);
+
+                if (!res.launched) {
+                    if (log) {
+                        log(res.launchError == ERROR_CANCELLED ? LogLevel::Warning : LogLevel::Error,
+                            res.launchError == ERROR_CANCELLED
+                                ? "Операция с устройством отменена пользователем (UAC)."
+                                : "Не удалось запустить модуль управления устройствами: " +
+                                      FormatWin32Error(res.launchError));
+                    }
+                } else {
+                    rebootReq = (res.exitCode == 2);
+                    ok = (res.exitCode == 0 || res.exitCode == 2);
+                }
+            }
+
+            auto refreshed = ScanSynchronously(nullptr);
+            {
+                std::lock_guard<std::mutex> lock(dataMutex_);
+                devices_ = std::move(refreshed);
+            }
+            generation_.fetch_add(1);
+            runningAction_.store(false);
+
+            if (cb) {
+                cb(ok, rebootReq);
+            }
+        });
 }
 
 } // namespace hdm

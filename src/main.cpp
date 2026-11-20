@@ -10,6 +10,7 @@
 #include "imgui_impl_dx11.h"
 #include "imgui_impl_win32.h"
 
+#include <cfgmgr32.h>
 #include <d3d11.h>
 #include <dxgi.h>
 #include <shellapi.h>
@@ -553,10 +554,12 @@ int RunCliModeIfRequested() {
         ResetWuCache,
         SfcScan,
         DismCheck,
-        DismRestore
+        DismRestore,
+        DeviceAction
     };
     Mode mode = Mode::None;
     std::wstring targetArg;
+    std::wstring instanceArg;
     std::wstring logPath;
     std::wstring cancelFilePath;
     bool forceInf = false;
@@ -581,6 +584,11 @@ int RunCliModeIfRequested() {
         } else if (arg == L"--cli-enable-service" && i + 1 < argc) {
             mode = Mode::EnableService;
             targetArg = argv[++i];
+        } else if (arg == L"--cli-device-action" && i + 1 < argc) {
+            mode = Mode::DeviceAction;
+            targetArg = argv[++i];
+        } else if (arg == L"--instance" && i + 1 < argc) {
+            instanceArg = argv[++i];
         } else if (arg == L"--cli-reset-wucache") {
             mode = Mode::ResetWuCache;
         } else if (arg == L"--cli-sfc") {
@@ -671,6 +679,22 @@ int RunCliModeIfRequested() {
 
     if (mode == Mode::ResetWuCache) {
         return hdm::SystemDiagnostics::ResetWuDownloadCacheSync(fileLogger) ? 0 : 1;
+    }
+
+    if (mode == Mode::DeviceAction) {
+        hdm::DeviceAction devAct = hdm::DeviceAction::Restart;
+        if (!hdm::DeviceScanner::ParseDeviceActionCliVerb(
+                hdm::WideToUtf8(targetArg), devAct)) {
+            fileLogger(hdm::LogLevel::Error, "Неизвестная команда управления устройством.");
+            return 1;
+        }
+        bool rebootReq = false;
+        const bool ok = hdm::DeviceScanner::RunDeviceActionSync(
+            devAct, hdm::WideToUtf8(instanceArg), fileLogger, &rebootReq);
+        if (!ok) {
+            return 1;
+        }
+        return rebootReq ? 2 : 0;
     }
 
     struct CancelFileWatcherGuard {
@@ -1172,11 +1196,34 @@ private:
         const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
         const bool isAppForeground = (GetForegroundWindow() == hwnd_);
 
-        // Row 1: Scan button + Category filter pills (auto-wrap on narrow windows)
+        // Row 1: Scan button + PnP rescan + Category filter pills (auto-wrap on narrow windows)
         const bool scanning = scanner_.IsScanning();
-        ImGui::BeginDisabled(scanning);
-        if (ImGui::Button(scanning ? "Сканирование..." : "Сканировать устройства")) {
+        const bool devBusy = scanner_.IsBusy();
+        ImGui::BeginDisabled(devBusy);
+        if (ImGui::Button(scanning ? "Сканирование..."
+                                   : (devBusy ? "Выполнение..." : "Сканировать"))) {
             scanner_.StartScanAsync(MakeLogger());
+        }
+        ImGui::EndDisabled();
+
+        SameLineWrapIfNeeded(CalcButtonWidth("Обновить PnP"));
+        ImGui::BeginDisabled(devBusy);
+        if (RenderSecondaryButton("Обновить PnP")) {
+            scanner_.RunDeviceActionAsync(
+                hdm::DeviceAction::Reenumerate,
+                {},
+                "Шина PnP",
+                MakeLogger(),
+                [this](bool, bool rebootReq) {
+                    if (rebootReq) {
+                        rebootRequired_.store(true);
+                    }
+                });
+        }
+        if (isAppForeground &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "Повторный опрос шины PnP (CM_Reenumerate_DevNode) для поиска подключённых или удалённых устройств.");
         }
         ImGui::EndDisabled();
 
@@ -1185,8 +1232,8 @@ private:
             deviceFilterMode_ = DeviceFilterMode::All;
             deviceViewDirty_ = true;
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Требуют внимания"));
-        if (RenderPillButton("Требуют внимания", deviceFilterMode_ == DeviceFilterMode::ProblemOnly)) {
+        SameLineWrapIfNeeded(CalcButtonWidth("Проблемные"));
+        if (RenderPillButton("Проблемные", deviceFilterMode_ == DeviceFilterMode::ProblemOnly)) {
             deviceFilterMode_ = DeviceFilterMode::ProblemOnly;
             deviceViewDirty_ = true;
         }
@@ -1210,7 +1257,7 @@ private:
         std::snprintf(
             summaryBuf,
             sizeof(summaryBuf),
-            "Всего: %zu  |  Мониторы: %zu  |  Проблемные: %zu",
+            "Всего: %zu | Мониторы: %zu | Проблемные: %zu",
             totalDevicesCount_,
             monitorDevicesCount_,
             problemDevicesCount_);
@@ -1287,6 +1334,52 @@ private:
                     if (ImGui::BeginPopupContextItem("##DevCtxMenu")) {
                         ImGui::TextDisabled("%s", dev.name.c_str());
                         ImGui::Separator();
+
+                        const bool canControl = !devBusy && !dev.instanceId.empty();
+                        auto triggerAction = [&](hdm::DeviceAction act) {
+                            scanner_.RunDeviceActionAsync(
+                                act,
+                                dev.instanceId,
+                                dev.name,
+                                MakeLogger(),
+                                [this](bool, bool rebootReq) {
+                                    if (rebootReq) {
+                                        rebootRequired_.store(true);
+                                    }
+                                });
+                        };
+
+                        if (ImGui::MenuItem("Перезапустить устройство", nullptr, false, canControl)) {
+                            triggerAction(hdm::DeviceAction::Restart);
+                        }
+                        if (dev.problemCode == CM_PROB_DISABLED) {
+                            if (ImGui::MenuItem("Включить устройство", nullptr, false, canControl)) {
+                                triggerAction(hdm::DeviceAction::Enable);
+                            }
+                        } else {
+                            if (ImGui::MenuItem("Отключить устройство", nullptr, false, canControl)) {
+                                triggerAction(hdm::DeviceAction::Disable);
+                            }
+                        }
+                        if (ImGui::MenuItem(
+                                "Откатить драйвер (предыдущая версия)",
+                                nullptr,
+                                false,
+                                canControl && dev.hasDriver)) {
+                            triggerAction(hdm::DeviceAction::RollbackDriver);
+                        }
+                        if (ImGui::MenuItem(
+                                "Удалить устройство (переустановка PnP)",
+                                nullptr,
+                                false,
+                                canControl)) {
+                            triggerAction(hdm::DeviceAction::UninstallDevice);
+                        }
+                        if (ImGui::MenuItem("Открыть Диспетчер устройств Windows")) {
+                            ShellExecuteW(nullptr, L"open", L"devmgmt.msc", nullptr, nullptr, SW_SHOWNORMAL);
+                        }
+                        ImGui::Separator();
+
                         if (ImGui::MenuItem("Копировать Hardware ID", nullptr, false, !dev.hardwareId.empty())) {
                             ImGui::SetClipboardText(dev.hardwareId.c_str());
                             logBuffer_.Push(hdm::LogLevel::Info, "Скопирован Hardware ID: " + dev.hardwareId);

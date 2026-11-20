@@ -24,6 +24,15 @@ enum class DeviceCategory {
     DisplayAndChipset
 };
 
+enum class DeviceAction {
+    Restart,         // DIF_PROPERTYCHANGE / DICS_PROPCHANGE
+    Enable,          // DIF_PROPERTYCHANGE / DICS_ENABLE
+    Disable,         // DIF_PROPERTYCHANGE / DICS_DISABLE
+    RollbackDriver,  // DiRollbackDriver (newdev.dll)
+    UninstallDevice, // DiUninstallDevice (newdev.dll)
+    Reenumerate      // CM_Reenumerate_DevNode (cfgmgr32.dll)
+};
+
 struct DeviceInfo {
     std::string name;
     std::string manufacturer;
@@ -52,6 +61,8 @@ struct DeviceInfo {
 
 class DeviceScanner {
 public:
+    using ActionCallback = std::function<void(bool ok, bool rebootRequired)>;
+
     DeviceScanner() = default;
     ~DeviceScanner();
 
@@ -60,18 +71,38 @@ public:
 
     void StartScanAsync(LogCallback onLog);
 
+    void RunDeviceActionAsync(
+        DeviceAction action,
+        const std::string& instanceId,
+        const std::string& deviceName,
+        LogCallback onLog,
+        ActionCallback onComplete = nullptr);
+
     [[nodiscard]] bool IsScanning() const noexcept { return scanning_.load(); }
+    [[nodiscard]] bool IsRunningAction() const noexcept { return runningAction_.load(); }
+    [[nodiscard]] bool IsBusy() const noexcept { return scanning_.load() || runningAction_.load(); }
     [[nodiscard]] uint64_t Generation() const noexcept { return generation_.load(); }
     std::vector<DeviceInfo> GetDevicesSnapshot() const;
 
     static std::vector<DeviceInfo> ScanSynchronously(const LogCallback& onLog = nullptr);
 
+    static bool RunDeviceActionSync(
+        DeviceAction action,
+        const std::string& instanceId,
+        const LogCallback& onLog,
+        bool* outRebootRequired = nullptr);
+
+    static std::string DeviceActionToCliVerb(DeviceAction action);
+    static bool ParseDeviceActionCliVerb(const std::string& verb, DeviceAction& outAction);
+
 private:
     std::atomic<bool> scanning_{false};
+    std::atomic<bool> runningAction_{false};
     std::atomic<uint64_t> generation_{0};
     mutable std::mutex dataMutex_;
     std::vector<DeviceInfo> devices_;
     std::thread worker_;
+    std::thread actionWorker_;
 };
 
 } // namespace hdm
