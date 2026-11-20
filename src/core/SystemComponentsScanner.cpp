@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <map>
 #include <set>
 #include <sstream>
@@ -205,6 +206,60 @@ bool IsVersionNewer(const std::string& latest, const std::string& current) {
         }
     }
     return false;
+}
+
+bool EndsWithCaseInsensitive(std::string_view text, std::string_view suffix) {
+    if (text.size() < suffix.size()) {
+        return false;
+    }
+    const size_t offset = text.size() - suffix.size();
+    for (size_t i = 0; i < suffix.size(); ++i) {
+        if (std::tolower(static_cast<unsigned char>(text[offset + i])) !=
+            std::tolower(static_cast<unsigned char>(suffix[i]))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string TrimCopy(std::string_view sv) {
+    size_t start = 0;
+    while (start < sv.size() &&
+           (sv[start] == ' ' || sv[start] == '\t' || sv[start] == '\r' || sv[start] == '\n')) {
+        ++start;
+    }
+    size_t end = sv.size();
+    while (end > start &&
+           (sv[end - 1] == ' ' || sv[end - 1] == '\t' || sv[end - 1] == '\r' || sv[end - 1] == '\n')) {
+        --end;
+    }
+    std::string out(sv.substr(start, end - start));
+    if (out.size() >= 2 &&
+        ((out.front() == '\'' && out.back() == '\'') ||
+         (out.front() == '"' && out.back() == '"'))) {
+        out = out.substr(1, out.size() - 2);
+    }
+    return out;
+}
+
+std::string StripUrlQuery(std::string_view url) {
+    const size_t q = url.find('?');
+    return std::string(q == std::string_view::npos ? url : url.substr(0, q));
+}
+
+std::string EncodeWingetPath(std::string_view path) {
+    std::string encoded;
+    encoded.reserve(path.size() + 8);
+    for (char ch : path) {
+        if (ch == '+') {
+            encoded += "%2B";
+        } else if (ch == ' ') {
+            encoded += "%20";
+        } else {
+            encoded.push_back(ch);
+        }
+    }
+    return encoded;
 }
 
 std::string CheckVcRuntimeKey(const wchar_t* subKey, REGSAM wowFlags) {
@@ -524,6 +579,344 @@ std::pair<std::string, std::string> ParseAmdAdrenalinFromHtml(const std::string&
     return {};
 }
 
+struct WingetManifestInfo {
+    bool ok{false};
+    std::string version;
+    std::string url;
+    std::string nestedRelativePath;
+    std::string silentArgs;
+};
+
+// Parses GitHub's non-API tree JSON ({"payload":{"codeViewTreeRoute":{"tree":{"items":[...]}}}})
+// so version lookup does not consume GitHub REST API's 60 req/hr quota.
+std::vector<std::string> ExtractGithubTreeNames(
+    const std::string& json,
+    const std::string& wantedContentType) {
+    std::vector<std::string> names;
+    const size_t treePos = json.find("\"tree\":{\"items\":[");
+    if (treePos == std::string::npos) {
+        return names;
+    }
+    const size_t arrStart = json.find('[', treePos);
+    if (arrStart == std::string::npos) {
+        return names;
+    }
+
+    int depth = 0;
+    bool inString = false;
+    bool escape = false;
+    size_t arrEnd = json.size();
+    for (size_t i = arrStart; i < json.size(); ++i) {
+        const char ch = json[i];
+        if (escape) {
+            escape = false;
+            continue;
+        }
+        if (inString) {
+            if (ch == '\\') escape = true;
+            else if (ch == '"') inString = false;
+            continue;
+        }
+        if (ch == '"') {
+            inString = true;
+        } else if (ch == '[') {
+            ++depth;
+        } else if (ch == ']') {
+            --depth;
+            if (depth == 0) {
+                arrEnd = i;
+                break;
+            }
+        }
+    }
+
+    size_t pos = arrStart;
+    while (pos < arrEnd) {
+        const size_t namePos = json.find("\"name\":\"", pos);
+        if (namePos == std::string::npos || namePos >= arrEnd) {
+            break;
+        }
+        const std::string name = ExtractJsonStringField(json, "name", namePos);
+        const size_t objEnd = json.find('}', namePos);
+        if (objEnd == std::string::npos || objEnd > arrEnd) {
+            break;
+        }
+        const size_t ctPos = json.find("\"contentType\"", namePos);
+        std::string contentType;
+        if (ctPos != std::string::npos && ctPos < objEnd) {
+            contentType = ExtractJsonStringField(json, "contentType", ctPos);
+        }
+        if (!name.empty() && contentType == wantedContentType) {
+            names.push_back(name);
+        }
+        pos = objEnd + 1;
+    }
+    return names;
+}
+
+WingetManifestInfo ParseWingetInstallerYaml(
+    const std::string& yaml,
+    const std::string& preferredArch) {
+    WingetManifestInfo info;
+    struct Entry {
+        std::string arch;
+        std::string url;
+        std::string installerType;
+        std::string nestedPath;
+        std::string silent;
+    };
+    std::vector<Entry> entries;
+    Entry current;
+    bool inInstallers = false;
+    bool inNestedFiles = false;
+    std::string topType;
+    std::string topNestedPath;
+    std::string topSilent;
+    std::string topSilentProgress;
+
+    std::istringstream iss(yaml);
+    std::string rawLine;
+    while (std::getline(iss, rawLine)) {
+        const std::string trimmed = TrimCopy(rawLine);
+        if (trimmed.empty() || trimmed[0] == '#') {
+            continue;
+        }
+
+        if (trimmed == "Installers:") {
+            inInstallers = true;
+            inNestedFiles = false;
+            continue;
+        }
+        if (!rawLine.empty() && rawLine[0] != ' ' && rawLine[0] != '-' &&
+            trimmed != "NestedInstallerFiles:") {
+            inNestedFiles = false;
+            if (trimmed.rfind("ManifestType:", 0) == 0 ||
+                trimmed.rfind("ManifestVersion:", 0) == 0) {
+                if (inInstallers && !current.url.empty()) {
+                    entries.push_back(current);
+                    current = Entry{};
+                }
+                inInstallers = false;
+            }
+        }
+        if (trimmed == "NestedInstallerFiles:") {
+            inNestedFiles = true;
+            continue;
+        }
+
+        std::string keyPart = trimmed;
+        bool isListItem = false;
+        if (keyPart.rfind("- ", 0) == 0) {
+            isListItem = true;
+            keyPart = TrimCopy(keyPart.substr(2));
+        }
+
+        const size_t colon = keyPart.find(':');
+        if (colon == std::string::npos) {
+            continue;
+        }
+        const std::string key = TrimCopy(keyPart.substr(0, colon));
+        const std::string val = TrimCopy(keyPart.substr(colon + 1));
+
+        if (!inInstallers) {
+            if (key == "PackageVersion" && !val.empty()) {
+                info.version = val;
+            } else if (key == "InstallerType" && !val.empty()) {
+                topType = ToLowerAscii(val);
+            } else if (key == "RelativeFilePath" && inNestedFiles && !val.empty() &&
+                       topNestedPath.empty()) {
+                topNestedPath = val;
+            } else if (key == "SilentWithProgress" && !val.empty()) {
+                topSilentProgress = val;
+            } else if (key == "Silent" && !val.empty()) {
+                topSilent = val;
+            }
+            continue;
+        }
+
+        if (isListItem &&
+            (key == "Architecture" || key == "InstallerUrl" || key == "InstallerLocale")) {
+            if (!current.url.empty()) {
+                entries.push_back(current);
+                current = Entry{};
+            }
+        }
+
+        if (key == "Architecture") {
+            current.arch = ToLowerAscii(val);
+        } else if (key == "InstallerUrl" && !val.empty()) {
+            current.url = val;
+        } else if (key == "InstallerType" && !val.empty()) {
+            current.installerType = ToLowerAscii(val);
+        } else if (key == "RelativeFilePath" && !val.empty() && current.nestedPath.empty()) {
+            current.nestedPath = val;
+        } else if (key == "SilentWithProgress" && !val.empty()) {
+            current.silent = val;
+        } else if (key == "Silent" && !val.empty() && current.silent.empty()) {
+            current.silent = val;
+        }
+    }
+    if (inInstallers && !current.url.empty()) {
+        entries.push_back(current);
+    }
+
+    if (entries.empty()) {
+        return info;
+    }
+
+    auto isSupportedEntry = [&](const Entry& e) {
+        const std::string t = e.installerType.empty() ? topType : e.installerType;
+        return t != "msix" && t != "appx";
+    };
+
+    const Entry* chosen = nullptr;
+    const std::string pref = ToLowerAscii(preferredArch);
+    if (!pref.empty()) {
+        for (const auto& e : entries) {
+            if (e.arch == pref && isSupportedEntry(e)) {
+                chosen = &e;
+                break;
+            }
+        }
+    }
+    if (chosen == nullptr) {
+        for (const char* archOrder : {"x64", "neutral", "x86"}) {
+            for (const auto& e : entries) {
+                if (e.arch == archOrder && isSupportedEntry(e)) {
+                    chosen = &e;
+                    break;
+                }
+            }
+            if (chosen != nullptr) break;
+        }
+    }
+    if (chosen == nullptr) {
+        for (const auto& e : entries) {
+            if (isSupportedEntry(e)) {
+                chosen = &e;
+                break;
+            }
+        }
+    }
+    if (chosen == nullptr) {
+        return info;
+    }
+
+    info.ok = !info.version.empty() && !chosen->url.empty();
+    info.url = chosen->url;
+    info.nestedRelativePath = !chosen->nestedPath.empty() ? chosen->nestedPath : topNestedPath;
+    if (!chosen->silent.empty()) {
+        info.silentArgs = chosen->silent;
+    } else if (!topSilentProgress.empty()) {
+        info.silentArgs = topSilentProgress;
+    } else {
+        info.silentArgs = topSilent;
+    }
+    return info;
+}
+
+WingetManifestInfo ResolveWingetPkgManifest(
+    const std::string& repoPath,
+    const std::string& preferredArch) {
+    WingetManifestInfo result;
+    if (repoPath.empty()) {
+        return result;
+    }
+    const std::string encPath = EncodeWingetPath(repoPath);
+    const std::wstring treeUrl = Utf8ToWide(
+        "https://github.com/microsoft/winget-pkgs/tree/master/manifests/" + encPath);
+    const HttpResponse treeResp = WinHttpRequest(
+        treeUrl, L"GET", true, 256 * 1024, L"Accept: application/json\r\n");
+    if (!treeResp.ok || treeResp.body.empty()) {
+        return result;
+    }
+
+    const std::vector<std::string> dirs = ExtractGithubTreeNames(treeResp.body, "directory");
+    std::string bestVer;
+    for (const auto& d : dirs) {
+        if (!d.empty() && std::isdigit(static_cast<unsigned char>(d[0]))) {
+            if (bestVer.empty() || IsVersionNewer(d, bestVer)) {
+                bestVer = d;
+            }
+        }
+    }
+    if (bestVer.empty()) {
+        return result;
+    }
+
+    const std::wstring verTreeUrl = Utf8ToWide(
+        "https://github.com/microsoft/winget-pkgs/tree/master/manifests/" +
+        encPath + "/" + EncodeWingetPath(bestVer));
+    const HttpResponse verResp = WinHttpRequest(
+        verTreeUrl, L"GET", true, 128 * 1024, L"Accept: application/json\r\n");
+    if (!verResp.ok || verResp.body.empty()) {
+        return result;
+    }
+
+    const std::vector<std::string> files = ExtractGithubTreeNames(verResp.body, "file");
+    std::string installerYaml;
+    for (const auto& f : files) {
+        if (EndsWithCaseInsensitive(f, ".installer.yaml")) {
+            installerYaml = f;
+            break;
+        }
+    }
+    if (installerYaml.empty()) {
+        return result;
+    }
+
+    const std::wstring rawUrl = Utf8ToWide(
+        "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/" +
+        encPath + "/" + EncodeWingetPath(bestVer) + "/" + EncodeWingetPath(installerYaml));
+    const HttpResponse yamlResp = WinHttpRequest(rawUrl, L"GET", true, 128 * 1024);
+    if (!yamlResp.ok || yamlResp.body.empty()) {
+        return result;
+    }
+
+    result = ParseWingetInstallerYaml(yamlResp.body, preferredArch);
+    if (result.version.empty()) {
+        result.version = bestVer;
+    }
+    return result;
+}
+
+void ApplyResolvedVersionToItem(
+    SystemComponentItem& item,
+    const std::string& latestVer,
+    const std::string& missingPrefix = "Не установлен") {
+    item.onlineChecked = true;
+    if (latestVer.empty()) {
+        return;
+    }
+    item.latestVersion = latestVer;
+    if (!item.installed) {
+        item.updateAvailable = true;
+        item.statusText = missingPrefix + " (" + latestVer + ")";
+        return;
+    }
+    if (!item.compareVersions || item.installedVersion.empty() ||
+        !std::isdigit(static_cast<unsigned char>(latestVer[0]))) {
+        return;
+    }
+    if (IsVersionNewer(latestVer, item.installedVersion)) {
+        item.updateAvailable = true;
+        item.statusText = "Доступно обновление (" + latestVer + ")";
+    } else {
+        item.updateAvailable = false;
+        item.statusText = "Актуален (" + item.installedVersion + ")";
+    }
+}
+
+bool HasZipMagicHeader(const std::filesystem::path& filePath) {
+    std::ifstream ifs(filePath, std::ios::binary);
+    if (!ifs.is_open()) {
+        return false;
+    }
+    unsigned char hdr[4]{};
+    ifs.read(reinterpret_cast<char*>(hdr), 4);
+    return ifs.gcount() == 4 && hdr[0] == 'P' && hdr[1] == 'K' && hdr[2] == 0x03 && hdr[3] == 0x04;
+}
+
 bool DownloadFileViaWinHttp(
     const std::wstring& url,
     const std::filesystem::path& destPath,
@@ -784,6 +1177,9 @@ void MergeOnlineMetadataIntoRefreshed(
                 if (!oldItem.installerArgs.empty()) {
                     newItem.installerArgs = oldItem.installerArgs;
                 }
+                if (!oldItem.nestedInstallerHint.empty()) {
+                    newItem.nestedInstallerHint = oldItem.nestedInstallerHint;
+                }
             }
             if (!newItem.installed) {
                 newItem.updateAvailable = true;
@@ -791,7 +1187,8 @@ void MergeOnlineMetadataIntoRefreshed(
                     std::isdigit(static_cast<unsigned char>(newItem.latestVersion[0]))) {
                     newItem.statusText = "Не установлен (" + newItem.latestVersion + ")";
                 }
-            } else if (!newItem.latestVersion.empty() &&
+            } else if (newItem.compareVersions &&
+                       !newItem.latestVersion.empty() &&
                        std::isdigit(static_cast<unsigned char>(newItem.latestVersion[0])) &&
                        !newItem.installedVersion.empty()) {
                 if (IsVersionNewer(newItem.latestVersion, newItem.installedVersion)) {
@@ -819,6 +1216,9 @@ struct PeripheralVendorRule {
     const char* purpose;
     const char* pageUrl;
     const char* directUrl;
+    const char* wingetPath;
+    const char* nestedHint;
+    const char* silentArgs;
     const char* defaultLatestLabel;
     const char* uninstallKeywords[3];
 };
@@ -827,88 +1227,91 @@ constexpr PeripheralVendorRule kPeripheralRules[] = {
     {"sw_razer", "Razer", "Razer Synapse (Официальное ПО)",
      "Настройка мышей, клавиатур, гарнитур, веб-камер и микрофонов Razer: DPI, частота опроса, макросы, подсветка Chroma и обновление прошивки.",
      "https://www.razer.com/synapse-4",
-     "https://rzr.to/synapse-4-pc-download", "Synapse 4 (онлайн)",
+     "https://rzr.to/synapse-4-pc-download", nullptr, nullptr, "", "Synapse 4 (онлайн)",
      {"Razer Synapse", "Razer Central", "Razer App Engine"}},
     {"sw_logitech", "Logitech", "Logitech G HUB",
      "Управление периферией Logitech G: настройка сенсора HERO, переназначение кнопок, игровые профили, эквалайзер гарнитур и обновление прошивки.",
      "https://www.logitechg.com/en-us/innovation/g-hub.html",
      "https://download01.logi.com/web/ftp/pub/techsupport/gaming/lghub_installer.exe",
-     "Онлайн-установщик",
+     "l/Logitech/GHUB", nullptr, "--silent", "Поиск...",
      {"Logitech G HUB", "Logitech Gaming Software", "LGHUB"}},
     {"sw_steelseries", "SteelSeries", "SteelSeries GG",
      "Официальный пакет SteelSeries: пространственный звук Sonar (игры/чат/микрофон), настройка клавиатур/мышей, OLED-дисплеев и прошивки.",
      "https://steelseries.com/gg",
-     "https://steelseries.com/gg/downloads/gg/latest/windows", "Поиск...",
+     "https://steelseries.com/gg/downloads/gg/latest/windows",
+     "s/SteelSeries/GG", nullptr, "/S", "Поиск...",
      {"SteelSeries GG", "SteelSeries Engine", nullptr}},
     {"sw_hyperx", "HyperX", "HyperX NGENUITY",
      "Официальное ПО для периферии HyperX: настройка DPI мышей, эквалайзера/микрофона гарнитур, макросов и подсветки.",
      "https://hyperx.com/pages/ngenuity",
-     nullptr, "Microsoft Store / сайт",
+     nullptr, nullptr, nullptr, "", "Microsoft Store / сайт",
      {"HyperX NGENUITY", "NGENUITY", nullptr}},
     {"sw_corsair", "Corsair", "Corsair iCUE",
      "Центр управления устройствами Corsair: профили клавиатур и мышей, синхронизация подсветки, мониторинг и обновление прошивки.",
      "https://www.corsair.com/us/en/s/icue",
-     nullptr, "Сайт Corsair",
+     "https://www3.corsair.com/software/CUE_V5/public/modules/windows/installer/Install%20iCUE.exe",
+     "c/Corsair/iCUE/5", nullptr, "--quiet", "Поиск...",
      {"CORSAIR iCUE", "Corsair Utility Engine", nullptr}},
     {"sw_asus", "ASUS ROG", "ASUS Armoury Crate",
      "Фирменный софт ASUS ROG: настройка клавиатур, мышей, гарнитур, синхронизация Aura Sync и обновление драйверов/прошивок.",
      "https://www.asus.com/supportonly/armoury%20crate/helpdesk_download/",
-     nullptr, "Сайт ASUS",
+     "https://dlcdnets.asus.com/pub/ASUS/mb/14Utilities/ArmouryCrateInstallTool.zip",
+     "a/Asus/ArmouryCrate", "ArmouryCrateInstaller_3.3.6.0/ArmouryCrateInstaller.exe", "/SILENT", "Поиск...",
      {"Armoury Crate", "ASUS Framework", nullptr}},
     {"sw_wooting", "Wooting", "Wootility (клавиатуры Wooting)",
      "Конфигуратор аналоговых клавиатур Wooting: настройка Rapid Trigger, точки срабатывания клавиш, профилей и прошивки.",
      "https://wooting.io/wootility",
-     nullptr, "Веб / Сайт Wooting",
+     nullptr, nullptr, nullptr, "", "Веб / Сайт Wooting",
      {"Wootility", nullptr, nullptr}},
     {"sw_keychron", "Keychron", "Keychron Launcher (веб-конфигуратор)",
      "Веб-конфигуратор клавиатур Keychron (QMK/VIA): переназначение клавиш, макросы, подсветка и обновление прошивки прямо из браузера.",
      "https://launcher.keychron.com/",
-     nullptr, "Веб-конфигуратор",
+     nullptr, nullptr, nullptr, "", "Веб-конфигуратор",
      {"Keychron", nullptr, nullptr}},
     {"sw_glorious", "Glorious", "Glorious CORE",
      "Официальное ПО Glorious: настройка DPI, времени отклика (debounce), подсветки, макросов и прошивки мышей/клавиатур.",
      "https://www.gloriousgaming.com/pages/glorious-core",
-     nullptr, "Сайт Glorious",
+     nullptr, nullptr, nullptr, "", "Сайт Glorious",
      {"Glorious CORE", nullptr, nullptr}},
     {"sw_pulsar", "Pulsar", "Pulsar Gaming Gear Software",
      "Утилита настройки мышей и клавиатур Pulsar: частота опроса до 4K/8K, DPI, LoD и обновление прошивки.",
      "https://www.pulsar.gg/pages/downloads",
-     nullptr, "Сайт Pulsar",
+     nullptr, nullptr, nullptr, "", "Сайт Pulsar",
      {"Pulsar", nullptr, nullptr}},
     {"sw_lamzu", "Lamzu", "Lamzu Software",
      "Официальная утилита Lamzu для настройки параметров сенсора, частоты опроса, макросов и обновления прошивки.",
      "https://lamzu.com/pages/download",
-     nullptr, "Сайт Lamzu",
+     nullptr, nullptr, nullptr, "", "Сайт Lamzu",
      {"Lamzu", nullptr, nullptr}},
     {"sw_endgame", "Endgame Gear", "Endgame Gear Software",
      "Конфигуратор периферии Endgame Gear: точная настройка DPI, дебаунса, Motion Sync и прошивки.",
      "https://www.endgamegear.com/en-us/downloads",
-     nullptr, "Сайт Endgame Gear",
+     nullptr, nullptr, nullptr, "", "Сайт Endgame Gear",
      {"Endgame Gear", nullptr, nullptr}},
     {"sw_creative", "Creative", "Creative App / Sound Blaster",
      "Управление звуковыми картами и гарнитурами Creative: эквалайзер, Acoustic Engine, Scout Mode и драйверы.",
      "https://support.creative.com/",
-     nullptr, "Сайт Creative",
+     nullptr, nullptr, nullptr, "", "Сайт Creative",
      {"Creative App", "Sound Blaster", nullptr}},
-    {"sw_epos", "EPOS / Sennheiser", "EPOS Gaming Suite",
+    {"sw_epos", "EPOS / Sennheiser", "EPOS Gaming Suite / EPOS Connect",
      "Настройка игровых гарнитур и ЦАП EPOS / Sennheiser: объемный звук 7.1, шумоподавление микрофона и прошивка.",
      "https://www.eposaudio.com/en/us/gaming/downloads",
-     nullptr, "Сайт EPOS",
-     {"EPOS Gaming Suite", "Sennheiser Gaming", nullptr}},
+     nullptr, "e/EPOS/EPOSConnect", nullptr, "", "Поиск...",
+     {"EPOS Connect", "EPOS Gaming Suite", "Sennheiser Gaming"}},
     {"sw_bloody", "A4Tech / Bloody", "Bloody Official Software",
      "Официальное ПО для мышей и клавиатур Bloody: профили чувствительности, макросы и настройка отклика.",
      "https://www.bloody.com/en/download.php",
-     nullptr, "Сайт Bloody",
+     nullptr, nullptr, nullptr, "", "Сайт Bloody",
      {"Bloody", nullptr, nullptr}},
     {"sw_roccat", "Turtle Beach / ROCCAT", "Turtle Beach Swarm II",
      "Единый центр управления гарнитурами, мышами и клавиатурами Turtle Beach / ROCCAT.",
      "https://www.turtlebeach.com/pages/swarm-ii",
-     nullptr, "Сайт Turtle Beach",
+     nullptr, nullptr, nullptr, "", "Сайт Turtle Beach",
      {"Swarm II", "ROCCAT Swarm", nullptr}},
     {"sw_elgato", "Elgato", "Elgato Stream Deck / Wave Link",
      "ПО для микрофонов Wave, контроллеров Stream Deck и карт захвата Elgato: микширование звука и профили сцен.",
      "https://www.elgato.com/us/en/s/downloads",
-     nullptr, "Сайт Elgato",
+     nullptr, "e/Elgato/StreamDeck", nullptr, "", "Поиск...",
      {"Elgato Stream Deck", "Elgato Wave Link", nullptr}},
 };
 
@@ -916,12 +1319,21 @@ struct MonitorBrandInfo {
     std::string softwareName;
     std::string url;
     const char* uninstallKeyword;
+    const char* wingetPath{nullptr};
+    const char* fallbackDirectUrl{nullptr};
+    const char* fallbackNestedHint{nullptr};
+    const char* fallbackArgs{""};
 };
 
 MonitorBrandInfo GetMonitorBrandSupport(const std::string& pnpOrBrand, const std::string& model) {
     if (pnpOrBrand == "MSI" || ContainsCaseInsensitive(model, "MSI")) {
         return {"MSI Gaming Intelligence / Драйвер монитора",
-                "https://www.msi.com/support/download", "Gaming Intelligence"};
+                "https://www.msi.com/support/download",
+                "Gaming Intelligence",
+                "m/MSI/GamingIntelligence",
+                "https://download.msi.com/uti_exe/monitor/Gaming-Intelligence-x64.zip",
+                "setup.exe",
+                "/S /v /qn"};
     }
     if (pnpOrBrand == "GSM" || pnpOrBrand == "LGD" || pnpOrBrand == "LG" ||
         ContainsCaseInsensitive(model, "LG")) {
@@ -931,17 +1343,32 @@ MonitorBrandInfo GetMonitorBrandSupport(const std::string& pnpOrBrand, const std
     if (pnpOrBrand == "SAM" || pnpOrBrand == "Samsung" ||
         ContainsCaseInsensitive(model, "Samsung") || ContainsCaseInsensitive(model, "SMS")) {
         return {"Samsung Easy Setting Box / Драйвер монитора",
-                "https://www.samsung.com/us/support/downloads/", "Easy Setting Box"};
+                "https://www.samsung.com/us/support/downloads/",
+                "Easy Setting Box",
+                "s/Samsung/EasySettingBox",
+                "https://downloadcenter.samsung.com/content/SW/202405/20240514170303450/EasySettingMSIX64_V3.0.11.msi",
+                nullptr,
+                ""};
     }
     if (pnpOrBrand == "ACI" || pnpOrBrand == "AUS" || pnpOrBrand == "ASUS" ||
         ContainsCaseInsensitive(model, "ASUS") || ContainsCaseInsensitive(model, "ROG")) {
         return {"ASUS DisplayWidget Center",
-                "https://www.asus.com/support/", "DisplayWidget"};
+                "https://www.asus.com/content/asus-displaywidget-center/",
+                "DisplayWidget",
+                "a/Asus/DisplayWidgetCenter",
+                "https://dlcdnets.asus.com/pub/ASUS/LCD%20Monitors/App/DisplayWidgetCenter/DisplayWidgetCenter.zip",
+                "DisplayWidgetCenterSetup.msi",
+                ""};
     }
     if (pnpOrBrand == "DEL" || pnpOrBrand == "Dell" ||
         ContainsCaseInsensitive(model, "DELL") || ContainsCaseInsensitive(model, "Alienware")) {
         return {"Dell Display Manager / Драйвер монитора",
-                "https://www.dell.com/support/home", "Dell Display Manager"};
+                "https://www.dell.com/support/home",
+                "Dell Display",
+                "d/Dell/DisplayAndPeripheralManager",
+                nullptr,
+                nullptr,
+                "/Silent"};
     }
     if (pnpOrBrand == "AOC" || ContainsCaseInsensitive(model, "AOC")) {
         return {"AOC G-Menu / Драйвер монитора",
@@ -963,11 +1390,21 @@ MonitorBrandInfo GetMonitorBrandSupport(const std::string& pnpOrBrand, const std
     }
     if (pnpOrBrand == "PHL" || ContainsCaseInsensitive(model, "Philips")) {
         return {"Philips SmartControl / Evnia Precision Center",
-                "https://www.philips.com/c-w/support-home", "SmartControl"};
+                "https://www.philips.com/c-w/support-home",
+                "SmartControl",
+                "p/Philips/SmartControl",
+                "https://gz-dlsw.tpv-tech.com/MNT/PHILIPS/files/Software/SmartControl.exe.zip",
+                "SmartControl Setup 7.2.0.exe",
+                "/S"};
     }
     if (pnpOrBrand == "VSC" || ContainsCaseInsensitive(model, "ViewSonic")) {
-        return {"ViewSonic vDisplayManager",
-                "https://www.viewsonic.com/us/support", "vDisplayManager"};
+        return {"ViewSonic Display Portal / vDisplayManager",
+                "https://www.viewsonic.com/us/support",
+                "Display Portal",
+                "v/ViewSonic/DisplayPortal",
+                "https://www.viewsonicglobal.com/public/products_download/software/display/Display_Portal_win.zip",
+                "Display_Portal_win\\setup.exe",
+                ""};
     }
     return {"Официальная поддержка монитора",
             "https://www.catalog.update.microsoft.com/Search.aspx?q=" + model, nullptr};
@@ -1073,155 +1510,152 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
             }
         };
 
-        // 1. .NET Desktop Runtime 8.0 & 9.0
-        const auto checkDotnet = [&](const std::string& compId, const std::wstring& metaUrl) {
-            const HttpResponse resp = WinHttpRequest(metaUrl, L"GET", true);
-            if (!resp.ok || resp.body.empty()) {
-                updateItem(compId, [](SystemComponentItem& item) {
-                    item.latestVersion = "Недоступно";
-                    item.onlineChecked = true;
-                });
-                return;
+        auto hasItem = [&](const std::string& compId) {
+            std::lock_guard<std::mutex> lock(dataMutex_);
+            for (const auto& it : items_) {
+                if (it.id == compId) return true;
             }
-            const std::string latest = ExtractJsonStringField(resp.body, "latest-runtime");
-            if (latest.empty()) {
-                return;
-            }
-            const std::string dlUrl =
-                "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/" + latest +
-                "/windowsdesktop-runtime-" + latest + "-win-x64.exe";
-
-            updateItem(compId, [&](SystemComponentItem& item) {
-                item.latestVersion = latest;
-                item.directInstallerUrl = dlUrl;
-                item.installerArgs = "/install /passive /norestart";
-                item.onlineChecked = true;
-                if (!item.installed) {
-                    item.updateAvailable = true;
-                    item.statusText = "Не установлен (" + latest + ")";
-                } else if (IsVersionNewer(latest, item.installedVersion)) {
-                    item.updateAvailable = true;
-                    item.statusText = "Доступно обновление (" + latest + ")";
-                } else {
-                    item.updateAvailable = false;
-                    item.statusText = "Актуален (" + item.installedVersion + ")";
-                }
-            });
+            return false;
         };
 
-        checkDotnet("rt_dotnet8",
-                    L"https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/8.0/releases.json");
-        checkDotnet("rt_dotnet9",
-                    L"https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/9.0/releases.json");
-
-        // 2. Microsoft Edge WebView2 Runtime
+        // Snapshot distinct (wingetRepoPath, preferredArch) lookups needed right now.
+        std::vector<std::pair<std::string, std::string>> wingetTargets;
         {
-            const HttpResponse resp = WinHttpRequest(
-                L"https://edgeupdates.microsoft.com/api/products?view=enterprise",
-                L"GET",
-                true,
-                128 * 1024);
-            std::string latestWv2;
-            if (resp.ok && !resp.body.empty()) {
-                const size_t stablePos = resp.body.find("\"Product\":\"Stable\"");
-                if (stablePos != std::string::npos) {
-                    latestWv2 = ExtractJsonStringField(resp.body, "ProductVersion", stablePos);
+            std::lock_guard<std::mutex> lock(dataMutex_);
+            std::set<std::pair<std::string, std::string>> seen;
+            for (const auto& it : items_) {
+                if (!it.wingetRepoPath.empty() && it.id != "sw_steelseries") {
+                    const std::pair<std::string, std::string> key{
+                        it.wingetRepoPath, it.preferredArch};
+                    if (seen.insert(key).second) {
+                        wingetTargets.push_back(key);
+                    }
                 }
             }
-            updateItem("rt_webview2", [&](SystemComponentItem& item) {
-                item.onlineChecked = true;
-                if (!latestWv2.empty()) {
-                    item.latestVersion = latestWv2;
-                    if (!item.installed) {
-                        item.updateAvailable = true;
-                        item.statusText = "Не установлен (" + latestWv2 + ")";
-                    } else if (IsVersionNewer(latestWv2, item.installedVersion)) {
-                        item.updateAvailable = true;
-                        item.statusText = "Доступно обновление (" + latestWv2 + ")";
-                    } else {
-                        item.updateAvailable = false;
-                        item.statusText = "Актуален (" + item.installedVersion + ")";
-                    }
-                } else {
-                    item.latestVersion = "Онлайн-установщик";
-                }
-            });
         }
 
-        // 3. LunarG Vulkan Runtime (official files JSON -> exact Runtime installer URL & version)
-        {
-            const HttpResponse resp = WinHttpRequest(
-                L"https://vulkan.lunarg.com/sdk/files", L"GET", true, 512 * 1024);
-            const auto [vkLatest, vkUrl] = ParseLatestVulkanRuntimeFromJson(resp.body);
-            updateItem("rt_vulkan", [&](SystemComponentItem& item) {
-                item.onlineChecked = true;
-                if (!vkLatest.empty() && !vkUrl.empty()) {
-                    item.latestVersion = vkLatest;
-                    item.directInstallerUrl = vkUrl;
-                    item.installerArgs = "";
-                    if (!item.installed) {
-                        item.updateAvailable = true;
-                        item.statusText = "Не найден (" + vkLatest + ")";
-                    } else if (IsVersionNewer(vkLatest, item.installedVersion)) {
-                        item.updateAvailable = true;
-                        item.statusText = "Доступно обновление (" + vkLatest + ")";
-                    } else {
-                        item.updateAvailable = false;
-                        item.statusText = "Актуален (" + item.installedVersion + ")";
-                    }
-                } else {
-                    item.latestVersion = "Сайт LunarG";
+        // Group 1: .NET Desktop Runtime 8.0 & 9.0
+        auto fDotnet = std::async(std::launch::async, [&]() {
+            const auto checkDotnet = [&](const std::string& compId, const std::wstring& metaUrl) {
+                const HttpResponse resp = WinHttpRequest(metaUrl, L"GET", true);
+                if (!resp.ok || resp.body.empty()) {
+                    updateItem(compId, [](SystemComponentItem& item) {
+                        item.latestVersion = "Недоступно";
+                        item.onlineChecked = true;
+                    });
+                    return;
                 }
-            });
-        }
+                const std::string latest = ExtractJsonStringField(resp.body, "latest-runtime");
+                if (latest.empty()) {
+                    return;
+                }
+                const std::string dlUrl =
+                    "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/" + latest +
+                    "/windowsdesktop-runtime-" + latest + "-win-x64.exe";
 
-        // 4. SteelSeries GG latest version & CDN URL via redirect Location header
-        {
-            const HttpResponse resp = WinHttpRequest(
-                L"https://steelseries.com/gg/downloads/gg/latest/windows", L"HEAD", false);
-            if (!resp.locationHeader.empty()) {
+                updateItem(compId, [&](SystemComponentItem& item) {
+                    item.directInstallerUrl = dlUrl;
+                    item.installerArgs = "/install /passive /norestart";
+                    ApplyResolvedVersionToItem(item, latest);
+                });
+            };
+            checkDotnet("rt_dotnet8",
+                        L"https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/8.0/releases.json");
+            checkDotnet("rt_dotnet9",
+                        L"https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/9.0/releases.json");
+            checkDotnet("rt_dotnet10",
+                        L"https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/10.0/releases.json");
+        });
+
+        // Group 2: Microsoft Edge WebView2 + LunarG Vulkan Runtime
+        auto fRuntimes = std::async(std::launch::async, [&]() {
+            {
+                const HttpResponse resp = WinHttpRequest(
+                    L"https://edgeupdates.microsoft.com/api/products?view=enterprise",
+                    L"GET",
+                    true,
+                    128 * 1024);
+                std::string latestWv2;
+                if (resp.ok && !resp.body.empty()) {
+                    const size_t stablePos = resp.body.find("\"Product\":\"Stable\"");
+                    if (stablePos != std::string::npos) {
+                        latestWv2 = ExtractJsonStringField(resp.body, "ProductVersion", stablePos);
+                    }
+                }
+                updateItem("rt_webview2", [&](SystemComponentItem& item) {
+                    if (!latestWv2.empty()) {
+                        ApplyResolvedVersionToItem(item, latestWv2);
+                    } else {
+                        item.onlineChecked = true;
+                        item.latestVersion = "Онлайн-установщик";
+                    }
+                });
+            }
+
+            {
+                const HttpResponse resp = WinHttpRequest(
+                    L"https://vulkan.lunarg.com/sdk/files", L"GET", true, 512 * 1024);
+                const auto [vkLatest, vkUrl] = ParseLatestVulkanRuntimeFromJson(resp.body);
+                updateItem("rt_vulkan", [&](SystemComponentItem& item) {
+                    if (!vkLatest.empty() && !vkUrl.empty()) {
+                        item.directInstallerUrl = vkUrl;
+                        item.installerArgs = "";
+                        ApplyResolvedVersionToItem(item, vkLatest, "Не найден");
+                    } else {
+                        item.onlineChecked = true;
+                        item.latestVersion = "Сайт LunarG";
+                    }
+                });
+            }
+        });
+
+        // Group 3: SteelSeries CDN + Razer verification + NVIDIA/AMD GPU checks
+        auto fVendors = std::async(std::launch::async, [&]() {
+            if (hasItem("sw_steelseries")) {
+                const HttpResponse resp = WinHttpRequest(
+                    L"https://steelseries.com/gg/downloads/gg/latest/windows", L"HEAD", false);
                 std::string ver;
-                const size_t ggPos = resp.locationHeader.find("SteelSeriesGG");
-                if (ggPos != std::string::npos) {
-                    const size_t numStart = ggPos + 13;
-                    const size_t setupPos = resp.locationHeader.find("Setup", numStart);
-                    if (setupPos != std::string::npos && setupPos > numStart) {
-                        ver = resp.locationHeader.substr(numStart, setupPos - numStart);
+                std::string url = resp.locationHeader;
+                if (!url.empty()) {
+                    const size_t ggPos = url.find("SteelSeriesGG");
+                    if (ggPos != std::string::npos) {
+                        const size_t numStart = ggPos + 13;
+                        const size_t setupPos = url.find("Setup", numStart);
+                        if (setupPos != std::string::npos && setupPos > numStart) {
+                            ver = url.substr(numStart, setupPos - numStart);
+                        }
+                    }
+                }
+                if (ver.empty()) {
+                    const WingetManifestInfo wm = ResolveWingetPkgManifest("s/SteelSeries/GG", "x64");
+                    if (wm.ok) {
+                        ver = wm.version;
+                        if (url.empty()) url = wm.url;
                     }
                 }
                 updateItem("sw_steelseries", [&](SystemComponentItem& item) {
-                    item.onlineChecked = true;
-                    item.directInstallerUrl = resp.locationHeader;
+                    if (!url.empty()) {
+                        item.directInstallerUrl = url;
+                    }
                     if (!ver.empty()) {
-                        item.latestVersion = ver;
-                        if (!item.installed) {
-                            item.updateAvailable = true;
-                            item.statusText = "Не установлено (" + ver + ")";
-                        } else if (IsVersionNewer(ver, item.installedVersion)) {
-                            item.updateAvailable = true;
-                            item.statusText = "Доступно обновление (" + ver + ")";
-                        } else {
-                            item.updateAvailable = false;
-                            item.statusText = "Актуален (" + item.installedVersion + ")";
-                        }
+                        ApplyResolvedVersionToItem(item, ver, "Не установлено");
+                    } else {
+                        item.onlineChecked = true;
+                        if (item.latestVersion == "Поиск...") item.latestVersion = "Онлайн";
                     }
                 });
             }
-        }
 
-        // 5. NVIDIA GeForce Game Ready WHQL latest driver & direct download URL
-        {
-            bool hasNvItem = false;
-            {
-                std::lock_guard<std::mutex> lock(dataMutex_);
-                for (const auto& it : items_) {
-                    if (it.id == "gpu_nvidia") {
-                        hasNvItem = true;
-                        break;
-                    }
-                }
+            if (hasItem("sw_razer")) {
+                const HttpResponse rzHead = WinHttpRequest(
+                    L"https://rzr.to/synapse-4-pc-download", L"HEAD", true);
+                updateItem("sw_razer", [&](SystemComponentItem& item) {
+                    item.onlineChecked = true;
+                    item.latestVersion = rzHead.ok ? "Synapse 4 (актуальный)" : "Сайт Razer";
+                });
             }
-            if (hasNvItem) {
+
+            if (hasItem("gpu_nvidia")) {
                 const HttpResponse resp = WinHttpRequest(
                     L"https://gfwsl.geforce.com/services_toolkit/services/com/nvidia/services/AjaxDriverService.php?func=DriverManualLookup&psid=127&pfid=985&osID=57&languageCode=1033&isWHQL=1&dch=1&upcrd=0&numberOfResults=1",
                     L"GET",
@@ -1231,41 +1665,20 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                     const std::string nvVer = ExtractJsonStringField(resp.body, "Version");
                     const std::string nvUrl = ExtractJsonStringField(resp.body, "DownloadURL");
                     updateItem("gpu_nvidia", [&](SystemComponentItem& item) {
-                        item.onlineChecked = true;
-                        if (!nvVer.empty()) {
-                            item.latestVersion = nvVer;
-                        }
                         if (!nvUrl.empty()) {
                             item.directInstallerUrl = nvUrl;
                             item.installerArgs = "";
                         }
-                        if (!nvVer.empty() && !item.installedVersion.empty()) {
-                            if (IsVersionNewer(nvVer, item.installedVersion)) {
-                                item.updateAvailable = true;
-                                item.statusText = "Доступно обновление (" + nvVer + ")";
-                            } else {
-                                item.updateAvailable = false;
-                                item.statusText = "Актуален (" + item.installedVersion + ")";
-                            }
+                        if (!nvVer.empty()) {
+                            ApplyResolvedVersionToItem(item, nvVer, "Не найден");
+                        } else {
+                            item.onlineChecked = true;
                         }
                     });
                 }
             }
-        }
 
-        // 6. AMD Software: Adrenalin Edition direct installer check
-        {
-            bool hasAmdItem = false;
-            {
-                std::lock_guard<std::mutex> lock(dataMutex_);
-                for (const auto& it : items_) {
-                    if (it.id == "gpu_amd") {
-                        hasAmdItem = true;
-                        break;
-                    }
-                }
-            }
-            if (hasAmdItem) {
+            if (hasItem("gpu_amd")) {
                 const HttpResponse resp = WinHttpRequest(
                     L"https://www.amd.com/en/support/download/drivers.html",
                     L"GET",
@@ -1279,43 +1692,76 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                         item.installerArgs = "";
                     }
                     if (!amdVer.empty()) {
-                        item.latestVersion = amdVer;
-                        if (!item.installed) {
-                            item.updateAvailable = true;
-                            item.statusText = "Доступен " + amdVer;
-                        } else if (IsVersionNewer(amdVer, item.installedVersion)) {
-                            item.updateAvailable = true;
-                            item.statusText = "Доступно обновление (" + amdVer + ")";
-                        } else {
-                            item.updateAvailable = false;
-                            item.statusText = "Актуален (" + item.installedVersion + ")";
-                        }
+                        ApplyResolvedVersionToItem(item, amdVer, "Доступен");
                     } else {
                         item.latestVersion = "Портал AMD";
                     }
                 });
             }
-        }
+        });
 
-        // 7. Verify VC++ endpoints are reachable
-        {
-            const HttpResponse r64 =
-                WinHttpRequest(L"https://aka.ms/vs/17/release/vc_redist.x64.exe", L"HEAD", false);
-            updateItem("rt_vcredist_x64", [&](SystemComponentItem& item) {
-                item.onlineChecked = true;
-                if (item.latestVersion == "Поиск...") {
-                    item.latestVersion = r64.ok ? "Онлайн (aka.ms)" : "Сайт Microsoft";
+        // Group 4: Parallel official winget-pkgs manifest lookups (VC++ 2015-2022,
+        // ASUS DisplayWidget Center, Armoury Crate, Logitech G HUB, Corsair iCUE,
+        // Dell Display Manager, MSI Gaming Intelligence, Samsung Easy Setting Box,
+        // Philips SmartControl, ViewSonic DisplayPortal, Elgato, EPOS, Intel DSA).
+        auto fWinget = std::async(std::launch::async, [&]() {
+            const size_t n = wingetTargets.size();
+            std::vector<WingetManifestInfo> resolved(n);
+            const size_t kWorkers = std::min<size_t>(4, std::max<size_t>(1, n));
+            std::atomic<size_t> nextIdx{0};
+            std::vector<std::thread> pool;
+            pool.reserve(kWorkers);
+            for (size_t w = 0; w < kWorkers; ++w) {
+                pool.emplace_back([&]() {
+                    for (;;) {
+                        const size_t idx = nextIdx.fetch_add(1);
+                        if (idx >= n) break;
+                        resolved[idx] = ResolveWingetPkgManifest(
+                            wingetTargets[idx].first, wingetTargets[idx].second);
+                    }
+                });
+            }
+            for (auto& t : pool) t.join();
+
+            std::lock_guard<std::mutex> lock(dataMutex_);
+            for (auto& item : items_) {
+                if (item.wingetRepoPath.empty() || item.id == "sw_steelseries") {
+                    continue;
                 }
-            });
-            const HttpResponse r86 =
-                WinHttpRequest(L"https://aka.ms/vs/17/release/vc_redist.x86.exe", L"HEAD", false);
-            updateItem("rt_vcredist_x86", [&](SystemComponentItem& item) {
-                item.onlineChecked = true;
-                if (item.latestVersion == "Поиск...") {
-                    item.latestVersion = r86.ok ? "Онлайн (aka.ms)" : "Сайт Microsoft";
+                for (size_t idx = 0; idx < n; ++idx) {
+                    if (wingetTargets[idx].first == item.wingetRepoPath &&
+                        wingetTargets[idx].second == item.preferredArch) {
+                        const auto& wm = resolved[idx];
+                        item.onlineChecked = true;
+                        if (wm.ok) {
+                            if (!wm.url.empty()) {
+                                item.directInstallerUrl = wm.url;
+                            }
+                            if (!wm.nestedRelativePath.empty()) {
+                                item.nestedInstallerHint = wm.nestedRelativePath;
+                            }
+                            if (!wm.silentArgs.empty() && item.installerArgs.empty()) {
+                                item.installerArgs = wm.silentArgs;
+                            }
+                            ApplyResolvedVersionToItem(item, wm.version);
+                        } else if (item.latestVersion == "Поиск..." ||
+                                   item.latestVersion == "Портал поддержки") {
+                            if (item.id == "rt_vcredist_x64" || item.id == "rt_vcredist_x86") {
+                                item.latestVersion = "Недоступно (aka.ms)";
+                            } else {
+                                item.latestVersion = "Сайт производителя";
+                            }
+                        }
+                        break;
+                    }
                 }
-            });
-        }
+            }
+        });
+
+        fDotnet.wait();
+        fRuntimes.wait();
+        fVendors.wait();
+        fWinget.wait();
 
         generation_.fetch_add(1);
         SetPhaseMessage("Актуальные версии проверены");
@@ -1350,10 +1796,12 @@ void SystemComponentsScanner::DownloadAndInstallAsync(
     installThread_ = std::thread([this, item, devs = std::move(devicesSnapshot), log = std::move(onLog)]() {
         wchar_t tempDir[MAX_PATH]{};
         GetTempPathW(MAX_PATH, tempDir);
-        const bool isZipPackage = (item.id == "rt_openal");
-        const std::filesystem::path destFile =
-            std::filesystem::path(tempDir) /
-            ("DriverLoom_" + item.id + (isZipPackage ? ".zip" : ".exe"));
+        const std::string cleanUrl = StripUrlQuery(item.directInstallerUrl);
+        bool isZipPackage = EndsWithCaseInsensitive(cleanUrl, ".zip");
+        const bool isDirectMsi = EndsWithCaseInsensitive(cleanUrl, ".msi");
+        const char* initialExt = isZipPackage ? ".zip" : (isDirectMsi ? ".msi" : ".exe");
+        std::filesystem::path destFile =
+            std::filesystem::path(tempDir) / ("DriverLoom_" + item.id + initialExt);
 
         if (log) {
             log(LogLevel::Info,
@@ -1371,12 +1819,23 @@ void SystemComponentsScanner::DownloadAndInstallAsync(
             return;
         }
 
+        if (!isZipPackage && HasZipMagicHeader(destFile)) {
+            std::filesystem::path zipRenamed = destFile;
+            zipRenamed.replace_extension(L".zip");
+            std::error_code rec;
+            std::filesystem::rename(destFile, zipRenamed, rec);
+            if (!rec) {
+                destFile = zipRenamed;
+                isZipPackage = true;
+            }
+        }
+
         std::filesystem::path targetExe = destFile;
         std::filesystem::path extractDir;
 
         if (isZipPackage) {
             SetPhaseMessage("Распаковка архива...");
-            extractDir = std::filesystem::path(tempDir) / L"DriverLoom_OpenAL";
+            extractDir = std::filesystem::path(tempDir) / ("DriverLoom_" + item.id + "_pkg");
             std::error_code ec;
             std::filesystem::remove_all(extractDir, ec);
             if (!ExtractZipViaShellCom(destFile, extractDir)) {
@@ -1388,12 +1847,40 @@ void SystemComponentsScanner::DownloadAndInstallAsync(
                 installing_.store(false);
                 return;
             }
+
             targetExe.clear();
-            for (const auto& entry : std::filesystem::recursive_directory_iterator(extractDir, ec)) {
-                if (entry.is_regular_file(ec) && entry.path().extension() == L".exe") {
-                    targetExe = entry.path();
-                    break;
+            if (!item.nestedInstallerHint.empty()) {
+                std::wstring relW = Utf8ToWide(item.nestedInstallerHint);
+                std::replace(relW.begin(), relW.end(), L'/', L'\\');
+                const std::filesystem::path hinted = extractDir / relW;
+                if (std::filesystem::is_regular_file(hinted, ec)) {
+                    targetExe = hinted;
                 }
+            }
+            if (targetExe.empty()) {
+                std::filesystem::path firstMsi;
+                std::filesystem::path setupExe;
+                std::filesystem::path firstExe;
+                for (const auto& entry : std::filesystem::recursive_directory_iterator(extractDir, ec)) {
+                    if (!entry.is_regular_file(ec)) {
+                        continue;
+                    }
+                    const std::string ext = ToLowerAscii(WideToUtf8(entry.path().extension().wstring()));
+                    const std::string fname = ToLowerAscii(WideToUtf8(entry.path().filename().wstring()));
+                    if (ext == ".msi" && firstMsi.empty()) {
+                        firstMsi = entry.path();
+                    } else if (ext == ".exe") {
+                        if (firstExe.empty()) firstExe = entry.path();
+                        if (setupExe.empty() &&
+                            (fname.find("setup") != std::string::npos ||
+                             fname.find("install") != std::string::npos)) {
+                            setupExe = entry.path();
+                        }
+                    }
+                }
+                if (!firstMsi.empty()) targetExe = firstMsi;
+                else if (!setupExe.empty()) targetExe = setupExe;
+                else targetExe = firstExe;
             }
             if (targetExe.empty()) {
                 std::filesystem::remove(destFile, ec);
@@ -1451,6 +1938,11 @@ void SystemComponentsScanner::DownloadAndInstallAsync(
                 }
             }
             std::filesystem::remove_all(dxExtractDir, ec);
+        } else if (EndsWithCaseInsensitive(WideToUtf8(targetExe.extension().wstring()), ".msi")) {
+            const std::filesystem::path msiexec = GetSystemDirPath(false) / L"msiexec.exe";
+            const std::wstring msiArgs =
+                L"/i \"" + targetExe.wstring() + L"\" /passive /norestart";
+            launched = LaunchAndWaitProcess(msiexec, msiArgs, &exitCode, &launchErr);
         } else {
             launched = LaunchAndWaitProcess(
                 targetExe, Utf8ToWide(item.installerArgs), &exitCode, &launchErr);
@@ -1551,6 +2043,8 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
         vc64.hardwareConnected = true;
         vc64.officialPageUrl = "https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist";
         vc64.directInstallerUrl = "https://aka.ms/vs/17/release/vc_redist.x64.exe";
+        vc64.wingetRepoPath = "m/Microsoft/VCRedist/2015+/x64";
+        vc64.preferredArch = "x64";
         vc64.installerArgs = "/install /passive /norestart";
         vc64.latestVersion = "Поиск...";
         {
@@ -1576,6 +2070,8 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
         vc86.hardwareConnected = true;
         vc86.officialPageUrl = "https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist";
         vc86.directInstallerUrl = "https://aka.ms/vs/17/release/vc_redist.x86.exe";
+        vc86.wingetRepoPath = "m/Microsoft/VCRedist/2015+/x86";
+        vc86.preferredArch = "x86";
         vc86.installerArgs = "/install /passive /norestart";
         vc86.latestVersion = "Поиск...";
         {
@@ -1618,6 +2114,52 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
         vc13.updateAvailable = !vc13.installed;
         vc13.statusText = vc13.installed ? ("Установлен (" + vc13.installedVersion + ")") : "Не установлен";
         result.push_back(std::move(vc13));
+
+        SystemComponentItem vc12;
+        vc12.id = "rt_vc2012";
+        vc12.category = ComponentCategory::GamingRuntime;
+        vc12.name = "Visual C++ 2012 Redistributable (x64 / x86)";
+        vc12.vendor = "Microsoft";
+        vc12.purposeDescription =
+            "Библиотеки C++ 2012 (msvcr110.dll / msvcp110.dll). Требуются для игр 2012–2016 гг. и ряда системных утилит.";
+        vc12.hardwareConnected = true;
+        vc12.officialPageUrl = "https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist";
+        vc12.directInstallerUrl =
+            "https://download.microsoft.com/download/1/6/B/16B06F60-3B20-4FF2-B699-5E9B7962F9AE/VSU_4/vcredist_x64.exe";
+        vc12.installerArgs = "/install /passive /norestart";
+        vc12.latestVersion = "11.0.61030.0";
+        const std::string v12x64 = CheckVcRuntimeKey(
+            L"SOFTWARE\\Microsoft\\VisualStudio\\11.0\\VC\\Runtimes\\x64", KEY_WOW64_64KEY);
+        const std::string v12x86 = CheckVcRuntimeKey(
+            L"SOFTWARE\\WOW6432Node\\Microsoft\\VisualStudio\\11.0\\VC\\Runtimes\\x86", KEY_WOW64_32KEY);
+        vc12.installed = !v12x64.empty() || !v12x86.empty();
+        vc12.installedVersion = !v12x64.empty() ? v12x64 : v12x86;
+        vc12.updateAvailable = !vc12.installed;
+        vc12.statusText = vc12.installed ? ("Установлен (" + vc12.installedVersion + ")") : "Не установлен";
+        result.push_back(std::move(vc12));
+
+        SystemComponentItem vc10;
+        vc10.id = "rt_vc2010";
+        vc10.category = ComponentCategory::GamingRuntime;
+        vc10.name = "Visual C++ 2010 Redistributable (x64 / x86)";
+        vc10.vendor = "Microsoft";
+        vc10.purposeDescription =
+            "Библиотеки C++ 2010 (msvcr100.dll / msvcp100.dll). Часто требуются для классических игр (2010–2015 гг.) и старых лаунчеров.";
+        vc10.hardwareConnected = true;
+        vc10.officialPageUrl = "https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist";
+        vc10.directInstallerUrl =
+            "https://download.microsoft.com/download/1/6/5/165255E7-1014-4D0A-B094-B6A430A6BFFC/vcredist_x64.exe";
+        vc10.installerArgs = "/passive /norestart";
+        vc10.latestVersion = "10.0.40219";
+        const std::string v10x64 = CheckVcRuntimeKey(
+            L"SOFTWARE\\Microsoft\\VisualStudio\\10.0\\VC\\VCRedist\\x64", KEY_WOW64_64KEY);
+        const std::string v10x86 = CheckVcRuntimeKey(
+            L"SOFTWARE\\WOW6432Node\\Microsoft\\VisualStudio\\10.0\\VC\\VCRedist\\x86", KEY_WOW64_32KEY);
+        vc10.installed = !v10x64.empty() || !v10x86.empty();
+        vc10.installedVersion = !v10x64.empty() ? v10x64 : v10x86;
+        vc10.updateAvailable = !vc10.installed;
+        vc10.statusText = vc10.installed ? ("Установлен (" + vc10.installedVersion + ")") : "Не установлен";
+        result.push_back(std::move(vc10));
 
         // DirectX End-User Runtime (June 2010)
         SystemComponentItem dx;
@@ -1674,6 +2216,21 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
         dn9.statusText = dn9.installed ? ("Установлен (" + dn9.installedVersion + ")") : "Не установлен";
         result.push_back(std::move(dn9));
 
+        SystemComponentItem dn10;
+        dn10.id = "rt_dotnet10";
+        dn10.category = ComponentCategory::GamingRuntime;
+        dn10.name = ".NET Desktop Runtime 10.0 (x64)";
+        dn10.vendor = "Microsoft";
+        dn10.purposeDescription =
+            "Актуальная LTS-среда выполнения .NET 10 для новейших программ, утилит Windows, лаунчеров и инструментов настройки.";
+        dn10.hardwareConnected = true;
+        dn10.officialPageUrl = "https://dotnet.microsoft.com/en-us/download/dotnet/10.0";
+        dn10.latestVersion = "Поиск...";
+        dn10.installedVersion = DetectHighestDotNetDesktop("10");
+        dn10.installed = !dn10.installedVersion.empty();
+        dn10.statusText = dn10.installed ? ("Установлен (" + dn10.installedVersion + ")") : "Не установлен";
+        result.push_back(std::move(dn10));
+
         // .NET Framework 4.8+
         SystemComponentItem netFx;
         netFx.id = "rt_netfx48";
@@ -1684,24 +2241,38 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
             "Классическая платформа .NET в составе Windows. Требуется для большого числа игр, конфигураторов оборудования и драйверных панелей.";
         netFx.hardwareConnected = true;
         netFx.officialPageUrl = "https://dotnet.microsoft.com/en-us/download/dotnet-framework";
-        netFx.latestVersion = "4.8.1 (Windows)";
+        netFx.directInstallerUrl = "https://go.microsoft.com/fwlink/?LinkId=2203304";
+        netFx.installerArgs = "/passive /norestart";
+        netFx.latestVersion = "4.8.1";
+        netFx.compareVersions = false;
         {
             RegKeyGuard key;
+            DWORD release = 0;
             if (RegOpenKeyExW(
                     HKEY_LOCAL_MACHINE,
                     L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full",
                     0,
                     KEY_READ,
                     key.Put()) == ERROR_SUCCESS) {
-                DWORD release = 0;
                 ReadRegDword(key.Get(), L"Release", release);
                 netFx.installedVersion = WideToUtf8(ReadRegStr(key.Get(), L"Version"));
-                netFx.installed = (release >= 528040);
+            }
+            if (release >= 533320) {
+                netFx.installed = true;
+                netFx.updateAvailable = false;
+                if (netFx.installedVersion.empty()) netFx.installedVersion = "4.8.1";
+                netFx.statusText = "Актуален (4.8.1)";
+            } else if (release >= 528040) {
+                netFx.installed = true;
+                netFx.updateAvailable = true;
+                if (netFx.installedVersion.empty()) netFx.installedVersion = "4.8";
+                netFx.statusText = "Доступно обновление (4.8.1)";
+            } else {
+                netFx.installed = false;
+                netFx.updateAvailable = true;
+                netFx.statusText = "Требуется установка (4.8.1)";
             }
         }
-        netFx.statusText = netFx.installed
-                               ? ("Установлен (" + netFx.installedVersion + ")")
-                               : "Требуется обновление";
         result.push_back(std::move(netFx));
 
         // WebView2 Runtime
@@ -1763,7 +2334,8 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
         oal.officialPageUrl = "https://www.openal.org/downloads/";
         oal.directInstallerUrl = "https://www.openal.org/downloads/oalinst.zip";
         oal.installerArgs = "/s";
-        oal.latestVersion = "Офиц. (OpenAL.org)";
+        oal.latestVersion = "1.1 (OpenAL.org)";
+        oal.compareVersions = false;
         oal.installedVersion = GetFileVersionUtf8(sys32 / L"OpenAL32.dll");
         if (oal.installedVersion.empty()) {
             oal.installedVersion = GetFileVersionUtf8(sysWow / L"OpenAL32.dll");
@@ -1827,6 +2399,19 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
             if (rule.directUrl != nullptr) {
                 sw.directInstallerUrl = rule.directUrl;
             }
+            if (rule.wingetPath != nullptr) {
+                sw.wingetRepoPath = rule.wingetPath;
+                sw.preferredArch = "x64";
+            }
+            if (rule.nestedHint != nullptr) {
+                sw.nestedInstallerHint = rule.nestedHint;
+            }
+            if (rule.silentArgs != nullptr) {
+                sw.installerArgs = rule.silentArgs;
+            }
+            if (std::string_view(rule.id) == "sw_razer") {
+                sw.compareVersions = false;
+            }
             sw.latestVersion = rule.defaultLatestLabel;
             sw.hardwareConnected = connected;
             if (connected) {
@@ -1879,18 +2464,43 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
             mon.purposeDescription =
                 "Фирменная утилита и INF-драйвер монитора: отвечает за точный цветовой профиль (ICC), управление яркостью/режимами OSD с ПК и поддержку высокой герцовки/HDR.";
             mon.detectedHardware = d.name;
+            if (!d.driverVersion.empty() && !d.isGenericMonitorDriver) {
+                mon.detectedHardware += " [INF " + d.driverVersion + "]";
+            }
             mon.officialPageUrl = brandInfo.url;
-            mon.latestVersion = "Портал поддержки";
+            if (brandInfo.fallbackDirectUrl != nullptr) {
+                mon.directInstallerUrl = brandInfo.fallbackDirectUrl;
+            }
+            if (brandInfo.fallbackNestedHint != nullptr) {
+                mon.nestedInstallerHint = brandInfo.fallbackNestedHint;
+            }
+            if (brandInfo.fallbackArgs != nullptr) {
+                mon.installerArgs = brandInfo.fallbackArgs;
+            }
+            if (brandInfo.wingetPath != nullptr) {
+                mon.wingetRepoPath = brandInfo.wingetPath;
+                mon.preferredArch = "x64";
+                mon.latestVersion = "Поиск...";
+            } else {
+                mon.latestVersion = "Портал поддержки";
+            }
             mon.hardwareConnected = true;
             mon.installed = !d.isGenericMonitorDriver || (app != nullptr);
-            if (!d.isGenericMonitorDriver) {
-                mon.installedVersion = d.driverVersion.empty() ? d.infName : d.driverVersion;
-                mon.statusText = "Вендор-драйвер (" + mon.installedVersion + ")";
+            if (app != nullptr && !app->displayVersion.empty()) {
+                mon.installedVersion = app->displayVersion;
+                mon.compareVersions = true;
+                mon.statusText = "Установлено (" + app->displayVersion + ")";
+            } else if (!d.isGenericMonitorDriver) {
+                mon.installedVersion = d.driverVersion.empty() ? d.infName : (d.driverVersion + " (INF)");
+                mon.compareVersions = false;
+                mon.statusText = "Вендор-драйвер (" + (d.driverVersion.empty() ? d.infName : d.driverVersion) + ")";
             } else if (app != nullptr) {
                 mon.installedVersion = app->displayVersion;
+                mon.compareVersions = !app->displayVersion.empty();
                 mon.statusText = "Утилита установлена (" + d.infName + ")";
             } else {
                 mon.installedVersion = d.driverVersion + " (" + d.infName + ")";
+                mon.compareVersions = false;
                 mon.updateAvailable = true;
                 mon.statusText = "Базовый драйвер (monitor.inf)";
             }
@@ -1898,21 +2508,40 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
         }
 
         bool hasNvidia = false, hasAmd = false, hasIntelGpu = false;
+        bool hasAmdChipset = false, hasIntelChipset = false;
         std::string nvName, nvInfVer, amdName, intelName;
+        std::string amdChipsetVer, amdChipsetInfName;
         for (const auto& d : devicesSnapshot) {
-            if (ToLowerAscii(d.deviceClass) != "display") {
-                continue;
-            }
-            if (d.pciVendorId == "10DE") {
-                hasNvidia = true;
-                nvName = d.name + " [" + d.driverVersion + "]";
-                nvInfVer = FormatNvidiaDriverVersion(d.driverVersion);
-            } else if (d.pciVendorId == "1002") {
-                hasAmd = true;
-                amdName = d.name + " [" + d.driverVersion + "]";
-            } else if (d.pciVendorId == "8086") {
-                hasIntelGpu = true;
-                intelName = d.name + " [" + d.driverVersion + "]";
+            const std::string cls = ToLowerAscii(d.deviceClass);
+            if (cls == "display") {
+                if (d.pciVendorId == "10DE") {
+                    hasNvidia = true;
+                    nvName = d.name + " [" + d.driverVersion + "]";
+                    nvInfVer = FormatNvidiaDriverVersion(d.driverVersion);
+                } else if (d.pciVendorId == "1002") {
+                    hasAmd = true;
+                    amdName = d.name + " [" + d.driverVersion + "]";
+                } else if (d.pciVendorId == "8086") {
+                    hasIntelGpu = true;
+                    intelName = d.name + " [" + d.driverVersion + "]";
+                }
+            } else if (cls == "system" || cls == "hdc" || cls == "usb") {
+                if (d.pciVendorId == "1022") {
+                    hasAmdChipset = true;
+                    if (ContainsCaseInsensitive(d.driverProvider, "Advanced Micro Devices") &&
+                        (ContainsCaseInsensitive(d.name, "SMBus") ||
+                         ContainsCaseInsensitive(d.name, "AMD PCI") ||
+                         ContainsCaseInsensitive(d.name, "GPIO"))) {
+                        amdChipsetVer = d.driverVersion;
+                        amdChipsetInfName = d.name;
+                    }
+                } else if (d.pciVendorId == "8086" &&
+                           (ContainsCaseInsensitive(d.name, "Chipset") ||
+                            ContainsCaseInsensitive(d.name, "SMBus") ||
+                            ContainsCaseInsensitive(d.name, "LPC") ||
+                            ContainsCaseInsensitive(d.name, "Management Engine"))) {
+                    hasIntelChipset = true;
+                }
             }
         }
 
@@ -1966,12 +2595,74 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
                 "Официальный пакет Intel для обновления драйверов графики Intel Arc / UHD, Wi-Fi, Bluetooth и системных контроллеров.";
             gpu.detectedHardware = intelName;
             gpu.officialPageUrl = "https://www.intel.com/content/www/us/en/support/detect.html";
-            gpu.latestVersion = "Портал Intel";
+            gpu.directInstallerUrl = "https://dsadata.intel.com/installer";
+            gpu.wingetRepoPath = "i/Intel/IntelDriverAndSupportAssistant";
+            gpu.preferredArch = "x64";
+            gpu.latestVersion = "Поиск...";
             gpu.hardwareConnected = true;
             gpu.installed = (intelApp != nullptr);
             gpu.installedVersion = intelApp ? intelApp->displayVersion : "";
             gpu.statusText = intelApp ? ("Установлен (" + gpu.installedVersion + ")") : "Официальный портал Intel";
             result.push_back(std::move(gpu));
+        }
+
+        if (hasIntelChipset && !hasIntelGpu) {
+            SystemComponentItem chip;
+            chip.id = "chip_intel";
+            chip.category = ComponentCategory::MonitorAndGpu;
+            chip.name = "Intel Chipset Device Software / DSA";
+            chip.vendor = "Intel";
+            chip.purposeDescription =
+                "Официальные INF-пакеты чипсета Intel и помощник подбора драйверов материнской платы / контроллеров.";
+            chip.detectedHardware = "Чипсет Intel (PCI\\VEN_8086)";
+            chip.officialPageUrl = "https://www.intel.com/content/www/us/en/support/detect.html";
+            chip.directInstallerUrl = "https://dsadata.intel.com/installer";
+            chip.preferredArch = "x64";
+            chip.latestVersion = "Портал Intel";
+            chip.hardwareConnected = true;
+            const InstalledAppEntry* intelChipApp = FindInstalledApp(
+                apps, {"Intel(R) Chipset Device Software", "Intel Chipset", "Intel Driver & Support"});
+            chip.installed = (intelChipApp != nullptr);
+            chip.installedVersion = intelChipApp ? intelChipApp->displayVersion : "";
+            chip.statusText = intelChipApp
+                ? ("Установлен (" + chip.installedVersion + ")")
+                : "Проверить на сайте платы / Intel";
+            result.push_back(std::move(chip));
+        }
+
+        if (hasAmdChipset) {
+            const InstalledAppEntry* amdChipApp = FindInstalledApp(
+                apps, {"AMD Chipset Software", "AMD_Chipset_Drivers", "AMD Chipset Drivers"});
+            SystemComponentItem chip;
+            chip.id = "chip_amd";
+            chip.category = ComponentCategory::MonitorAndGpu;
+            chip.name = "AMD Chipset Drivers (Чипсет / PCI / PSP / SMBus)";
+            chip.vendor = "AMD";
+            chip.purposeDescription =
+                "Официальный пакет драйверов чипсета AMD Ryzen / AM4 / AM5 (энергосбережение, USB, PCIe, GPIO, PSP).";
+            chip.detectedHardware = "Чипсет AMD (PCI\\VEN_1022)";
+            chip.officialPageUrl = "https://www.amd.com/en/support/download/drivers.html";
+            chip.wingetRepoPath = "a/AMD/RyzenMaster";
+            chip.preferredArch = "x64";
+            chip.latestVersion = "Портал AMD";
+            chip.hardwareConnected = true;
+            chip.installed = (amdChipApp != nullptr) || !amdChipsetVer.empty();
+            if (amdChipApp && !amdChipApp->displayVersion.empty()) {
+                chip.installedVersion = amdChipApp->displayVersion;
+            } else if (!amdChipsetVer.empty()) {
+                chip.installedVersion = amdChipsetVer;
+            }
+            if (chip.installed) {
+                if (amdChipApp) {
+                    chip.statusText = "Установлен (" + chip.installedVersion + ")";
+                } else {
+                    chip.statusText = "Драйверы AMD (" + chip.installedVersion +
+                        (!amdChipsetInfName.empty() ? ", " + amdChipsetInfName : "") + ")";
+                }
+            } else {
+                chip.statusText = "Рекомендуется пакет чипсета AMD";
+            }
+            result.push_back(std::move(chip));
         }
     }
 

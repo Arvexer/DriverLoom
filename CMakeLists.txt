@@ -55,6 +55,7 @@ add_executable(DriverLoom WIN32
     src/core/LocalDriverInstaller.cpp
     src/core/SystemRestore.cpp
     src/core/SystemComponentsScanner.cpp
+    src/core/SystemDiagnostics.cpp
     resources/version.rc
 )
 

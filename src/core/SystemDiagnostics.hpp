@@ -1,0 +1,148 @@
+#pragma once
+
+#include "common/AppCommon.hpp"
+#include "core/DeviceScanner.hpp"
+
+#include <atomic>
+#include <functional>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+namespace hdm {
+
+struct MotherboardInfo {
+    std::string manufacturer;
+    std::string product;
+    std::string systemManufacturer;
+    std::string systemProduct;
+    std::string biosVersion;
+    std::string biosDate;
+    std::string supportUrl;
+};
+
+struct WindowsReadinessInfo {
+    bool cbsRebootPending{false};
+    bool wuRebootRequired{false};
+    bool pendingFileRenames{false};
+    bool systemRestoreEnabled{false};
+    bool systemRestorePolicyDisabled{false};
+};
+
+enum class ControllerHealth {
+    Ok,
+    Attention, // Generic Windows driver or aged vendor driver
+    Problem    // Missing driver or SetupAPI problem code
+};
+
+struct ControllerDiagnosticItem {
+    std::string role; // Чипсет, Видеокарта, Сеть (LAN), Wi-Fi / BT, Аудио
+    std::string deviceName;
+    std::string manufacturer;
+    std::string driverVersion;
+    std::string driverDate;
+    std::string infName;
+    std::string hardwareId;
+    std::string searchKey;
+    std::string statusText;
+    ControllerHealth health{ControllerHealth::Ok};
+};
+
+enum class ServiceHealthState {
+    Healthy,  // Running or Demand-start ready
+    Disabled, // Disabled in SCM -> blocks updates/installs
+    MissingOrError
+};
+
+struct ServiceHealthItem {
+    std::string serviceName;
+    std::string displayName;
+    std::string purpose;
+    std::string stateText;
+    std::string startTypeText;
+    ServiceHealthState health{ServiceHealthState::Healthy};
+    bool criticalForUpdates{true};
+    bool preferAutoStart{false};
+};
+
+struct SystemDiagnosticsSnapshot {
+    MotherboardInfo motherboard;
+    WindowsReadinessInfo readiness;
+    std::vector<ControllerDiagnosticItem> controllers;
+    std::vector<ServiceHealthItem> services;
+    size_t disabledCriticalServices{0};
+    size_t attentionControllers{0};
+    bool valid{false};
+};
+
+enum class MaintenanceAction {
+    EnableService,
+    SfcScan,
+    DismCheckHealth,
+    DismRestoreHealth,
+    ResetWuDownloadCache
+};
+
+class SystemDiagnostics {
+public:
+    using ActionDoneCallback = std::function<void(bool ok)>;
+
+    SystemDiagnostics() = default;
+    ~SystemDiagnostics();
+
+    SystemDiagnostics(const SystemDiagnostics&) = delete;
+    SystemDiagnostics& operator=(const SystemDiagnostics&) = delete;
+
+    void StartScanAsync(std::vector<DeviceInfo> devicesSnapshot, LogCallback onLog = nullptr);
+
+    void RunMaintenanceAsync(
+        MaintenanceAction action,
+        const std::string& targetArg,
+        std::vector<DeviceInfo> devicesSnapshot,
+        LogCallback onLog,
+        ActionDoneCallback onComplete = nullptr);
+
+    void RequestCancel() noexcept { cancelRequested_.store(true); }
+
+    [[nodiscard]] bool IsScanning() const noexcept { return scanning_.load(); }
+    [[nodiscard]] bool IsRunningAction() const noexcept { return runningAction_.load(); }
+    [[nodiscard]] bool IsBusy() const noexcept { return scanning_.load() || runningAction_.load(); }
+    [[nodiscard]] uint64_t Generation() const noexcept { return generation_.load(); }
+    [[nodiscard]] std::string ActionPhase() const;
+
+    SystemDiagnosticsSnapshot GetSnapshot() const;
+
+    static SystemDiagnosticsSnapshot CollectSynchronously(
+        const std::vector<DeviceInfo>& devicesSnapshot);
+
+    // Synchronous elevated CLI operations.
+    static bool EnableServiceSync(
+        const std::string& serviceName,
+        bool autoStart,
+        const LogCallback& onLog);
+    static bool ResetWuDownloadCacheSync(const LogCallback& onLog);
+    static bool RunSystemToolSync(
+        const std::wstring& exeName,
+        const std::wstring& arguments,
+        const std::string& title,
+        const LogCallback& onLog,
+        const std::atomic<bool>* cancelFlag = nullptr);
+
+private:
+    void SetActionPhase(const std::string& msg);
+
+    std::atomic<bool> scanning_{false};
+    std::atomic<bool> runningAction_{false};
+    std::atomic<bool> cancelRequested_{false};
+    std::atomic<uint64_t> generation_{0};
+
+    mutable std::mutex dataMutex_;
+    SystemDiagnosticsSnapshot snapshot_;
+    std::string actionPhase_;
+
+    std::thread scanThread_;
+    std::thread actionThread_;
+};
+
+} // namespace hdm

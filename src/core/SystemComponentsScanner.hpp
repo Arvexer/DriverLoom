@@ -30,11 +30,15 @@ struct SystemComponentItem {
     std::string officialPageUrl;
     std::string directInstallerUrl;
     std::string installerArgs;
+    std::string nestedInstallerHint;
+    std::string wingetRepoPath;
+    std::string preferredArch;
     std::string statusText;
     bool installed{false};
     bool updateAvailable{false};
     bool hardwareConnected{false};
     bool onlineChecked{false};
+    bool compareVersions{true};
 };
 
 class SystemComponentsScanner {

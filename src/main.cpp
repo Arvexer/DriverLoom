@@ -2,6 +2,7 @@
 #include "core/DeviceScanner.hpp"
 #include "core/LocalDriverInstaller.hpp"
 #include "core/SystemComponentsScanner.hpp"
+#include "core/SystemDiagnostics.hpp"
 #include "core/SystemRestore.hpp"
 #include "core/WindowsUpdateManager.hpp"
 
@@ -358,7 +359,17 @@ int RunCliModeIfRequested() {
         ~ArgvGuard() { LocalFree(ptr); }
     } guard{argv};
 
-    enum class Mode { None, RestorePoint, InstallInf, WuInstall };
+    enum class Mode {
+        None,
+        RestorePoint,
+        InstallInf,
+        WuInstall,
+        EnableService,
+        ResetWuCache,
+        SfcScan,
+        DismCheck,
+        DismRestore
+    };
     Mode mode = Mode::None;
     std::wstring targetArg;
     std::wstring logPath;
@@ -366,6 +377,7 @@ int RunCliModeIfRequested() {
     bool forceInf = false;
     bool restoreBefore = false;
     bool driversOnly = false;
+    bool autoStartService = false;
 
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
@@ -378,6 +390,17 @@ int RunCliModeIfRequested() {
         } else if (arg == L"--cli-wu-install" && i + 1 < argc) {
             mode = Mode::WuInstall;
             targetArg = argv[++i];
+        } else if (arg == L"--cli-enable-service" && i + 1 < argc) {
+            mode = Mode::EnableService;
+            targetArg = argv[++i];
+        } else if (arg == L"--cli-reset-wucache") {
+            mode = Mode::ResetWuCache;
+        } else if (arg == L"--cli-sfc") {
+            mode = Mode::SfcScan;
+        } else if (arg == L"--cli-dism-check") {
+            mode = Mode::DismCheck;
+        } else if (arg == L"--cli-dism-restore") {
+            mode = Mode::DismRestore;
         } else if (arg == L"--log" && i + 1 < argc) {
             logPath = argv[++i];
         } else if (arg == L"--cancel-file" && i + 1 < argc) {
@@ -388,6 +411,8 @@ int RunCliModeIfRequested() {
             restoreBefore = true;
         } else if (arg == L"--drivers-only") {
             driversOnly = true;
+        } else if (arg == L"--auto-start") {
+            autoStartService = true;
         }
     }
 
@@ -429,6 +454,73 @@ int RunCliModeIfRequested() {
         return summary.rebootRequired ? 2 : 0;
     }
 
+    if (mode == Mode::EnableService) {
+        return hdm::SystemDiagnostics::EnableServiceSync(
+                   hdm::WideToUtf8(targetArg), autoStartService, fileLogger)
+                   ? 0
+                   : 1;
+    }
+
+    if (mode == Mode::ResetWuCache) {
+        return hdm::SystemDiagnostics::ResetWuDownloadCacheSync(fileLogger) ? 0 : 1;
+    }
+
+    struct CancelFileWatcherGuard {
+        std::atomic<bool> cancel{false};
+        std::atomic<bool> stop{false};
+        std::thread watcher;
+
+        explicit CancelFileWatcherGuard(const std::wstring& path) {
+            if (!path.empty()) {
+                const std::filesystem::path marker(path);
+                watcher = std::thread([marker, this]() {
+                    while (!stop.load()) {
+                        std::error_code ec;
+                        if (std::filesystem::exists(marker, ec)) {
+                            cancel.store(true);
+                            break;
+                        }
+                        Sleep(200);
+                    }
+                });
+            }
+        }
+        ~CancelFileWatcherGuard() {
+            stop.store(true);
+            if (watcher.joinable()) {
+                watcher.join();
+            }
+        }
+    };
+
+    if (mode == Mode::SfcScan || mode == Mode::DismCheck || mode == Mode::DismRestore) {
+        CancelFileWatcherGuard cancelGuard(cancelFilePath);
+        if (mode == Mode::SfcScan) {
+            return hdm::SystemDiagnostics::RunSystemToolSync(
+                       L"sfc.exe", L"/scannow", "SFC /scannow", fileLogger, &cancelGuard.cancel)
+                       ? 0
+                       : 1;
+        }
+        if (mode == Mode::DismCheck) {
+            return hdm::SystemDiagnostics::RunSystemToolSync(
+                       L"dism.exe",
+                       L"/Online /Cleanup-Image /CheckHealth",
+                       "DISM /CheckHealth",
+                       fileLogger,
+                       &cancelGuard.cancel)
+                       ? 0
+                       : 1;
+        }
+        return hdm::SystemDiagnostics::RunSystemToolSync(
+                   L"dism.exe",
+                   L"/Online /Cleanup-Image /RestoreHealth",
+                   "DISM /RestoreHealth",
+                   fileLogger,
+                   &cancelGuard.cancel)
+                   ? 0
+                   : 1;
+    }
+
     if (mode == Mode::WuInstall) {
         std::vector<std::string> ids;
         std::stringstream ss(hdm::WideToUtf8(targetArg));
@@ -449,22 +541,7 @@ int RunCliModeIfRequested() {
         };
 
         std::atomic<float> workerProgress{0.0f};
-        std::atomic<bool> workerCancel{false};
-        std::atomic<bool> watchStop{false};
-        std::thread cancelWatcher;
-        if (!cancelFilePath.empty()) {
-            const std::filesystem::path marker(cancelFilePath);
-            cancelWatcher = std::thread([marker, &workerCancel, &watchStop]() {
-                while (!watchStop.load()) {
-                    std::error_code ec;
-                    if (std::filesystem::exists(marker, ec)) {
-                        workerCancel.store(true);
-                        break;
-                    }
-                    Sleep(200);
-                }
-            });
-        }
+        CancelFileWatcherGuard cancelGuard(cancelFilePath);
 
         const hdm::WuInstallSummary summary =
             hdm::WindowsUpdateManager::DownloadAndInstallSync(
@@ -472,7 +549,7 @@ int RunCliModeIfRequested() {
                 restoreBefore,
                 fileLogger,
                 &workerProgress,
-                &workerCancel,
+                &cancelGuard.cancel,
                 [&](const std::string& phase) {
                     const int milli = static_cast<int>(
                         std::clamp(workerProgress.load(), 0.0f, 1.0f) * 1000.0f);
@@ -490,11 +567,6 @@ int RunCliModeIfRequested() {
                         sanitizeMeta(statusText));
                 },
                 driversOnly);
-
-        watchStop.store(true);
-        if (cancelWatcher.joinable()) {
-            cancelWatcher.join();
-        }
 
         if (summary.failedCount > 0 && summary.installedCount == 0) {
             return 1;
@@ -564,6 +636,10 @@ public:
                 RenderLocalInstallerTab();
                 ImGui::EndTabItem();
             }
+            if (ImGui::BeginTabItem("  Система и диагностика  ")) {
+                RenderDiagnosticsTab();
+                ImGui::EndTabItem();
+            }
             ImGui::EndTabBar();
         }
         ImGui::EndChild();
@@ -617,6 +693,9 @@ private:
             if (!componentsScanner_.IsScanning() && !componentsScanner_.IsInstalling()) {
                 componentsScanner_.StartLocalScanAsync(devicesCache_, MakeLogger());
             }
+            if (!diagnostics_.IsBusy()) {
+                diagnostics_.StartScanAsync(devicesCache_, MakeLogger());
+            }
         }
 
         const uint64_t compGen = componentsScanner_.Generation();
@@ -624,6 +703,12 @@ private:
             componentsCache_ = componentsScanner_.GetItemsSnapshot();
             lastComponentsGen_ = compGen;
             compViewDirty_ = true;
+        }
+
+        const uint64_t diagGen = diagnostics_.Generation();
+        if (diagGen != lastDiagGen_) {
+            diagCache_ = diagnostics_.GetSnapshot();
+            lastDiagGen_ = diagGen;
         }
 
         if (pendingDeviceRescan_.exchange(false) && !scanner_.IsScanning()) {
@@ -639,6 +724,9 @@ private:
                 !componentsScanner_.IsCheckingOnline()) {
                 lastFocusRefreshTime_ = now;
                 componentsScanner_.RefreshLocalPreserveOnlineAsync(devicesCache_);
+                if (!diagnostics_.IsBusy()) {
+                    diagnostics_.StartScanAsync(devicesCache_, nullptr);
+                }
             }
         }
     }
@@ -1622,6 +1710,391 @@ private:
         }
     }
 
+    void RenderDiagnosticsTab() {
+        const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+        const ImGuiStyle& style = ImGui::GetStyle();
+        const bool busy = diagnostics_.IsBusy();
+        const bool isAppForeground = (GetForegroundWindow() == hwnd_);
+
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button("Обновить диагностику")) {
+            diagnostics_.StartScanAsync(devicesCache_, MakeLogger());
+        }
+        ImGui::EndDisabled();
+
+        SameLineWrapIfNeeded(CalcButtonWidth("Очистить кэш WU"));
+        ImGui::BeginDisabled(busy);
+        if (ImGui::Button("Очистить кэш WU")) {
+            diagnostics_.RunMaintenanceAsync(
+                hdm::MaintenanceAction::ResetWuDownloadCache,
+                "",
+                devicesCache_,
+                MakeLogger());
+        }
+        ImGui::EndDisabled();
+        if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip(
+                "Останавливает wuauserv и BITS, очищает папку загрузок Windows Update "
+                "(SoftwareDistribution\\Download) и запускает службы заново.\n"
+                "Помогает, если скачивание обновлений зависло или повреждено.");
+        }
+
+        if (diagnostics_.IsRunningAction()) {
+            SameLineWrapIfNeeded(CalcButtonWidth("Отмена"));
+            if (ImGui::Button("Отмена")) {
+                diagnostics_.RequestCancel();
+            }
+            const std::string phase = diagnostics_.ActionPhase();
+            if (!phase.empty()) {
+                ImGui::SameLine(0.0f, 12.0f);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextColored(ImVec4(0.98f, 0.75f, 0.14f, 1.00f), "%s", phase.c_str());
+            }
+        } else if (diagCache_.valid) {
+            ImGui::SameLine(0.0f, 14.0f);
+            ImGui::AlignTextToFramePadding();
+            if (diagCache_.disabledCriticalServices > 0) {
+                ImGui::TextColored(
+                    ImVec4(0.97f, 0.44f, 0.44f, 1.00f),
+                    "Отключено критичных служб: %zu",
+                    diagCache_.disabledCriticalServices);
+            } else if (diagCache_.attentionControllers > 0) {
+                ImGui::TextColored(
+                    ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
+                    "Требуют проверки (контроллеры): %zu",
+                    diagCache_.attentionControllers);
+            } else {
+                ImGui::TextColored(
+                    ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
+                    "Системное окружение готово к обновлениям");
+            }
+        }
+
+        ImGui::Spacing();
+
+        if (!diagCache_.valid) {
+            ImGui::TextDisabled("Выполняется сбор сведений о материнской плате, службах и драйверах...");
+            return;
+        }
+
+        // Top cards: Motherboard/BIOS & Windows Readiness
+        const float cardH = std::max(126.0f, ImGui::GetTextLineHeight() * 6.5f + style.WindowPadding.y * 2.0f);
+        if (ImGui::BeginTable("##DiagSummaryCards", 2, ImGuiTableFlags_SizingStretchSame)) {
+            ImGui::TableNextRow();
+
+            ImGui::TableSetColumnIndex(0);
+            ImGui::BeginChild(
+                "##MoboDiagCard",
+                ImVec2(0.0f, cardH),
+                true,
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            const auto& mb = diagCache_.motherboard;
+            ImGui::TextColored(ImVec4(0.42f, 0.70f, 1.00f, 1.00f), "Материнская плата и BIOS");
+            std::string boardTitle;
+            if (!mb.manufacturer.empty() && mb.manufacturer != "—") {
+                boardTitle = mb.manufacturer;
+            } else if (!mb.systemManufacturer.empty() && mb.systemManufacturer != "—") {
+                boardTitle = mb.systemManufacturer;
+            }
+            if (!mb.product.empty() && mb.product != "—") {
+                if (!boardTitle.empty()) boardTitle += " ";
+                boardTitle += mb.product;
+            } else if (!mb.systemProduct.empty() && mb.systemProduct != "—") {
+                if (!boardTitle.empty()) boardTitle += " ";
+                boardTitle += mb.systemProduct;
+            }
+            if (boardTitle.empty()) {
+                boardTitle = "Модель не определена в SMBIOS";
+            }
+            ImGui::Text("Плата: %s", boardTitle.c_str());
+            ImGui::TextDisabled(
+                "BIOS: %s  (%s)",
+                mb.biosVersion.empty() ? "—" : mb.biosVersion.c_str(),
+                mb.biosDate.empty() ? "—" : mb.biosDate.c_str());
+
+            ImGui::Spacing();
+            if (!mb.supportUrl.empty()) {
+                if (ImGui::Button("Сайт поддержки платы")) {
+                    OpenUrlInBrowser(mb.supportUrl);
+                }
+                ImGui::SameLine();
+            }
+            if (ImGui::Button("Найти драйверы (Google)")) {
+                OpenUrlInBrowser(
+                    "https://www.google.com/search?q=" +
+                    UrlEncode(boardTitle + " chipset lan audio drivers Windows"));
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Копировать")) {
+                const std::string copyText =
+                    boardTitle + " | BIOS: " + mb.biosVersion + " (" + mb.biosDate + ")";
+                ImGui::SetClipboardText(copyText.c_str());
+                logBuffer_.Push(hdm::LogLevel::Info, "Скопировано в буфер: " + copyText);
+            }
+            ImGui::EndChild();
+
+            ImGui::TableSetColumnIndex(1);
+            ImGui::BeginChild(
+                "##ReadinessDiagCard",
+                ImVec2(0.0f, cardH),
+                true,
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            const auto& rd = diagCache_.readiness;
+            ImGui::TextColored(ImVec4(0.42f, 0.70f, 1.00f, 1.00f), "Готовность Windows и защита");
+
+            if (rd.cbsRebootPending || rd.wuRebootRequired) {
+                RenderStatusBadge(
+                    ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
+                    "Ожидается перезагрузка Windows (WU / CBS)");
+            } else if (rd.pendingFileRenames) {
+                RenderStatusBadge(
+                    ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
+                    "Есть отложенные операции замены системных файлов");
+            } else {
+                RenderStatusBadge(
+                    ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
+                    "Перезагрузка не требуется");
+            }
+
+            if (rd.systemRestorePolicyDisabled) {
+                RenderStatusBadge(
+                    ImVec4(0.97f, 0.44f, 0.44f, 1.00f),
+                    "Точки восстановления запрещены политикой (DisableSR)");
+            } else if (rd.systemRestoreEnabled) {
+                RenderStatusBadge(
+                    ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
+                    "Защита системы (точки восстановления) активна");
+            } else {
+                RenderStatusBadge(
+                    ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
+                    "Защита системы отключена — точки могут не создаться");
+            }
+
+            if (diagCache_.disabledCriticalServices > 0) {
+                char svcWarn[128];
+                std::snprintf(
+                    svcWarn,
+                    sizeof(svcWarn),
+                    "Отключены критичные службы: %zu шт. (см. вкладку служб)",
+                    diagCache_.disabledCriticalServices);
+                RenderStatusBadge(ImVec4(0.97f, 0.44f, 0.44f, 1.00f), svcWarn);
+            } else {
+                RenderStatusBadge(
+                    ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
+                    "Критичные службы обновлений и защиты не отключены");
+            }
+            ImGui::EndChild();
+
+            ImGui::EndTable();
+        }
+
+        ImGui::Spacing();
+
+        // Section switcher pills: Controllers vs Windows Services
+        char ctrlPill[96];
+        std::snprintf(
+            ctrlPill,
+            sizeof(ctrlPill),
+            "Ключевые контроллеры платы (%zu)",
+            diagCache_.controllers.size());
+        if (RenderPillButton(ctrlPill, diagSectionIndex_ == 0)) {
+            diagSectionIndex_ = 0;
+        }
+
+        char svcPill[96];
+        if (diagCache_.disabledCriticalServices > 0) {
+            std::snprintf(
+                svcPill,
+                sizeof(svcPill),
+                "Службы Windows и обновления (%zu | %zu откл.!)",
+                diagCache_.services.size(),
+                diagCache_.disabledCriticalServices);
+        } else {
+            std::snprintf(
+                svcPill,
+                sizeof(svcPill),
+                "Службы Windows и обновления (%zu)",
+                diagCache_.services.size());
+        }
+        SameLineWrapIfNeeded(CalcButtonWidth(svcPill));
+        if (RenderPillButton(svcPill, diagSectionIndex_ == 1)) {
+            diagSectionIndex_ = 1;
+        }
+
+        ImGui::Spacing();
+
+        const float bottomBarH = ImGui::GetFrameHeightWithSpacing() + style.ItemSpacing.y;
+        const float tableH = std::max(140.0f, ImGui::GetContentRegionAvail().y - bottomBarH);
+        constexpr ImGuiTableFlags kDiagTableFlags =
+            ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg |
+            ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_ScrollY;
+
+        if (diagSectionIndex_ == 0) {
+            const float actionColW =
+                CalcButtonWidth("Каталог MS") + style.ItemSpacing.x + CalcButtonWidth("Поиск") +
+                style.CellPadding.x * 2.0f + 6.0f;
+            if (ImGui::BeginTable("##DiagControllersTable", 5, kDiagTableFlags, ImVec2(0.0f, tableH))) {
+                ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableSetupColumn("Состояние", ImGuiTableColumnFlags_WidthStretch, 0.95f);
+                ImGui::TableSetupColumn("Роль", ImGuiTableColumnFlags_WidthStretch, 0.65f);
+                ImGui::TableSetupColumn("Устройство", ImGuiTableColumnFlags_WidthStretch, 1.45f);
+                ImGui::TableSetupColumn("Драйвер / Дата", ImGuiTableColumnFlags_WidthStretch, 1.05f);
+                ImGui::TableSetupColumn("Действие", ImGuiTableColumnFlags_WidthFixed, actionColW);
+                ImGui::TableHeadersRow();
+
+                for (size_t i = 0; i < diagCache_.controllers.size(); ++i) {
+                    const auto& item = diagCache_.controllers[i];
+                    ImGui::TableNextRow();
+                    ImGui::PushID(static_cast<int>(i));
+
+                    ImGui::TableSetColumnIndex(0);
+                    ImVec4 col(0.20f, 0.83f, 0.60f, 1.00f);
+                    if (item.health == hdm::ControllerHealth::Problem) {
+                        col = ImVec4(0.97f, 0.44f, 0.44f, 1.00f);
+                    } else if (item.health == hdm::ControllerHealth::Attention) {
+                        col = ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
+                    }
+                    RenderStatusBadge(col, item.statusText.c_str());
+
+                    ImGui::TableSetColumnIndex(1);
+                    ImGui::TextUnformatted(item.role.c_str());
+
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::TextUnformatted(item.deviceName.c_str());
+                    if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                        ImGui::BeginTooltip();
+                        ImGui::PushTextWrapPos(420.0f * uiScale);
+                        ImGui::TextColored(ImVec4(0.42f, 0.70f, 1.00f, 1.00f), "%s", item.deviceName.c_str());
+                        ImGui::TextDisabled(
+                            "Поставщик: %s | INF: %s",
+                            item.manufacturer.empty() ? "—" : item.manufacturer.c_str(),
+                            item.infName.empty() ? "—" : item.infName.c_str());
+                        if (!item.hardwareId.empty()) {
+                            ImGui::TextWrapped("Hardware ID: %s", item.hardwareId.c_str());
+                        }
+                        ImGui::PopTextWrapPos();
+                        ImGui::EndTooltip();
+                    }
+
+                    ImGui::TableSetColumnIndex(3);
+                    std::string verDate = item.driverVersion.empty() ? "—" : item.driverVersion;
+                    if (!item.driverDate.empty()) {
+                        verDate += " (" + item.driverDate + ")";
+                    }
+                    ImGui::TextUnformatted(verDate.c_str());
+
+                    ImGui::TableSetColumnIndex(4);
+                    const bool hasKey = !item.searchKey.empty();
+                    ImGui::BeginDisabled(!hasKey);
+                    if (ImGui::SmallButton("Каталог MS")) {
+                        OpenUrlInBrowser(
+                            "https://www.catalog.update.microsoft.com/Search.aspx?q=" +
+                            UrlEncode(item.searchKey));
+                    }
+                    ImGui::EndDisabled();
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton("Поиск")) {
+                        const std::string q =
+                            (hasKey ? (item.searchKey + " " + item.deviceName) : item.deviceName) +
+                            " Windows driver";
+                        OpenUrlInBrowser("https://www.google.com/search?q=" + UrlEncode(q));
+                    }
+
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+            }
+        } else {
+            const float svcActionW = CalcButtonWidth("Включить") + style.CellPadding.x * 2.0f + 8.0f;
+            if (ImGui::BeginTable("##DiagServicesTable", 5, kDiagTableFlags, ImVec2(0.0f, tableH))) {
+                ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableSetupColumn("Статус", ImGuiTableColumnFlags_WidthStretch, 0.72f);
+                ImGui::TableSetupColumn("Служба", ImGuiTableColumnFlags_WidthStretch, 1.15f);
+                ImGui::TableSetupColumn("Назначение", ImGuiTableColumnFlags_WidthStretch, 1.45f);
+                ImGui::TableSetupColumn("Тип запуска", ImGuiTableColumnFlags_WidthStretch, 0.72f);
+                ImGui::TableSetupColumn("Действие", ImGuiTableColumnFlags_WidthFixed, svcActionW);
+                ImGui::TableHeadersRow();
+
+                for (size_t i = 0; i < diagCache_.services.size(); ++i) {
+                    const auto& svc = diagCache_.services[i];
+                    ImGui::TableNextRow();
+                    ImGui::PushID(static_cast<int>(i));
+
+                    ImGui::TableSetColumnIndex(0);
+                    ImVec4 col(0.20f, 0.83f, 0.60f, 1.00f);
+                    if (svc.health == hdm::ServiceHealthState::Disabled) {
+                        col = ImVec4(0.97f, 0.44f, 0.44f, 1.00f);
+                    } else if (svc.health == hdm::ServiceHealthState::MissingOrError) {
+                        col = ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
+                    }
+                    RenderStatusBadge(col, svc.stateText.c_str());
+
+                    ImGui::TableSetColumnIndex(1);
+                    const std::string svcLabel = svc.serviceName + " — " + svc.displayName;
+                    ImGui::TextUnformatted(svcLabel.c_str());
+
+                    ImGui::TableSetColumnIndex(2);
+                    ImGui::TextUnformatted(svc.purpose.c_str());
+
+                    ImGui::TableSetColumnIndex(3);
+                    ImGui::TextUnformatted(svc.startTypeText.c_str());
+
+                    ImGui::TableSetColumnIndex(4);
+                    if (svc.health == hdm::ServiceHealthState::Disabled) {
+                        ImGui::BeginDisabled(busy);
+                        if (ImGui::SmallButton("Включить")) {
+                            diagnostics_.RunMaintenanceAsync(
+                                hdm::MaintenanceAction::EnableService,
+                                svc.serviceName,
+                                devicesCache_,
+                                MakeLogger());
+                        }
+                        ImGui::EndDisabled();
+                    } else {
+                        ImGui::TextDisabled("—");
+                    }
+
+                    ImGui::PopID();
+                }
+                ImGui::EndTable();
+            }
+        }
+
+        ImGui::Spacing();
+
+        // Bottom Maintenance Toolbar (always reachable)
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("Проверка системных файлов:");
+        ImGui::BeginDisabled(busy);
+        SameLineWrapIfNeeded(CalcButtonWidth("SFC /scannow"));
+        if (ImGui::Button("SFC /scannow")) {
+            diagnostics_.RunMaintenanceAsync(
+                hdm::MaintenanceAction::SfcScan, "", devicesCache_, MakeLogger());
+        }
+        if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip("Запускает встроенную проверку и восстановление защищённых файлов Windows (sfc.exe /scannow).");
+        }
+
+        SameLineWrapIfNeeded(CalcButtonWidth("DISM CheckHealth"));
+        if (ImGui::Button("DISM CheckHealth")) {
+            diagnostics_.RunMaintenanceAsync(
+                hdm::MaintenanceAction::DismCheckHealth, "", devicesCache_, MakeLogger());
+        }
+        if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip("Быстрая проверка хранилища компонентов Windows без изменений (DISM /CheckHealth).");
+        }
+
+        SameLineWrapIfNeeded(CalcButtonWidth("DISM RestoreHealth"));
+        if (ImGui::Button("DISM RestoreHealth")) {
+            diagnostics_.RunMaintenanceAsync(
+                hdm::MaintenanceAction::DismRestoreHealth, "", devicesCache_, MakeLogger());
+        }
+        if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip("Глубокое восстановление хранилища компонентов Windows через Windows Update (DISM /RestoreHealth).");
+        }
+        ImGui::EndDisabled();
+    }
+
     void RenderLogPanel() {
         bool wasDirty = false;
         const auto entries = logBuffer_.Snapshot(&wasDirty);
@@ -1689,9 +2162,15 @@ private:
     hdm::LogBuffer logBuffer_;
     hdm::DeviceScanner scanner_;
     hdm::SystemComponentsScanner componentsScanner_;
+    hdm::SystemDiagnostics diagnostics_;
     hdm::WindowsUpdateManager wuManager_;
     hdm::LocalDriverInstaller localInstaller_;
     hdm::SystemRestore systemRestore_;
+
+    // System diagnostics snapshot & tab subview state
+    hdm::SystemDiagnosticsSnapshot diagCache_;
+    uint64_t lastDiagGen_{0};
+    int diagSectionIndex_{0};
 
     // Cached Devices UI state (zero per-frame filtering/sorting allocations)
     std::vector<hdm::DeviceInfo> devicesCache_;
