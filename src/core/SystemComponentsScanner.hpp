@@ -32,6 +32,7 @@ struct SystemComponentItem {
     std::string installerArgs;
     std::string nestedInstallerHint;
     std::string wingetRepoPath;
+    std::string catalogSearchKey;
     std::string preferredArch;
     std::string statusText;
     bool installed{false};

@@ -1,6 +1,8 @@
 #include "core/SystemComponentsScanner.hpp"
+#include "core/LocalDriverInstaller.hpp"
 
 #include <oleauto.h>
+#include <setupapi.h>
 #include <shldisp.h>
 #include <softpub.h>
 #include <winhttp.h>
@@ -375,7 +377,8 @@ HttpResponse WinHttpRequest(
     const wchar_t* method,
     bool followRedirects = true,
     size_t maxBytes = 256 * 1024,
-    const wchar_t* extraHeaders = nullptr) {
+    const wchar_t* extraHeaders = nullptr,
+    std::string_view postBody = {}) {
     HttpResponse res;
     URL_COMPONENTS urlComp{};
     urlComp.dwStructSize = sizeof(urlComp);
@@ -432,8 +435,12 @@ HttpResponse WinHttpRequest(
             WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
     }
 
+    LPVOID bodyPtr = postBody.empty()
+                         ? WINHTTP_NO_REQUEST_DATA
+                         : const_cast<char*>(postBody.data());
+    const DWORD bodyLen = static_cast<DWORD>(postBody.size());
     if (!WinHttpSendRequest(request.Get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+                            bodyPtr, bodyLen, bodyLen, 0) ||
         !WinHttpReceiveResponse(request.Get(), nullptr)) {
         return res;
     }
@@ -607,6 +614,150 @@ std::pair<std::string, std::string> ParseAmdChipsetFromHtml(const std::string& h
         return {};
     }
     return {bestVer, "https://drivers.amd.com/drivers/amd_chipset_software_" + bestVer + ".exe"};
+}
+
+bool IsValidCatalogGuid(std::string_view s) {
+    if (s.size() != 36) return false;
+    for (size_t i = 0; i < 36; ++i) {
+        const char ch = s[i];
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (ch != '-') return false;
+        } else if (!std::isxdigit(static_cast<unsigned char>(ch))) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string UrlEncodeCatalogParam(std::string_view val) {
+    static constexpr char kHex[] = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(val.size() * 3);
+    for (unsigned char c : val) {
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') {
+            out.push_back(static_cast<char>(c));
+        } else {
+            out.push_back('%');
+            out.push_back(kHex[(c >> 4) & 0x0F]);
+            out.push_back(kHex[c & 0x0F]);
+        }
+    }
+    return out;
+}
+
+// Queries Microsoft Update Catalog for a Hardware ID fragment (e.g. VEN_10EC&DEV_8125),
+// selects the highest WHQL version (preferring Windows 11 targets on ties), and fetches its .cab URL.
+std::pair<std::string, std::string> ResolveMsCatalogDriverCab(const std::string& searchKey) {
+    if (searchKey.empty()) {
+        return {};
+    }
+    const std::wstring searchUrl = Utf8ToWide(
+        "https://www.catalog.update.microsoft.com/Search.aspx?q=" +
+        UrlEncodeCatalogParam(searchKey));
+    const HttpResponse searchResp = WinHttpRequest(searchUrl, L"GET", true, 512 * 1024);
+    if (!searchResp.ok || searchResp.body.empty()) {
+        return {};
+    }
+
+    const std::string& html = searchResp.body;
+    std::string bestGuid;
+    std::string bestVer;
+    bool bestHasWin11 = false;
+
+    size_t pos = 0;
+    while ((pos = html.find("_C5_R", pos)) != std::string::npos) {
+        if (pos < 36) {
+            pos += 5;
+            continue;
+        }
+        const std::string_view guidCandidate(html.data() + pos - 36, 36);
+        if (!IsValidCatalogGuid(guidCandidate)) {
+            pos += 5;
+            continue;
+        }
+
+        const size_t tdClose = html.find('>', pos + 5);
+        const size_t endTd = (tdClose != std::string::npos) ? html.find("</td>", tdClose + 1) : std::string::npos;
+        if (tdClose == std::string::npos || endTd == std::string::npos || endTd - tdClose > 80) {
+            pos += 5;
+            continue;
+        }
+
+        const std::string ver = TrimCopy(std::string_view(html.data() + tdClose + 1, endTd - tdClose - 1));
+        bool validVer = !ver.empty() && std::isdigit(static_cast<unsigned char>(ver.front())) != 0 &&
+                        ver.find('.') != std::string::npos;
+        for (char ch : ver) {
+            if (!std::isdigit(static_cast<unsigned char>(ch)) && ch != '.') {
+                validVer = false;
+                break;
+            }
+        }
+
+        if (validVer) {
+            const size_t winStart = (pos > 900) ? (pos - 900) : 0;
+            const std::string_view rowChunk(html.data() + winStart, pos - winStart);
+            const bool hasWin11 = (rowChunk.find("Windows 11") != std::string_view::npos);
+            const bool strictlyNewer = bestVer.empty() || IsVersionNewer(ver, bestVer);
+            const bool sameVerBetterOs = (!bestVer.empty() && !IsVersionNewer(ver, bestVer) &&
+                                          !IsVersionNewer(bestVer, ver) && !bestHasWin11 && hasWin11);
+            if (strictlyNewer || sameVerBetterOs) {
+                bestVer = ver;
+                bestGuid.assign(guidCandidate);
+                bestHasWin11 = hasWin11;
+            }
+        }
+        pos = endTd + 5;
+    }
+
+    if (bestGuid.empty() || bestVer.empty()) {
+        return {};
+    }
+
+    const std::string postBody =
+        "updateIDs=" +
+        UrlEncodeCatalogParam("[{\"size\":0,\"languages\":\"\",\"uidInfo\":\"" + bestGuid +
+                              "\",\"updateID\":\"" + bestGuid + "\"}]");
+    const HttpResponse dlResp = WinHttpRequest(
+        L"https://www.catalog.update.microsoft.com/DownloadDialog.aspx",
+        L"POST",
+        true,
+        128 * 1024,
+        L"Content-Type: application/x-www-form-urlencoded\r\n",
+        postBody);
+    if (!dlResp.ok || dlResp.body.empty()) {
+        return {bestVer, ""};
+    }
+
+    size_t cabPos = 0;
+    while ((cabPos = dlResp.body.find(".cab", cabPos)) != std::string::npos) {
+        size_t urlStart = cabPos;
+        while (urlStart > 0 && dlResp.body[urlStart - 1] != '\'' && dlResp.body[urlStart - 1] != '"' &&
+               dlResp.body[urlStart - 1] != ' ' && dlResp.body[urlStart - 1] != '>') {
+            --urlStart;
+        }
+        const std::string cabUrl = dlResp.body.substr(urlStart, (cabPos + 4) - urlStart);
+        if (cabUrl.rfind("http://", 0) == 0 || cabUrl.rfind("https://", 0) == 0) {
+            return {bestVer, cabUrl};
+        }
+        cabPos += 4;
+    }
+
+    return {bestVer, ""};
+}
+
+UINT CALLBACK CabExtractCallback(PVOID ctx, UINT notification, UINT_PTR param1, UINT_PTR param2) {
+    (void)param2;
+    if (notification == SPFILENOTIFY_FILEINCABINET) {
+        auto* info = reinterpret_cast<FILE_IN_CABINET_INFO_W*>(param1);
+        const auto* baseDir = static_cast<const std::filesystem::path*>(ctx);
+        const std::filesystem::path dest = *baseDir / info->NameInCabinet;
+        std::error_code ec;
+        std::filesystem::create_directories(dest.parent_path(), ec);
+        wcsncpy_s(info->FullTargetName, MAX_PATH, dest.c_str(), _TRUNCATE);
+        return FILEOP_DOIT;
+    }
+    return NO_ERROR;
 }
 
 struct WingetManifestInfo {
@@ -1560,11 +1711,13 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
             return false;
         };
 
-        // Snapshot distinct (wingetRepoPath, preferredArch) lookups needed right now.
+        // Snapshot distinct (wingetRepoPath, preferredArch) and MS Catalog lookups needed right now.
         std::vector<std::pair<std::string, std::string>> wingetTargets;
+        std::vector<std::string> catalogKeys;
         {
             std::lock_guard<std::mutex> lock(dataMutex_);
             std::set<std::pair<std::string, std::string>> seen;
+            std::set<std::string> seenCatalog;
             for (const auto& it : items_) {
                 if (!it.wingetRepoPath.empty() && it.id != "sw_steelseries") {
                     const std::pair<std::string, std::string> key{
@@ -1572,6 +1725,9 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                     if (seen.insert(key).second) {
                         wingetTargets.push_back(key);
                     }
+                }
+                if (!it.catalogSearchKey.empty() && seenCatalog.insert(it.catalogSearchKey).second) {
+                    catalogKeys.push_back(it.catalogSearchKey);
                 }
             }
         }
@@ -1820,10 +1976,58 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
             }
         });
 
+        // Group 5: Parallel Microsoft Update Catalog WHQL lookups (LAN / Wi-Fi / BT / Audio)
+        auto fCatalog = std::async(std::launch::async, [&]() {
+            const size_t n = catalogKeys.size();
+            if (n == 0) return;
+            std::vector<std::pair<std::string, std::string>> resolved(n);
+            const size_t kWorkers = std::min<size_t>(4, n);
+            std::atomic<size_t> nextIdx{0};
+            std::vector<std::thread> pool;
+            pool.reserve(kWorkers);
+            for (size_t w = 0; w < kWorkers; ++w) {
+                pool.emplace_back([&]() {
+                    for (;;) {
+                        const size_t idx = nextIdx.fetch_add(1);
+                        if (idx >= n) break;
+                        resolved[idx] = ResolveMsCatalogDriverCab(catalogKeys[idx]);
+                    }
+                });
+            }
+            for (auto& t : pool) t.join();
+
+            std::lock_guard<std::mutex> lock(dataMutex_);
+            for (auto& item : items_) {
+                if (item.catalogSearchKey.empty()) continue;
+                for (size_t idx = 0; idx < n; ++idx) {
+                    if (catalogKeys[idx] != item.catalogSearchKey) continue;
+                    const auto& [catVer, cabUrl] = resolved[idx];
+                    item.onlineChecked = true;
+                    if (!cabUrl.empty()) {
+                        item.directInstallerUrl = cabUrl;
+                    }
+                    if (!catVer.empty()) {
+                        if (item.installed && !item.installedVersion.empty() &&
+                            IsVersionNewer(item.installedVersion, catVer)) {
+                            item.latestVersion = catVer + " (WHQL)";
+                            item.updateAvailable = false;
+                            item.statusText = "Актуален (" + item.installedVersion + ")";
+                        } else {
+                            ApplyResolvedVersionToItem(item, catVer, "Не установлен");
+                        }
+                    } else if (item.latestVersion == "Поиск...") {
+                        item.latestVersion = "Каталог MS";
+                    }
+                    break;
+                }
+            }
+        });
+
         fDotnet.wait();
         fRuntimes.wait();
         fVendors.wait();
         fWinget.wait();
+        fCatalog.wait();
 
         generation_.fetch_add(1);
         SetPhaseMessage("Актуальные версии проверены");
@@ -1850,8 +2054,10 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
     GetTempPathW(MAX_PATH, tempDir);
     const std::string cleanUrl = StripUrlQuery(item.directInstallerUrl);
     bool isZipPackage = EndsWithCaseInsensitive(cleanUrl, ".zip");
+    const bool isCabPackage = EndsWithCaseInsensitive(cleanUrl, ".cab");
     const bool isDirectMsi = EndsWithCaseInsensitive(cleanUrl, ".msi");
-    const char* initialExt = isZipPackage ? ".zip" : (isDirectMsi ? ".msi" : ".exe");
+    const char* initialExt =
+        isCabPackage ? ".cab" : (isZipPackage ? ".zip" : (isDirectMsi ? ".msi" : ".exe"));
     std::filesystem::path destFile =
         std::filesystem::path(tempDir) / ("DriverLoom_" + item.id + initialExt);
 
@@ -1875,6 +2081,79 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         }
         SetPhaseMessage(cancelInstallRequested_.load() ? "Установка отменена" : "Ошибка загрузки");
         return false;
+    }
+
+    if (isCabPackage) {
+        SetPhaseMessage("Проверка подписи CAB-пакета...");
+        std::string sigErr;
+        if (!VerifyAuthenticodeSignature(destFile, &sigErr)) {
+            std::error_code ec;
+            std::filesystem::remove(destFile, ec);
+            if (log) {
+                log(LogLevel::Error,
+                    "Цифровая подпись CAB-пакета не прошла проверку (" + sigErr + ").");
+            }
+            SetPhaseMessage("Подпись CAB не подтверждена");
+            return false;
+        }
+
+        SetPhaseMessage("Распаковка драйвера (.cab)...");
+        std::filesystem::path cabExtractDir =
+            std::filesystem::path(tempDir) / ("DriverLoom_" + item.id + "_cab");
+        std::error_code ec;
+        std::filesystem::remove_all(cabExtractDir, ec);
+        std::filesystem::create_directories(cabExtractDir, ec);
+
+        if (!SetupIterateCabinetW(destFile.c_str(), 0, CabExtractCallback, &cabExtractDir)) {
+            std::filesystem::remove(destFile, ec);
+            std::filesystem::remove_all(cabExtractDir, ec);
+            if (log) {
+                log(LogLevel::Error,
+                    "Ошибка распаковки CAB-архива " + item.name + ": " +
+                        FormatWin32Error(GetLastError()));
+            }
+            SetPhaseMessage("Ошибка распаковки CAB");
+            return false;
+        }
+        std::filesystem::remove(destFile, ec);
+
+        SetPhaseMessage("Установка драйвера " + item.name + "...");
+        progress_.store(std::clamp(baseProgress + progressSpan * 0.94f, 0.0f, 0.99f));
+
+        bool cabOk = false;
+        if (IsProcessElevated()) {
+            const LocalInstallSummary sum = LocalDriverInstaller::InstallFromFolderSync(
+                cabExtractDir.wstring(), false, false, log);
+            cabOk = (sum.failedCount == 0 && (sum.installedCount > 0 || sum.stagedOnlyCount > 0));
+        } else {
+            const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_cab_inf");
+            const std::wstring cliArgs =
+                L"--cli-install-inf \"" + cabExtractDir.wstring() + L"\" --log \"" +
+                tempLog.wstring() + L"\"";
+            const ElevatedRunResult run = ExecuteElevatedSelf(cliArgs, true, &tempLog, log);
+            std::filesystem::remove(tempLog, ec);
+            if (!run.launched) {
+                if (run.launchError == ERROR_CANCELLED) {
+                    cancelInstallRequested_.store(true);
+                    if (log) log(LogLevel::Warning, "Установка драйвера отменена (UAC).");
+                } else if (log) {
+                    log(LogLevel::Error, "Ошибка запуска UAC: " + FormatWin32Error(run.launchError));
+                }
+            } else {
+                cabOk = (run.exitCode == 0 || run.exitCode == 2);
+            }
+        }
+        std::filesystem::remove_all(cabExtractDir, ec);
+
+        auto refreshed = ScanLocalSynchronously(devs);
+        {
+            std::lock_guard<std::mutex> lock(dataMutex_);
+            MergeOnlineMetadataIntoRefreshed(refreshed, items_);
+            items_ = std::move(refreshed);
+            generation_.fetch_add(1);
+        }
+        progress_.store(std::clamp(baseProgress + progressSpan, 0.0f, 1.0f));
+        return cabOk;
     }
 
     if (!isZipPackage && HasZipMagicHeader(destFile)) {
@@ -2668,9 +2947,16 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
         }
 
         bool hasNvidia = false, hasAmd = false, hasIntelGpu = false;
-        bool hasAmdChipset = false, hasIntelChipset = false;
-        std::string nvName, nvInfVer, amdName, intelName;
+        bool hasAmdChipset = false, hasIntelChipset = false, hasIntelNetOrBt = false;
+        std::string nvName, nvInfVer, amdName, intelDsaSummary;
         std::string amdChipsetVer, amdChipsetInfName;
+
+        auto appendSummary = [](std::string& dst, const std::string& part) {
+            if (part.empty()) return;
+            if (!dst.empty()) dst += "; ";
+            if (dst.size() < 110) dst += part;
+        };
+
         for (const auto& d : devicesSnapshot) {
             const std::string cls = ToLowerAscii(d.deviceClass);
             if (cls == "display") {
@@ -2683,7 +2969,7 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
                     amdName = d.name + " [" + d.driverVersion + "]";
                 } else if (d.pciVendorId == "8086") {
                     hasIntelGpu = true;
-                    intelName = d.name + " [" + d.driverVersion + "]";
+                    appendSummary(intelDsaSummary, d.name + " [" + d.driverVersion + "]");
                 }
             } else if (cls == "system" || cls == "hdc" || cls == "usb") {
                 if (d.pciVendorId == "1022") {
@@ -2701,7 +2987,12 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
                             ContainsCaseInsensitive(d.name, "LPC") ||
                             ContainsCaseInsensitive(d.name, "Management Engine"))) {
                     hasIntelChipset = true;
+                    appendSummary(intelDsaSummary, d.name);
                 }
+            } else if ((cls == "net" || cls == "bluetooth") &&
+                       (d.pciVendorId == "8086" || d.usbVendorId == "8087")) {
+                hasIntelNetOrBt = true;
+                appendSummary(intelDsaSummary, d.name);
             }
         }
 
@@ -2743,52 +3034,30 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
             gpu.statusText = amdApp ? ("Установлен (" + gpu.installedVersion + ")") : "Официальный портал AMD";
             result.push_back(std::move(gpu));
         }
-        if (hasIntelGpu) {
+        if (hasIntelGpu || hasIntelChipset || hasIntelNetOrBt) {
             const InstalledAppEntry* intelApp = FindInstalledApp(
-                apps, {"Intel Driver & Support", "Intel Graphics"});
-            SystemComponentItem gpu;
-            gpu.id = "gpu_intel";
-            gpu.category = ComponentCategory::MonitorAndGpu;
-            gpu.name = "Intel Driver & Support Assistant";
-            gpu.vendor = "Intel";
-            gpu.purposeDescription =
-                "Официальный пакет Intel для обновления драйверов графики Intel Arc / UHD, Wi-Fi, Bluetooth и системных контроллеров.";
-            gpu.detectedHardware = intelName;
-            gpu.officialPageUrl = "https://www.intel.com/content/www/us/en/support/detect.html";
-            gpu.directInstallerUrl = "https://dsadata.intel.com/installer";
-            gpu.wingetRepoPath = "i/Intel/IntelDriverAndSupportAssistant";
-            gpu.preferredArch = "x64";
-            gpu.latestVersion = "Поиск...";
-            gpu.hardwareConnected = true;
-            gpu.installed = (intelApp != nullptr);
-            gpu.installedVersion = intelApp ? intelApp->displayVersion : "";
-            gpu.statusText = intelApp ? ("Установлен (" + gpu.installedVersion + ")") : "Официальный портал Intel";
-            result.push_back(std::move(gpu));
-        }
-
-        if (hasIntelChipset && !hasIntelGpu) {
-            SystemComponentItem chip;
-            chip.id = "chip_intel";
-            chip.category = ComponentCategory::MonitorAndGpu;
-            chip.name = "Intel Chipset Device Software / DSA";
-            chip.vendor = "Intel";
-            chip.purposeDescription =
-                "Официальные INF-пакеты чипсета Intel и помощник подбора драйверов материнской платы / контроллеров.";
-            chip.detectedHardware = "Чипсет Intel (PCI\\VEN_8086)";
-            chip.officialPageUrl = "https://www.intel.com/content/www/us/en/support/detect.html";
-            chip.directInstallerUrl = "https://dsadata.intel.com/installer";
-            chip.wingetRepoPath = "i/Intel/IntelDriverAndSupportAssistant";
-            chip.preferredArch = "x64";
-            chip.latestVersion = "Поиск...";
-            chip.hardwareConnected = true;
-            const InstalledAppEntry* intelChipApp = FindInstalledApp(
-                apps, {"Intel(R) Chipset Device Software", "Intel Chipset", "Intel Driver & Support"});
-            chip.installed = (intelChipApp != nullptr);
-            chip.installedVersion = intelChipApp ? intelChipApp->displayVersion : "";
-            chip.statusText = intelChipApp
-                ? ("Установлен (" + chip.installedVersion + ")")
-                : "Проверить на сайте платы / Intel";
-            result.push_back(std::move(chip));
+                apps, {"Intel Driver & Support", "Intel Graphics", "Intel(R) Chipset Device Software"});
+            SystemComponentItem intelDsa;
+            intelDsa.id = "intel_dsa";
+            intelDsa.category = ComponentCategory::MonitorAndGpu;
+            intelDsa.name = "Intel Driver & Support Assistant";
+            intelDsa.vendor = "Intel";
+            intelDsa.purposeDescription =
+                "Официальный инструмент Intel для подбора и обновления драйверов графики, Wi-Fi, Bluetooth и чипсета Intel.";
+            intelDsa.detectedHardware =
+                intelDsaSummary.empty() ? "Контроллеры Intel" : intelDsaSummary;
+            intelDsa.officialPageUrl = "https://www.intel.com/content/www/us/en/support/detect.html";
+            intelDsa.directInstallerUrl = "https://dsadata.intel.com/installer";
+            intelDsa.wingetRepoPath = "i/Intel/IntelDriverAndSupportAssistant";
+            intelDsa.preferredArch = "x64";
+            intelDsa.latestVersion = "Поиск...";
+            intelDsa.hardwareConnected = true;
+            intelDsa.installed = (intelApp != nullptr);
+            intelDsa.installedVersion = intelApp ? intelApp->displayVersion : "";
+            intelDsa.statusText = intelApp
+                ? ("Установлен (" + intelDsa.installedVersion + ")")
+                : "Официальный помощник Intel";
+            result.push_back(std::move(intelDsa));
         }
 
         if (hasAmdChipset) {
@@ -2826,6 +3095,90 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
                 chip.statusText = "Рекомендуется пакет чипсета AMD";
             }
             result.push_back(std::move(chip));
+        }
+
+        // Physical LAN, Wi-Fi, Bluetooth, and Onboard Audio controllers resolved via MS Update Catalog (.cab)
+        std::set<std::string> seenControllers;
+        for (const auto& d : devicesSnapshot) {
+            if (d.searchHardwareKey.empty()) {
+                continue;
+            }
+            const bool isVirtual =
+                ContainsCaseInsensitive(d.name, "WAN Miniport") ||
+                ContainsCaseInsensitive(d.name, "VirtualBox") ||
+                ContainsCaseInsensitive(d.name, "Radmin") ||
+                ContainsCaseInsensitive(d.name, "VMware") ||
+                ContainsCaseInsensitive(d.name, "Hyper-V") ||
+                ContainsCaseInsensitive(d.name, "Kernel Debug") ||
+                ContainsCaseInsensitive(d.name, "TAP-") ||
+                ContainsCaseInsensitive(d.name, "Loopback") ||
+                ContainsCaseInsensitive(d.name, "SteelSeries Sonar") ||
+                ContainsCaseInsensitive(d.name, "NVIDIA Broadcast") ||
+                ContainsCaseInsensitive(d.name, "NVIDIA Virtual Audio");
+            if (isVirtual) {
+                continue;
+            }
+
+            const std::string cls = ToLowerAscii(d.deviceClass);
+            const bool isPci = ContainsCaseInsensitive(d.hardwareId, "PCI\\VEN_");
+            const bool isUsb = ContainsCaseInsensitive(d.hardwareId, "USB\\VID_");
+
+            std::string idPrefix;
+            std::string rolePrefix;
+            std::string purpose;
+            if (cls == "net" && isPci) {
+                const bool isWifi =
+                    ContainsCaseInsensitive(d.name, "Wi-Fi") ||
+                    ContainsCaseInsensitive(d.name, "Wireless") ||
+                    ContainsCaseInsensitive(d.name, "WLAN") ||
+                    ContainsCaseInsensitive(d.name, "AX");
+                idPrefix = isWifi ? "drv_wifi_" : "drv_lan_";
+                rolePrefix = isWifi ? "Wi-Fi адаптер: " : "Сеть (LAN): ";
+                purpose = isWifi
+                    ? "Официальный WHQL-драйвер беспроводного контроллера из Microsoft Update Catalog (.cab)."
+                    : "Официальный WHQL-драйвер проводного сетевого контроллера из Microsoft Update Catalog (.cab).";
+            } else if (cls == "bluetooth" && (isPci || isUsb) &&
+                       !ContainsCaseInsensitive(d.name, "Enumerator")) {
+                idPrefix = "drv_bt_";
+                rolePrefix = "Bluetooth: ";
+                purpose = "Официальный WHQL-драйвер адаптера Bluetooth из Microsoft Update Catalog (.cab).";
+            } else if (cls == "media" &&
+                       (ContainsCaseInsensitive(d.hardwareId, "HDAUDIO\\") ||
+                        ContainsCaseInsensitive(d.hardwareId, "INTELAUDIO\\")) &&
+                       d.pciVendorId != "10DE") {
+                idPrefix = "drv_audio_";
+                rolePrefix = "Аудио платы: ";
+                purpose = "Официальный WHQL-драйвер встроенного аудиокодека платы из Microsoft Update Catalog (.cab).";
+            } else {
+                continue;
+            }
+
+            const std::string itemId = idPrefix + d.searchHardwareKey;
+            if (!seenControllers.insert(itemId).second) {
+                continue;
+            }
+
+            SystemComponentItem drv;
+            drv.id = itemId;
+            drv.category = ComponentCategory::MonitorAndGpu;
+            drv.name = rolePrefix + d.name;
+            drv.vendor = d.manufacturer.empty() ? "OEM / Microsoft Catalog" : d.manufacturer;
+            drv.purposeDescription = purpose;
+            drv.detectedHardware =
+                d.searchHardwareKey + (d.infName.empty() ? "" : (" (" + d.infName + ")"));
+            drv.catalogSearchKey = d.searchHardwareKey;
+            drv.officialPageUrl =
+                "https://www.catalog.update.microsoft.com/Search.aspx?q=" +
+                UrlEncodeCatalogParam(d.searchHardwareKey);
+            drv.latestVersion = "Поиск...";
+            drv.hardwareConnected = true;
+            drv.installed = d.hasDriver && !d.driverVersion.empty();
+            drv.installedVersion = d.driverVersion;
+            drv.updateAvailable = !drv.installed;
+            drv.statusText = drv.installed
+                ? ("Установлен (" + drv.installedVersion + ")")
+                : "Драйвер не установлен";
+            result.push_back(std::move(drv));
         }
     }
 
