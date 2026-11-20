@@ -130,6 +130,85 @@ void CleanupDeviceD3D() {
     }
 }
 
+bool SaveBackBufferToBmp(const std::wstring& bmpPath) {
+    if (g_pSwapChain == nullptr || g_pd3dDevice == nullptr || g_pd3dDeviceContext == nullptr) {
+        return false;
+    }
+    ID3D11Texture2D* backBuffer = nullptr;
+    if (FAILED(g_pSwapChain->GetBuffer(0, IID_PPV_ARGS(&backBuffer))) || backBuffer == nullptr) {
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC desc{};
+    backBuffer->GetDesc(&desc);
+    desc.Usage = D3D11_USAGE_STAGING;
+    desc.BindFlags = 0;
+    desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    desc.MiscFlags = 0;
+
+    ID3D11Texture2D* staging = nullptr;
+    if (FAILED(g_pd3dDevice->CreateTexture2D(&desc, nullptr, &staging)) || staging == nullptr) {
+        backBuffer->Release();
+        return false;
+    }
+    g_pd3dDeviceContext->CopyResource(staging, backBuffer);
+    backBuffer->Release();
+
+    D3D11_MAPPED_SUBRESOURCE mapped{};
+    if (FAILED(g_pd3dDeviceContext->Map(staging, 0, D3D11_MAP_READ, 0, &mapped))) {
+        staging->Release();
+        return false;
+    }
+
+    const UINT w = desc.Width;
+    const UINT h = desc.Height;
+    const size_t rowBytes = static_cast<size_t>(w) * 4u;
+    std::vector<unsigned char> pixels(rowBytes * h);
+    const bool swapRB =
+        (desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM ||
+         desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM_SRGB);
+
+    for (UINT y = 0; y < h; ++y) {
+        const auto* src = static_cast<const unsigned char*>(mapped.pData) +
+                          static_cast<size_t>(y) * mapped.RowPitch;
+        unsigned char* dst = pixels.data() + static_cast<size_t>(y) * rowBytes;
+        for (UINT x = 0; x < w; ++x) {
+            const unsigned char c0 = src[x * 4 + 0];
+            const unsigned char c1 = src[x * 4 + 1];
+            const unsigned char c2 = src[x * 4 + 2];
+            dst[x * 4 + 0] = swapRB ? c2 : c0;
+            dst[x * 4 + 1] = c1;
+            dst[x * 4 + 2] = swapRB ? c0 : c2;
+            dst[x * 4 + 3] = 255;
+        }
+    }
+
+    g_pd3dDeviceContext->Unmap(staging, 0);
+    staging->Release();
+
+    BITMAPFILEHEADER bfh{};
+    BITMAPINFOHEADER bih{};
+    bih.biSize = sizeof(BITMAPINFOHEADER);
+    bih.biWidth = static_cast<LONG>(w);
+    bih.biHeight = -static_cast<LONG>(h); // Top-down DIB
+    bih.biPlanes = 1;
+    bih.biBitCount = 32;
+    bih.biCompression = BI_RGB;
+    bih.biSizeImage = static_cast<DWORD>(pixels.size());
+
+    bfh.bfType = 0x4D42; // 'BM'
+    bfh.bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    bfh.bfSize = bfh.bfOffBits + bih.biSizeImage;
+
+    std::ofstream ofs(std::filesystem::path(bmpPath), std::ios::binary | std::ios::trunc);
+    if (!ofs.is_open()) {
+        return false;
+    }
+    ofs.write(reinterpret_cast<const char*>(&bfh), sizeof(bfh));
+    ofs.write(reinterpret_cast<const char*>(&bih), sizeof(bih));
+    ofs.write(reinterpret_cast<const char*>(pixels.data()), static_cast<std::streamsize>(pixels.size()));
+    return ofs.good();
+}
+
 void EnableDarkTitleBar(HWND hwnd) {
     HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
     if (dwm == nullptr) {
@@ -167,6 +246,12 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         g_resizeWidth = LOWORD(lParam);
         g_resizeHeight = HIWORD(lParam);
         return 0;
+    case WM_GETMINMAXINFO: {
+        auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
+        mmi->ptMinTrackSize.x = 980;
+        mmi->ptMinTrackSize.y = 640;
+        return 0;
+    }
     case WM_SYSCOMMAND:
         if ((wParam & 0xfff0) == SC_KEYMENU) {
             return 0;
@@ -205,24 +290,24 @@ void OpenUrlInBrowser(const std::string& url) {
     ShellExecuteW(nullptr, L"open", wUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
-// --- Refined Nordic Slate Dark Theme ---
+// --- Refined Modern Dark Slate Theme ---
 void ApplyModernDarkTheme(float scale) {
     ImGuiStyle& style = ImGui::GetStyle();
     style = ImGuiStyle();
 
     style.WindowPadding = ImVec2(14.0f, 12.0f);
-    style.FramePadding = ImVec2(10.0f, 6.0f);
-    style.CellPadding = ImVec2(10.0f, 7.0f);
-    style.ItemSpacing = ImVec2(10.0f, 8.0f);
+    style.FramePadding = ImVec2(11.0f, 5.0f);
+    style.CellPadding = ImVec2(10.0f, 6.0f);
+    style.ItemSpacing = ImVec2(8.0f, 8.0f);
     style.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
-    style.ScrollbarSize = 12.0f;
+    style.ScrollbarSize = 11.0f;
     style.GrabMinSize = 10.0f;
 
     style.WindowBorderSize = 0.0f;
     style.ChildBorderSize = 1.0f;
     style.PopupBorderSize = 1.0f;
     style.FrameBorderSize = 1.0f;
-    style.TabBorderSize = 0.0f;
+    style.TabBorderSize = 1.0f;
 
     style.WindowRounding = 0.0f;
     style.ChildRounding = 8.0f;
@@ -230,83 +315,182 @@ void ApplyModernDarkTheme(float scale) {
     style.PopupRounding = 6.0f;
     style.ScrollbarRounding = 6.0f;
     style.GrabRounding = 6.0f;
-    style.TabRounding = 6.0f;
+    style.TabRounding = 7.0f;
 
     if (scale > 0.5f && scale != 1.0f) {
         style.ScaleAllSizes(scale);
     }
 
     ImVec4* c = style.Colors;
-    c[ImGuiCol_Text] = ImVec4(0.92f, 0.94f, 0.97f, 1.00f);
-    c[ImGuiCol_TextDisabled] = ImVec4(0.54f, 0.60f, 0.69f, 1.00f);
-    c[ImGuiCol_WindowBg] = ImVec4(0.067f, 0.078f, 0.106f, 1.00f);
-    c[ImGuiCol_ChildBg] = ImVec4(0.086f, 0.102f, 0.137f, 1.00f);
-    c[ImGuiCol_PopupBg] = ImVec4(0.106f, 0.125f, 0.169f, 0.98f);
-    c[ImGuiCol_Border] = ImVec4(0.149f, 0.180f, 0.243f, 1.00f);
+    c[ImGuiCol_Text] = ImVec4(0.93f, 0.95f, 0.98f, 1.00f);
+    c[ImGuiCol_TextDisabled] = ImVec4(0.56f, 0.62f, 0.72f, 1.00f);
+    c[ImGuiCol_WindowBg] = ImVec4(0.059f, 0.071f, 0.098f, 1.00f);
+    c[ImGuiCol_ChildBg] = ImVec4(0.082f, 0.098f, 0.133f, 1.00f);
+    c[ImGuiCol_PopupBg] = ImVec4(0.098f, 0.118f, 0.161f, 0.98f);
+    c[ImGuiCol_Border] = ImVec4(0.176f, 0.216f, 0.290f, 0.90f);
     c[ImGuiCol_BorderShadow] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
 
-    c[ImGuiCol_FrameBg] = ImVec4(0.114f, 0.133f, 0.180f, 1.00f);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(0.149f, 0.176f, 0.239f, 1.00f);
-    c[ImGuiCol_FrameBgActive] = ImVec4(0.184f, 0.220f, 0.298f, 1.00f);
+    c[ImGuiCol_FrameBg] = ImVec4(0.110f, 0.133f, 0.180f, 1.00f);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(0.145f, 0.176f, 0.239f, 1.00f);
+    c[ImGuiCol_FrameBgActive] = ImVec4(0.180f, 0.220f, 0.298f, 1.00f);
 
-    c[ImGuiCol_TitleBg] = ImVec4(0.067f, 0.078f, 0.106f, 1.00f);
-    c[ImGuiCol_TitleBgActive] = ImVec4(0.086f, 0.102f, 0.137f, 1.00f);
-    c[ImGuiCol_MenuBarBg] = ImVec4(0.082f, 0.098f, 0.133f, 1.00f);
+    c[ImGuiCol_TitleBg] = ImVec4(0.059f, 0.071f, 0.098f, 1.00f);
+    c[ImGuiCol_TitleBgActive] = ImVec4(0.082f, 0.098f, 0.133f, 1.00f);
+    c[ImGuiCol_MenuBarBg] = ImVec4(0.075f, 0.090f, 0.125f, 1.00f);
 
-    c[ImGuiCol_ScrollbarBg] = ImVec4(0.067f, 0.078f, 0.106f, 0.45f);
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0.059f, 0.071f, 0.098f, 0.45f);
     c[ImGuiCol_ScrollbarGrab] = ImVec4(0.22f, 0.27f, 0.36f, 1.00f);
     c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.30f, 0.36f, 0.47f, 1.00f);
     c[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.36f, 0.44f, 0.58f, 1.00f);
 
-    c[ImGuiCol_CheckMark] = ImVec4(0.35f, 0.62f, 0.98f, 1.00f);
-    c[ImGuiCol_SliderGrab] = ImVec4(0.35f, 0.62f, 0.98f, 1.00f);
-    c[ImGuiCol_SliderGrabActive] = ImVec4(0.47f, 0.71f, 1.00f, 1.00f);
+    c[ImGuiCol_CheckMark] = ImVec4(0.38f, 0.66f, 1.00f, 1.00f);
+    c[ImGuiCol_SliderGrab] = ImVec4(0.38f, 0.66f, 1.00f, 1.00f);
+    c[ImGuiCol_SliderGrabActive] = ImVec4(0.50f, 0.74f, 1.00f, 1.00f);
 
-    c[ImGuiCol_Button] = ImVec4(0.19f, 0.42f, 0.78f, 0.92f);
-    c[ImGuiCol_ButtonHovered] = ImVec4(0.25f, 0.51f, 0.91f, 1.00f);
-    c[ImGuiCol_ButtonActive] = ImVec4(0.16f, 0.36f, 0.69f, 1.00f);
+    c[ImGuiCol_Button] = ImVec4(0.20f, 0.45f, 0.86f, 0.95f);
+    c[ImGuiCol_ButtonHovered] = ImVec4(0.27f, 0.54f, 0.96f, 1.00f);
+    c[ImGuiCol_ButtonActive] = ImVec4(0.16f, 0.37f, 0.73f, 1.00f);
 
     c[ImGuiCol_Header] = ImVec4(0.22f, 0.46f, 0.84f, 0.30f);
     c[ImGuiCol_HeaderHovered] = ImVec4(0.25f, 0.50f, 0.90f, 0.44f);
     c[ImGuiCol_HeaderActive] = ImVec4(0.25f, 0.50f, 0.90f, 0.60f);
 
-    c[ImGuiCol_Separator] = ImVec4(0.157f, 0.188f, 0.255f, 1.00f);
-    c[ImGuiCol_Tab] = ImVec4(0.106f, 0.125f, 0.169f, 1.00f);
-    c[ImGuiCol_TabHovered] = ImVec4(0.22f, 0.46f, 0.84f, 0.85f);
-    c[ImGuiCol_TabSelected] = ImVec4(0.19f, 0.42f, 0.78f, 1.00f);
+    c[ImGuiCol_Separator] = ImVec4(0.176f, 0.216f, 0.290f, 0.90f);
+    c[ImGuiCol_Tab] = ImVec4(0.094f, 0.114f, 0.157f, 1.00f);
+    c[ImGuiCol_TabHovered] = ImVec4(0.22f, 0.46f, 0.85f, 0.88f);
+    c[ImGuiCol_TabSelected] = ImVec4(0.19f, 0.43f, 0.82f, 1.00f);
 
-    c[ImGuiCol_TableHeaderBg] = ImVec4(0.114f, 0.133f, 0.180f, 1.00f);
-    c[ImGuiCol_TableBorderStrong] = ImVec4(0.157f, 0.188f, 0.255f, 1.00f);
-    c[ImGuiCol_TableBorderLight] = ImVec4(0.129f, 0.157f, 0.216f, 1.00f);
+    c[ImGuiCol_TableHeaderBg] = ImVec4(0.118f, 0.141f, 0.192f, 1.00f);
+    c[ImGuiCol_TableBorderStrong] = ImVec4(0.180f, 0.220f, 0.298f, 1.00f);
+    c[ImGuiCol_TableBorderLight] = ImVec4(0.133f, 0.165f, 0.224f, 0.85f);
     c[ImGuiCol_TableRowBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
-    c[ImGuiCol_TableRowBgAlt] = ImVec4(1.0f, 1.0f, 1.0f, 0.022f);
+    c[ImGuiCol_TableRowBgAlt] = ImVec4(1.0f, 1.0f, 1.0f, 0.026f);
 
     c[ImGuiCol_PlotHistogram] = ImVec4(0.27f, 0.56f, 0.96f, 1.00f);
 }
 
-// Helper for crisp status indicator dot + text inside table cells
-void RenderStatusBadge(const ImVec4& color, const char* text) {
+std::string EllipsizeUtf8(const std::string& text, float maxWidth) {
+    if (text.empty() || maxWidth <= 8.0f) {
+        return text;
+    }
+    if (ImGui::CalcTextSize(text.c_str()).x <= maxWidth) {
+        return text;
+    }
+    const char* ellipsis = "...";
+    const float ellipsisW = ImGui::CalcTextSize(ellipsis).x;
+    if (maxWidth <= ellipsisW) {
+        return ellipsis;
+    }
+
+    size_t len = text.size();
+    while (len > 0) {
+        --len;
+        while (len > 0 && (static_cast<unsigned char>(text[len]) & 0xC0u) == 0x80u) {
+            --len;
+        }
+        size_t cleanLen = len;
+        while (cleanLen > 0 && text[cleanLen - 1] == ' ') {
+            --cleanLen;
+        }
+        std::string candidate = text.substr(0, cleanLen);
+        candidate += ellipsis;
+        if (ImGui::CalcTextSize(candidate.c_str()).x <= maxWidth) {
+            return candidate;
+        }
+    }
+    return ellipsis;
+}
+
+bool RenderCellText(const std::string& text, bool dimmed = false, bool alignToFrame = false) {
+    if (alignToFrame) {
+        ImGui::AlignTextToFramePadding();
+    }
+    const std::string raw = text.empty() ? "—" : text;
+    const float availW = ImGui::GetContentRegionAvail().x - 2.0f;
+    const std::string shown = EllipsizeUtf8(raw, availW);
+    if (dimmed) {
+        ImGui::TextDisabled("%s", shown.c_str());
+    } else {
+        ImGui::TextUnformatted(shown.c_str());
+    }
+    return (shown != raw);
+}
+
+// Rounded tinted pill status badge with UTF-8 ellipsis protection and optional vertical frame centering.
+void RenderStatusBadge(const ImVec4& color, const char* text, bool alignToFrame = false) {
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    const float textH = ImGui::GetTextLineHeight();
+    const float frameH = ImGui::GetFrameHeight();
+    const float badgeH = textH + std::round(6.0f * uiScale);
+    const float topOffset = alignToFrame ? std::max(0.0f, (frameH - badgeH) * 0.5f) : 0.0f;
+
+    const float padLeft = std::round(8.0f * uiScale);
+    const float padRight = std::round(9.0f * uiScale);
+    const float radius = std::max(3.2f, textH * 0.21f);
+    const float dotToText = std::round(6.0f * uiScale);
+    const float availW = std::max(44.0f * uiScale, ImGui::GetContentRegionAvail().x - 2.0f);
+    const float maxTextW = std::max(12.0f, availW - (padLeft + radius * 2.0f + dotToText + padRight));
+
+    const std::string shown = EllipsizeUtf8(text != nullptr ? std::string(text) : "", maxTextW);
+    const ImVec2 textSize = ImGui::CalcTextSize(shown.c_str());
+    const float pillW = std::min(
+        availW,
+        padLeft + radius * 2.0f + dotToText + textSize.x + padRight);
+
+    const ImVec2 startScreen = ImGui::GetCursorScreenPos();
+    const ImVec2 pMin(startScreen.x, startScreen.y + topOffset);
+    const ImVec2 pMax(pMin.x + pillW, pMin.y + badgeH);
+
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImVec2 pos = ImGui::GetCursorScreenPos();
-    const float lineH = ImGui::GetTextLineHeight();
-    const float radius = std::max(3.5f, lineH * 0.22f);
-    const ImVec2 center(pos.x + radius + 2.0f, pos.y + lineH * 0.5f);
-    dl->AddCircleFilled(center, radius, ImGui::ColorConvertFloat4ToU32(color));
-    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + radius * 2.0f + 8.0f);
-    ImGui::TextColored(color, "%s", text);
+    const ImVec4 bgVec(color.x, color.y, color.z, 0.14f);
+    const ImVec4 borderVec(color.x, color.y, color.z, 0.42f);
+    const float rounding = badgeH * 0.5f;
+    dl->AddRectFilled(pMin, pMax, ImGui::ColorConvertFloat4ToU32(bgVec), rounding);
+    dl->AddRect(pMin, pMax, ImGui::ColorConvertFloat4ToU32(borderVec), rounding, 0, 1.0f);
+
+    const ImVec2 dotCenter(pMin.x + padLeft + radius, pMin.y + badgeH * 0.5f);
+    dl->AddCircleFilled(dotCenter, radius, ImGui::ColorConvertFloat4ToU32(color));
+
+    const ImVec2 textPos(
+        pMin.x + padLeft + radius * 2.0f + dotToText,
+        pMin.y + (badgeH - textH) * 0.5f);
+    dl->AddText(textPos, ImGui::ColorConvertFloat4ToU32(color), shown.c_str());
+
+    ImGui::Dummy(ImVec2(pillW, alignToFrame ? std::max(frameH, badgeH) : badgeH));
 }
 
 bool RenderPillButton(const char* label, bool active) {
     if (active) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.20f, 0.45f, 0.84f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.26f, 0.53f, 0.94f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.19f, 0.44f, 0.84f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.52f, 0.94f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.16f, 0.37f, 0.72f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.38f, 0.65f, 1.00f, 0.85f));
     } else {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.125f, 0.149f, 0.200f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.165f, 0.196f, 0.263f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.118f, 0.141f, 0.192f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.165f, 0.196f, 0.267f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.102f, 0.125f, 0.173f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.21f, 0.25f, 0.34f, 0.90f));
     }
     const bool clicked = ImGui::Button(label);
-    ImGui::PopStyleColor(2);
+    ImGui::PopStyleColor(4);
     return clicked;
+}
+
+bool RenderSecondaryButton(const char* label, const ImVec2& size = ImVec2(0.0f, 0.0f)) {
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.125f, 0.149f, 0.204f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.173f, 0.208f, 0.278f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.106f, 0.129f, 0.180f, 1.00f));
+    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.23f, 0.28f, 0.37f, 0.95f));
+    const bool clicked = ImGui::Button(label, size);
+    ImGui::PopStyleColor(4);
+    return clicked;
+}
+
+bool RenderActionButton(const char* label, const ImVec2& size, bool primary) {
+    if (primary) {
+        return ImGui::Button(label, size);
+    }
+    return RenderSecondaryButton(label, size);
 }
 
 int CompareVersionOrString(const std::string& a, const std::string& b) {
@@ -580,8 +764,10 @@ int RunCliModeIfRequested() {
 // --- Application UI Controller ---
 class DriverLoomApp {
 public:
-    explicit DriverLoomApp(HWND mainHwnd)
-        : hwnd_(mainHwnd), isElevated_(hdm::IsProcessElevated()) {
+    explicit DriverLoomApp(HWND mainHwnd, int initialTab = -1)
+        : hwnd_(mainHwnd),
+          isElevated_(hdm::IsProcessElevated()),
+          pendingInitialTab_(initialTab) {
         logBuffer_.Push(
             hdm::LogLevel::Info,
             std::string("DriverLoom запущен. Режим прав: ") +
@@ -610,8 +796,8 @@ public:
 
         const float availHeight = ImGui::GetContentRegionAvail().y;
         const float spacingY = ImGui::GetStyle().ItemSpacing.y;
-        const float logPanelHeight = std::clamp(availHeight * 0.24f, 138.0f, 230.0f);
-        const float tabAreaHeight = std::max(240.0f, availHeight - logPanelHeight - spacingY);
+        const float logPanelHeight = std::clamp(availHeight * 0.20f, 128.0f, 195.0f);
+        const float tabAreaHeight = std::max(280.0f, availHeight - logPanelHeight - spacingY);
 
         ImGui::BeginChild(
             "##TabsRegion",
@@ -620,28 +806,52 @@ public:
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
         if (ImGui::BeginTabBar("##MainTabs")) {
-            if (ImGui::BeginTabItem("  Устройства и мониторы  ")) {
+            auto beginTabCard = [](const char* childId) {
+                ImGui::BeginChild(
+                    childId,
+                    ImVec2(0.0f, 0.0f),
+                    true,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            };
+            auto tabFlag = [this](int idx) {
+                return (pendingInitialTab_ == idx)
+                           ? ImGuiTabItemFlags_SetSelected
+                           : ImGuiTabItemFlags_None;
+            };
+
+            if (ImGui::BeginTabItem("  Устройства и мониторы  ", nullptr, tabFlag(0))) {
+                beginTabCard("##TabCardDevices");
                 RenderDevicesTab();
+                ImGui::EndChild();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("  Компоненты и периферия  ")) {
+            if (ImGui::BeginTabItem("  Компоненты и периферия  ", nullptr, tabFlag(1))) {
+                beginTabCard("##TabCardComponents");
                 RenderComponentsTab();
+                ImGui::EndChild();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("  Windows Update  ")) {
+            if (ImGui::BeginTabItem("  Windows Update  ", nullptr, tabFlag(2))) {
+                beginTabCard("##TabCardWu");
                 RenderWindowsUpdateTab();
+                ImGui::EndChild();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("  Локальные (.inf)  ")) {
+            if (ImGui::BeginTabItem("  Локальные (.inf)  ", nullptr, tabFlag(3))) {
+                beginTabCard("##TabCardLocal");
                 RenderLocalInstallerTab();
+                ImGui::EndChild();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("  Система и диагностика  ")) {
+            if (ImGui::BeginTabItem("  Система и диагностика  ", nullptr, tabFlag(4))) {
+                beginTabCard("##TabCardDiag");
                 RenderDiagnosticsTab();
+                ImGui::EndChild();
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
         }
+        pendingInitialTab_ = -1;
         ImGui::EndChild();
 
         RenderLogPanel();
@@ -650,6 +860,12 @@ public:
     }
 
     bool ShouldExitApp() const noexcept { return exitRequested_; }
+    void SetInitialDiagSection(int sec) noexcept { diagSectionIndex_ = sec; }
+    bool IsInitialScanSettled() const noexcept {
+        return lastDeviceGen_ > 0 && lastComponentsGen_ > 0 && lastDiagGen_ > 0 &&
+               !scanner_.IsScanning() && !componentsScanner_.IsScanning() &&
+               !diagnostics_.IsScanning();
+    }
 
 private:
     enum class DeviceFilterMode {
@@ -732,8 +948,11 @@ private:
     }
 
     void RenderHeaderBar() {
+        const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
         const ImGuiStyle& style = ImGui::GetStyle();
-        const float headerHeight = ImGui::GetFrameHeight() + style.WindowPadding.y * 2.0f;
+        const float padY = std::round(9.0f * uiScale);
+        const float headerHeight = ImGui::GetFrameHeight() + padY * 2.0f;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.WindowPadding.x, padY));
         ImGui::BeginChild(
             "##HeaderBar",
             ImVec2(0.0f, headerHeight),
@@ -741,17 +960,24 @@ private:
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
         ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(ImVec4(0.42f, 0.70f, 1.00f, 1.00f), "DriverLoom");
-        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "DriverLoom");
+        ImGui::SameLine(0.0f, 8.0f);
+        ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("v1.0.0");
 
-        ImGui::SameLine(0.0f, 16.0f);
+        ImGui::SameLine(0.0f, 12.0f);
         if (isElevated_) {
-            ImGui::TextColored(ImVec4(0.20f, 0.83f, 0.60f, 1.00f), "[Администратор]");
+            RenderStatusBadge(
+                ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
+                "Администратор",
+                true);
         } else {
-            ImGui::TextColored(ImVec4(0.98f, 0.75f, 0.14f, 1.00f), "[Обычный режим]");
-            ImGui::SameLine();
-            if (ImGui::Button("Перезапустить от имени администратора")) {
+            RenderStatusBadge(
+                ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
+                "Обычный режим",
+                true);
+            ImGui::SameLine(0.0f, 10.0f);
+            if (RenderSecondaryButton("Перезапустить как администратор")) {
                 const hdm::ElevatedRunResult run = hdm::ExecuteElevatedSelf(L"", false);
                 if (run.launched) {
                     exitRequested_ = true;
@@ -766,7 +992,7 @@ private:
         const char* srLabel = systemRestore_.IsBusy()
                                   ? "Создание точки восстановления..."
                                   : "Точка восстановления";
-        const float btnWidth = ImGui::CalcTextSize(srLabel).x + style.FramePadding.x * 2.0f + 8.0f;
+        const float btnWidth = CalcButtonWidth(srLabel) + 6.0f * uiScale;
         const float rightX = ImGui::GetWindowContentRegionMax().x - btnWidth;
         if (rightX > ImGui::GetCursorPosX() + 12.0f) {
             ImGui::SameLine(rightX);
@@ -775,7 +1001,7 @@ private:
         }
 
         ImGui::BeginDisabled(systemRestore_.IsBusy());
-        if (ImGui::Button(srLabel, ImVec2(btnWidth, 0.0f))) {
+        if (RenderSecondaryButton(srLabel, ImVec2(btnWidth, 0.0f))) {
             systemRestore_.CreateRestorePointAsync(
                 "DriverLoom (ручная точка восстановления)",
                 MakeLogger());
@@ -783,31 +1009,36 @@ private:
         ImGui::EndDisabled();
 
         ImGui::EndChild();
+        ImGui::PopStyleVar();
     }
 
     void RenderRebootBanner() {
+        const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
         const ImGuiStyle& style = ImGui::GetStyle();
-        const float bannerHeight = ImGui::GetFrameHeight() + style.WindowPadding.y * 2.0f;
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.26f, 0.18f, 0.05f, 0.95f));
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.96f, 0.68f, 0.16f, 1.00f));
+        const float padY = std::round(7.0f * uiScale);
+        const float bannerHeight = ImGui::GetFrameHeight() + padY * 2.0f;
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.WindowPadding.x, padY));
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.24f, 0.16f, 0.05f, 0.95f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.96f, 0.68f, 0.16f, 0.90f));
         ImGui::BeginChild(
             "##RebootBanner",
             ImVec2(0.0f, bannerHeight),
             true,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(
+        RenderStatusBadge(
             ImVec4(1.00f, 0.87f, 0.45f, 1.00f),
-            "Требуется перезагрузка Windows для завершения установки драйверов.");
+            "Требуется перезагрузка Windows для завершения установки драйверов.",
+            true);
         const char* hideLabel = "Скрыть";
-        const float hideW = ImGui::CalcTextSize(hideLabel).x + style.FramePadding.x * 2.0f;
+        const float hideW = CalcButtonWidth(hideLabel);
         ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 12.0f,
                                  ImGui::GetWindowContentRegionMax().x - hideW));
-        if (ImGui::Button(hideLabel, ImVec2(hideW, 0.0f))) {
+        if (RenderSecondaryButton(hideLabel, ImVec2(hideW, 0.0f))) {
             rebootRequired_.store(false);
         }
         ImGui::EndChild();
         ImGui::PopStyleColor(2);
+        ImGui::PopStyleVar();
     }
 
     void RebuildDeviceViewCache(ImGuiTableSortSpecs* sortSpecs) {
@@ -895,7 +1126,8 @@ private:
     }
 
     void RenderDevicesTab() {
-        const ImGuiStyle& style = ImGui::GetStyle();
+        const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+        const bool isAppForeground = (GetForegroundWindow() == hwnd_);
 
         // Row 1: Scan button + Category filter pills (auto-wrap on narrow windows)
         const bool scanning = scanner_.IsScanning();
@@ -972,14 +1204,14 @@ private:
             ImGui::TableSetupColumn(
                 "Статус",
                 ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch,
-                1.05f,
+                1.28f,
                 0);
-            ImGui::TableSetupColumn("Устройство / Модель", ImGuiTableColumnFlags_WidthStretch, 1.60f, 1);
-            ImGui::TableSetupColumn("Производитель", ImGuiTableColumnFlags_WidthStretch, 0.95f, 2);
-            ImGui::TableSetupColumn("Класс", ImGuiTableColumnFlags_WidthStretch, 0.65f, 3);
-            ImGui::TableSetupColumn("Версия", ImGuiTableColumnFlags_WidthStretch, 0.75f, 4);
+            ImGui::TableSetupColumn("Устройство / Модель", ImGuiTableColumnFlags_WidthStretch, 1.45f, 1);
+            ImGui::TableSetupColumn("Производитель", ImGuiTableColumnFlags_WidthStretch, 0.90f, 2);
+            ImGui::TableSetupColumn("Класс", ImGuiTableColumnFlags_WidthStretch, 0.60f, 3);
+            ImGui::TableSetupColumn("Версия", ImGuiTableColumnFlags_WidthStretch, 0.76f, 4);
             ImGui::TableSetupColumn("Дата", ImGuiTableColumnFlags_WidthStretch, 0.60f, 5);
-            ImGui::TableSetupColumn("Hardware ID", ImGuiTableColumnFlags_WidthStretch, 1.35f, 6);
+            ImGui::TableSetupColumn("Hardware ID", ImGuiTableColumnFlags_WidthStretch, 1.28f, 6);
             ImGui::TableHeadersRow();
 
             ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs();
@@ -991,6 +1223,7 @@ private:
                 RebuildDeviceViewCache(sortSpecs);
             }
 
+            const float rowBadgeH = ImGui::GetTextLineHeight() + std::round(6.0f * uiScale);
             ImGuiListClipper clipper;
             clipper.Begin(static_cast<int>(visibleDeviceIndices_.size()));
             while (clipper.Step()) {
@@ -1000,21 +1233,14 @@ private:
                     ImGui::TableNextRow();
                     ImGui::PushID(row);
 
-                    // Col 0: Status badge + full-row selectable for context menu
+                    // Col 0: Full-row selectable behind rounded status badge (zero X-shift)
                     ImGui::TableSetColumnIndex(0);
-                    ImVec4 statusColor(0.20f, 0.83f, 0.60f, 1.00f); // Emerald
-                    if (dev.health == hdm::DeviceHealth::Error) {
-                        statusColor = ImVec4(0.97f, 0.44f, 0.44f, 1.00f); // Coral Red
-                    } else if (dev.health == hdm::DeviceHealth::Warning || dev.isGenericMonitorDriver) {
-                        statusColor = ImVec4(0.98f, 0.75f, 0.14f, 1.00f); // Amber
-                    }
-                    RenderStatusBadge(statusColor, dev.statusText.c_str());
-
-                    ImGui::SameLine();
+                    const ImVec2 cellStart = ImGui::GetCursorPos();
                     ImGui::Selectable(
                         "##rowSel",
                         false,
-                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap);
+                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
+                        ImVec2(0.0f, rowBadgeH));
                     if (ImGui::BeginPopupContextItem("##DevCtxMenu")) {
                         ImGui::TextDisabled("%s", dev.name.c_str());
                         ImGui::Separator();
@@ -1046,52 +1272,71 @@ private:
                         ImGui::EndPopup();
                     }
 
+                    ImGui::SetCursorPos(cellStart);
+                    ImVec4 statusColor(0.20f, 0.83f, 0.60f, 1.00f); // Emerald
+                    if (dev.health == hdm::DeviceHealth::Error) {
+                        statusColor = ImVec4(0.97f, 0.44f, 0.44f, 1.00f); // Coral Red
+                    } else if (dev.health == hdm::DeviceHealth::Warning || dev.isGenericMonitorDriver) {
+                        statusColor = ImVec4(0.98f, 0.75f, 0.14f, 1.00f); // Amber
+                    }
+                    RenderStatusBadge(statusColor, dev.statusText.c_str(), false);
+
                     // Col 1: Device Name
                     ImGui::TableSetColumnIndex(1);
-                    ImGui::TextUnformatted(dev.name.c_str());
-                    if (GetForegroundWindow() == hwnd_ &&
-                        ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                        ImGui::SetTooltip(
-                            "%s\nПроизводитель: %s\nКласс: %s\nINF: %s\nHardware ID: %s%s",
-                            dev.name.c_str(),
+                    RenderCellText(dev.name);
+                    if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                        ImGui::BeginTooltip();
+                        ImGui::PushTextWrapPos(460.0f * uiScale);
+                        ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s", dev.name.c_str());
+                        ImGui::TextDisabled(
+                            "Производитель: %s  |  Класс: %s",
                             dev.manufacturer.empty() ? "—" : dev.manufacturer.c_str(),
-                            dev.deviceClass.empty() ? "—" : dev.deviceClass.c_str(),
+                            dev.deviceClass.empty() ? "—" : dev.deviceClass.c_str());
+                        ImGui::TextDisabled(
+                            "INF: %s  |  Статус: %s",
                             dev.infName.empty() ? "—" : dev.infName.c_str(),
-                            dev.hardwareId.empty() ? "—" : dev.hardwareId.c_str(),
-                            dev.edidModel.empty() ? "" : ("\nМодель (EDID): " + dev.edidModel).c_str());
+                            dev.statusText.c_str());
+                        if (!dev.hardwareId.empty()) {
+                            ImGui::TextWrapped("Hardware ID: %s", dev.hardwareId.c_str());
+                        }
+                        if (!dev.edidModel.empty()) {
+                            ImGui::Text("Модель (EDID): %s", dev.edidModel.c_str());
+                        }
+                        ImGui::PopTextWrapPos();
+                        ImGui::EndTooltip();
                     }
 
                     // Col 2: Manufacturer
                     ImGui::TableSetColumnIndex(2);
-                    ImGui::TextUnformatted(
-                        dev.manufacturer.empty() ? "—" : dev.manufacturer.c_str());
+                    if (RenderCellText(dev.manufacturer) && isAppForeground &&
+                        ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                        ImGui::SetTooltip("%s", dev.manufacturer.c_str());
+                    }
 
                     // Col 3: Class
                     ImGui::TableSetColumnIndex(3);
-                    ImGui::TextUnformatted(
-                        dev.deviceClass.empty() ? "—" : dev.deviceClass.c_str());
+                    RenderCellText(dev.deviceClass);
 
                     // Col 4: Version
                     ImGui::TableSetColumnIndex(4);
-                    ImGui::TextUnformatted(
-                        dev.driverVersion.empty() ? "—" : dev.driverVersion.c_str());
+                    RenderCellText(dev.driverVersion, dev.driverVersion.empty());
 
                     // Col 5: Date
                     ImGui::TableSetColumnIndex(5);
-                    ImGui::TextUnformatted(
-                        dev.driverDate.empty() ? "—" : dev.driverDate.c_str());
+                    RenderCellText(dev.driverDate, true);
 
                     // Col 6: Hardware ID
                     ImGui::TableSetColumnIndex(6);
-                    ImGui::TextUnformatted(
-                        dev.hardwareId.empty() ? "—" : dev.hardwareId.c_str());
+                    if (RenderCellText(dev.hardwareId, dev.hardwareId.empty()) &&
+                        isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                        ImGui::SetTooltip("%s", dev.hardwareId.c_str());
+                    }
 
                     ImGui::PopID();
                 }
             }
             ImGui::EndTable();
         }
-        (void)style;
     }
 
     void RebuildComponentsViewCache(ImGuiTableSortSpecs* sortSpecs) {
@@ -1170,13 +1415,14 @@ private:
 
     void RenderComponentsTab() {
         const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+        const ImGuiStyle& compStyle = ImGui::GetStyle();
         const bool busy =
             componentsScanner_.IsScanning() ||
             componentsScanner_.IsCheckingOnline() ||
             componentsScanner_.IsInstalling();
 
         ImGui::BeginDisabled(busy);
-        if (ImGui::Button("Обновить проверку")) {
+        if (RenderSecondaryButton("Обновить проверку")) {
             componentsScanner_.StartLocalScanAsync(devicesCache_, MakeLogger());
         }
         SameLineWrapIfNeeded(CalcButtonWidth("Проверить онлайн"));
@@ -1208,20 +1454,28 @@ private:
 
         const std::string phase = componentsScanner_.PhaseMessage();
         if (busy || !phase.empty()) {
+            const float winRight = ImGui::GetWindowContentRegionMax().x;
+            const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+            const float remain = winRight - lastEnd - 16.0f;
             const float phaseW = ImGui::CalcTextSize(phase.c_str()).x;
-            const float winRight = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
-            if (ImGui::GetItemRectMax().x + 16.0f + phaseW <= winRight) {
+            if (remain >= phaseW) {
+                ImGui::SameLine(winRight - phaseW);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%s", phase.c_str());
+            } else if (remain >= 150.0f * uiScale) {
                 ImGui::SameLine(0.0f, 16.0f);
                 ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%s", EllipsizeUtf8(phase, remain).c_str());
+            } else {
+                ImGui::TextDisabled("%s", phase.c_str());
             }
-            ImGui::TextDisabled("%s", phase.c_str());
         }
 
         if (componentsScanner_.IsInstalling()) {
             const float prog = componentsScanner_.Progress();
             char overlay[64];
             std::snprintf(overlay, sizeof(overlay), "%.0f%%", prog * 100.0f);
-            ImGui::ProgressBar(prog, ImVec2(-1.0f, 18.0f), overlay);
+            ImGui::ProgressBar(prog, ImVec2(-1.0f, 18.0f * uiScale), overlay);
         }
 
         ImGui::Spacing();
@@ -1231,28 +1485,26 @@ private:
             ImGuiTableFlags_Sortable | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
             ImGuiTableFlags_BordersOuter | ImGuiTableFlags_ScrollY;
 
-        const ImGuiStyle& compStyle = ImGui::GetStyle();
-        const float twoBtnsW =
-            CalcButtonWidth("Установить") + compStyle.ItemSpacing.x + CalcButtonWidth("Сайт");
-        const float oneBtnW = CalcButtonWidth("Открыть сайт");
-        const float actionColW =
-            std::max(twoBtnsW, oneBtnW) + compStyle.CellPadding.x * 2.0f + 6.0f;
+        const float primaryW = CalcButtonWidth("Установить") + 6.0f * uiScale;
+        const float siteW = CalcButtonWidth("Сайт") + 6.0f * uiScale;
+        const float fullActionW = primaryW + compStyle.ItemSpacing.x + siteW;
+        const float actionColW = fullActionW + compStyle.CellPadding.x * 2.0f + 4.0f;
 
         if (ImGui::BeginTable("##ComponentsTable", 6, kTableFlags, ImGui::GetContentRegionAvail())) {
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableSetupColumn(
                 "Статус",
                 ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch,
-                1.10f,
+                1.46f,
                 0);
             ImGui::TableSetupColumn(
-                "Компонент / Официальное ПО", ImGuiTableColumnFlags_WidthStretch, 1.55f, 1);
+                "Компонент / Официальное ПО", ImGuiTableColumnFlags_WidthStretch, 1.36f, 1);
             ImGui::TableSetupColumn(
-                "Устройство / Назначение", ImGuiTableColumnFlags_WidthStretch, 1.20f, 2);
+                "Устройство / Назначение", ImGuiTableColumnFlags_WidthStretch, 1.10f, 2);
             ImGui::TableSetupColumn(
-                "Установлено", ImGuiTableColumnFlags_WidthStretch, 0.72f, 3);
+                "Установлено", ImGuiTableColumnFlags_WidthStretch, 0.70f, 3);
             ImGui::TableSetupColumn(
-                "Последняя офиц.", ImGuiTableColumnFlags_WidthStretch, 0.78f, 4);
+                "Актуальная", ImGuiTableColumnFlags_WidthStretch, 0.76f, 4);
             ImGui::TableSetupColumn(
                 "Действие",
                 ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed,
@@ -1283,14 +1535,17 @@ private:
                 if (!item.installed || item.updateAvailable) {
                     statusCol = ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
                 }
-                RenderStatusBadge(statusCol, item.statusText.c_str());
+                RenderStatusBadge(statusCol, item.statusText.c_str(), true);
+                if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                    ImGui::SetTooltip("%s", item.statusText.c_str());
+                }
 
                 ImGui::TableSetColumnIndex(1);
-                ImGui::TextUnformatted(item.name.c_str());
+                RenderCellText(item.name, false, true);
                 if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                     ImGui::BeginTooltip();
-                    ImGui::PushTextWrapPos(420.0f * uiScale);
-                    ImGui::TextColored(ImVec4(0.42f, 0.70f, 1.00f, 1.00f), "%s", item.name.c_str());
+                    ImGui::PushTextWrapPos(440.0f * uiScale);
+                    ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s", item.name.c_str());
                     ImGui::TextDisabled("Издатель: %s", item.vendor.c_str());
                     if (!item.purposeDescription.empty()) {
                         ImGui::Separator();
@@ -1306,35 +1561,44 @@ private:
                 }
 
                 ImGui::TableSetColumnIndex(2);
-                ImGui::TextUnformatted(
+                const std::string targetHw =
                     item.detectedHardware.empty() ? "Игры и системные библиотеки Windows"
-                                                  : item.detectedHardware.c_str());
+                                                  : item.detectedHardware;
+                if (RenderCellText(targetHw, false, true) && isAppForeground &&
+                    ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                    ImGui::SetTooltip("%s", targetHw.c_str());
+                }
 
                 ImGui::TableSetColumnIndex(3);
-                ImGui::TextUnformatted(
-                    item.installedVersion.empty() ? "—" : item.installedVersion.c_str());
+                if (RenderCellText(item.installedVersion, item.installedVersion.empty(), true) &&
+                    isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                    ImGui::SetTooltip("%s", item.installedVersion.c_str());
+                }
 
                 ImGui::TableSetColumnIndex(4);
-                ImGui::TextUnformatted(
-                    item.latestVersion.empty() ? "—" : item.latestVersion.c_str());
+                if (RenderCellText(item.latestVersion, item.latestVersion.empty(), true) &&
+                    isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                    ImGui::SetTooltip("%s", item.latestVersion.c_str());
+                }
 
                 ImGui::TableSetColumnIndex(5);
                 if (!item.directInstallerUrl.empty()) {
-                    ImGui::BeginDisabled(busy);
+                    const bool needAction = !item.installed || item.updateAvailable;
                     const char* btnLbl = !item.installed
                                              ? "Установить"
                                              : (item.updateAvailable ? "Обновить" : "Скачать");
-                    if (ImGui::SmallButton(btnLbl)) {
+                    ImGui::BeginDisabled(busy);
+                    if (RenderActionButton(btnLbl, ImVec2(primaryW, 0.0f), needAction)) {
                         componentsScanner_.DownloadAndInstallAsync(
                             item, devicesCache_, MakeLogger());
                     }
                     ImGui::EndDisabled();
                     ImGui::SameLine();
-                    if (ImGui::SmallButton("Сайт")) {
+                    if (RenderSecondaryButton("Сайт", ImVec2(siteW, 0.0f))) {
                         OpenUrlInBrowser(item.officialPageUrl);
                     }
                 } else if (!item.officialPageUrl.empty()) {
-                    if (ImGui::SmallButton("Открыть сайт")) {
+                    if (RenderSecondaryButton("Открыть сайт", ImVec2(fullActionW, 0.0f))) {
                         OpenUrlInBrowser(item.officialPageUrl);
                     }
                 }
@@ -1347,6 +1611,7 @@ private:
 
     void RenderWindowsUpdateTab() {
         const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+        const bool isAppForeground = (GetForegroundWindow() == hwnd_);
         const uint64_t wuGen = wuManager_.Generation();
         if (wuGen != lastWuGen_) {
             std::string selectedUid;
@@ -1374,12 +1639,12 @@ private:
             wuManager_.StartSearchAsync(MakeLogger(), !wuIncludeSystemUpdates_);
         }
         SameLineWrapIfNeeded(CalcButtonWidth("Выбрать все"));
-        if (ImGui::Button("Выбрать все")) {
+        if (RenderSecondaryButton("Выбрать все")) {
             wuManager_.SelectAll(true);
             for (auto& u : wuCache_) u.selected = true;
         }
         SameLineWrapIfNeeded(CalcButtonWidth("Снять все"));
-        if (ImGui::Button("Снять все")) {
+        if (RenderSecondaryButton("Снять все")) {
             wuManager_.SelectAll(false);
             for (auto& u : wuCache_) u.selected = false;
         }
@@ -1392,9 +1657,21 @@ private:
             }
         }
 
-        SameLineWrapIfNeeded(CalcButtonWidth("Скачать и установить выбранные"));
+        char installLbl[96];
+        if (!selectedIds.empty()) {
+            std::snprintf(
+                installLbl,
+                sizeof(installLbl),
+                "Установить выбранные (%zu)###WuInstallBtn",
+                selectedIds.size());
+        } else {
+            std::snprintf(installLbl, sizeof(installLbl), "Установить выбранные###WuInstallBtn");
+        }
+        const float installBtnW = CalcButtonWidth(
+            selectedIds.empty() ? "Установить выбранные" : "Установить выбранные (99)");
+        SameLineWrapIfNeeded(installBtnW);
         ImGui::BeginDisabled(busy || selectedIds.empty());
-        if (ImGui::Button("Скачать и установить выбранные")) {
+        if (ImGui::Button(installLbl)) {
             wuManager_.StartDownloadAndInstallAsync(
                 selectedIds,
                 wuRestoreBefore_,
@@ -1413,39 +1690,52 @@ private:
 
         if (busy) {
             SameLineWrapIfNeeded(CalcButtonWidth("Отмена"));
-            if (ImGui::Button("Отмена")) {
+            if (RenderSecondaryButton("Отмена")) {
                 wuManager_.RequestCancel();
             }
         }
 
-        ImGui::Checkbox("Включать системные обновления и библиотеки (не только драйверы)", &wuIncludeSystemUpdates_);
-        SameLineWrapIfNeeded(CalcButtonWidth("Точка восстановления перед установкой") + 28.0f);
-        ImGui::Checkbox("Точка восстановления перед установкой", &wuRestoreBefore_);
-
         const std::string phase = wuManager_.PhaseMessage();
         if (busy || !phase.empty()) {
-            ImGui::TextDisabled("%s", phase.c_str());
+            const float winRight = ImGui::GetWindowContentRegionMax().x;
+            const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+            const float remain = winRight - lastEnd - 16.0f;
+            const float phaseW = ImGui::CalcTextSize(phase.c_str()).x;
+            if (remain >= phaseW) {
+                ImGui::SameLine(winRight - phaseW);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%s", phase.c_str());
+            } else if (remain >= 150.0f * uiScale) {
+                ImGui::SameLine(0.0f, 14.0f);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%s", EllipsizeUtf8(phase, remain).c_str());
+            }
         }
+
+        ImGui::Checkbox("Включать системные обновления и библиотеки (не только драйверы)", &wuIncludeSystemUpdates_);
+        SameLineWrapIfNeeded(CalcButtonWidth("Точка восстановления перед установкой") + 32.0f * uiScale);
+        ImGui::Checkbox("Точка восстановления перед установкой", &wuRestoreBefore_);
 
         if (wuManager_.IsInstalling() || wuManager_.IsSearching()) {
             if (wuManager_.IsSearching()) {
                 const float anim = 0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * 3.0f);
-                ImGui::ProgressBar(anim, ImVec2(-1.0f, 18.0f), "Поиск в Windows Update...");
+                ImGui::ProgressBar(anim, ImVec2(-1.0f, 18.0f * uiScale), "Поиск в Windows Update...");
             } else {
                 const float prog = wuManager_.Progress();
                 char overlay[64];
                 std::snprintf(overlay, sizeof(overlay), "%.0f%%", prog * 100.0f);
-                ImGui::ProgressBar(prog, ImVec2(-1.0f, 18.0f), overlay);
+                ImGui::ProgressBar(prog, ImVec2(-1.0f, 18.0f * uiScale), overlay);
             }
         }
 
         ImGui::Spacing();
 
         const float availY = ImGui::GetContentRegionAvail().y;
+        const float wuSpacingY = ImGui::GetStyle().ItemSpacing.y;
         const float detailsH = (selectedWuIndex_ >= 0 && selectedWuIndex_ < static_cast<int>(wuCache_.size()))
-                                   ? 88.0f * uiScale
+                                   ? 90.0f * uiScale
                                    : 0.0f;
-        const float tableH = std::max(120.0f, availY - (detailsH > 0.0f ? detailsH + 8.0f : 0.0f));
+        const float tableH = std::max(120.0f, availY - (detailsH > 0.0f ? detailsH + wuSpacingY : 0.0f));
 
         constexpr ImGuiTableFlags kTableFlags =
             ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable | ImGuiTableFlags_RowBg |
@@ -1456,15 +1746,15 @@ private:
             ImGui::TableSetupColumn(
                 "Выбор",
                 ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed,
-                52.0f * uiScale,
+                58.0f * uiScale,
                 0);
             ImGui::TableSetupColumn("Обновление", ImGuiTableColumnFlags_WidthStretch, 1.80f, 1);
             ImGui::TableSetupColumn(
-                "Производитель / Модель", ImGuiTableColumnFlags_WidthStretch, 1.10f, 2);
+                "Производитель / Модель", ImGuiTableColumnFlags_WidthStretch, 1.05f, 2);
             ImGui::TableSetupColumn(
                 "Размер", ImGuiTableColumnFlags_WidthStretch, 0.50f, 3);
             ImGui::TableSetupColumn(
-                "Статус", ImGuiTableColumnFlags_WidthStretch, 0.95f, 4);
+                "Статус", ImGuiTableColumnFlags_WidthStretch, 0.98f, 4);
             ImGui::TableHeadersRow();
 
             if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs()) {
@@ -1512,12 +1802,17 @@ private:
                 }
             }
 
+            const float frameH = ImGui::GetFrameHeight();
             for (int i = 0; i < static_cast<int>(wuCache_.size()); ++i) {
                 auto& item = wuCache_[static_cast<size_t>(i)];
                 ImGui::TableNextRow();
                 ImGui::PushID(i);
 
                 ImGui::TableSetColumnIndex(0);
+                const float cbOffset = std::max(0.0f, (ImGui::GetContentRegionAvail().x - frameH) * 0.5f);
+                if (cbOffset > 0.0f) {
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + cbOffset);
+                }
                 bool checked = item.selected;
                 ImGui::BeginDisabled(busy || item.installedOk);
                 if (ImGui::Checkbox("##sel", &checked)) {
@@ -1527,12 +1822,20 @@ private:
                 ImGui::EndDisabled();
 
                 ImGui::TableSetColumnIndex(1);
+                const std::string shownTitle = EllipsizeUtf8(item.title, ImGui::GetContentRegionAvail().x - 2.0f);
+                const std::string selLabel = shownTitle + "##wuRow";
+                ImGui::AlignTextToFramePadding();
                 const bool isSelectedRow = (selectedWuIndex_ == i);
                 if (ImGui::Selectable(
-                        item.title.c_str(),
+                        selLabel.c_str(),
                         isSelectedRow,
-                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap)) {
+                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
+                        ImVec2(0.0f, frameH))) {
                     selectedWuIndex_ = i;
+                }
+                if (shownTitle != item.title && isAppForeground &&
+                    ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                    ImGui::SetTooltip("%s", item.title.c_str());
                 }
 
                 ImGui::TableSetColumnIndex(2);
@@ -1541,16 +1844,19 @@ private:
                     if (!mfgModel.empty()) mfgModel += " — ";
                     mfgModel += item.driverModel;
                 }
-                ImGui::TextUnformatted(mfgModel.empty() ? "—" : mfgModel.c_str());
+                if (RenderCellText(mfgModel, mfgModel.empty(), true) && isAppForeground &&
+                    ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                    ImGui::SetTooltip("%s", mfgModel.c_str());
+                }
 
                 ImGui::TableSetColumnIndex(3);
-                ImGui::TextUnformatted(item.sizeFormatted.c_str());
+                RenderCellText(item.sizeFormatted, true, true);
 
                 ImGui::TableSetColumnIndex(4);
                 const ImVec4 col = item.installedOk
                                        ? ImVec4(0.20f, 0.83f, 0.60f, 1.00f)
                                        : ImVec4(0.60f, 0.72f, 0.90f, 1.00f);
-                RenderStatusBadge(col, item.statusText.c_str());
+                RenderStatusBadge(col, item.statusText.c_str(), true);
 
                 ImGui::PopID();
             }
@@ -1559,8 +1865,11 @@ private:
 
         if (detailsH > 0.0f) {
             const auto& sel = wuCache_[static_cast<size_t>(selectedWuIndex_)];
-            ImGui::Spacing();
-            ImGui::BeginChild("##WuDetails", ImVec2(0.0f, detailsH), true);
+            ImGui::BeginChild(
+                "##WuDetails",
+                ImVec2(0.0f, detailsH),
+                true,
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             ImGui::TextWrapped("%s", sel.description.empty() ? sel.title.c_str() : sel.description.c_str());
             ImGui::TextDisabled(
                 "Hardware ID: %s   |   Дата: %s   |   Update ID: %s",
@@ -1572,7 +1881,9 @@ private:
     }
 
     void RenderLocalInstallerTab() {
+        const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
         const ImGuiStyle& style = ImGui::GetStyle();
+        const bool isAppForeground = (GetForegroundWindow() == hwnd_);
         const bool busy =
             localInstaller_.IsPickingFolder() ||
             localInstaller_.IsScanningInf() ||
@@ -1581,8 +1892,7 @@ private:
         const char* pickLbl = "Обзор папки...";
         const char* scanLbl = "Найти .inf";
         const float buttonsW =
-            ImGui::CalcTextSize(pickLbl).x + ImGui::CalcTextSize(scanLbl).x +
-            style.FramePadding.x * 4.0f + style.ItemSpacing.x * 3.0f;
+            CalcButtonWidth(pickLbl) + CalcButtonWidth(scanLbl) + style.ItemSpacing.x * 2.0f + 4.0f;
 
         ImGui::AlignTextToFramePadding();
         ImGui::TextUnformatted("Папка с драйверами:");
@@ -1596,7 +1906,7 @@ private:
 
         ImGui::SameLine();
         ImGui::BeginDisabled(busy);
-        if (ImGui::Button(pickLbl)) {
+        if (RenderSecondaryButton(pickLbl)) {
             localInstaller_.PickFolderAsync(
                 hwnd_,
                 MakeLogger(),
@@ -1613,7 +1923,7 @@ private:
                 });
         }
         ImGui::SameLine();
-        if (ImGui::Button(scanLbl)) {
+        if (RenderSecondaryButton(scanLbl)) {
             localInstaller_.ScanInfFilesAsync(
                 hdm::Utf8ToWide(localFolderBuf_), MakeLogger());
         }
@@ -1629,7 +1939,7 @@ private:
         }
 
         ImGui::Checkbox("Принудительная установка (DIIRFLAG_FORCE_INF)", &localForceInstall_);
-        SameLineWrapIfNeeded(CalcButtonWidth("Точка восстановления перед установкой") + 28.0f);
+        SameLineWrapIfNeeded(CalcButtonWidth("Точка восстановления перед установкой") + 32.0f * uiScale);
         ImGui::Checkbox("Точка восстановления перед установкой", &localRestoreBefore_);
 
         auto infFiles = localInstaller_.GetInfFilesSnapshot();
@@ -1652,15 +1962,27 @@ private:
         }
         ImGui::EndDisabled();
 
+        char infCountBuf[64];
+        std::snprintf(infCountBuf, sizeof(infCountBuf), "Найдено .inf: %zu", infFiles.size());
+        const float countW = ImGui::CalcTextSize(infCountBuf).x;
+        const float winRight = ImGui::GetWindowContentRegionMax().x;
+        const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+        if (winRight - countW > lastEnd + 16.0f) {
+            ImGui::SameLine(winRight - countW);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextDisabled("%s", infCountBuf);
+        } else {
+            ImGui::TextDisabled("%s", infCountBuf);
+        }
+
         if (localInstaller_.IsInstalling()) {
             const float prog = localInstaller_.Progress();
             char overlay[64];
             std::snprintf(overlay, sizeof(overlay), "%.0f%%", prog * 100.0f);
-            ImGui::ProgressBar(prog, ImVec2(-1.0f, 18.0f), overlay);
+            ImGui::ProgressBar(prog, ImVec2(-1.0f, 18.0f * uiScale), overlay);
         }
 
         ImGui::Spacing();
-        ImGui::TextDisabled("Найдено .inf файлов: %zu", infFiles.size());
 
         constexpr ImGuiTableFlags kTableFlags =
             ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable | ImGuiTableFlags_RowBg |
@@ -1700,11 +2022,14 @@ private:
             for (const auto& entry : infFiles) {
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
-                ImGui::TextUnformatted(entry.fileName.c_str());
+                RenderCellText(entry.fileName);
                 ImGui::TableSetColumnIndex(1);
-                ImGui::TextUnformatted(entry.relativePath.c_str());
+                if (RenderCellText(entry.relativePath) && isAppForeground &&
+                    ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                    ImGui::SetTooltip("%s", entry.relativePath.c_str());
+                }
                 ImGui::TableSetColumnIndex(2);
-                ImGui::TextUnformatted(hdm::FormatBytes(entry.sizeBytes).c_str());
+                RenderCellText(hdm::FormatBytes(entry.sizeBytes), true);
             }
             ImGui::EndTable();
         }
@@ -1720,11 +2045,8 @@ private:
         if (ImGui::Button("Обновить диагностику")) {
             diagnostics_.StartScanAsync(devicesCache_, MakeLogger());
         }
-        ImGui::EndDisabled();
-
         SameLineWrapIfNeeded(CalcButtonWidth("Очистить кэш WU"));
-        ImGui::BeginDisabled(busy);
-        if (ImGui::Button("Очистить кэш WU")) {
+        if (RenderSecondaryButton("Очистить кэш WU")) {
             diagnostics_.RunMaintenanceAsync(
                 hdm::MaintenanceAction::ResetWuDownloadCache,
                 "",
@@ -1732,7 +2054,8 @@ private:
                 MakeLogger());
         }
         ImGui::EndDisabled();
-        if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        if (isAppForeground &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(
                 "Останавливает wuauserv и BITS, очищает папку загрузок Windows Update "
                 "(SoftwareDistribution\\Download) и запускает службы заново.\n"
@@ -1741,7 +2064,7 @@ private:
 
         if (diagnostics_.IsRunningAction()) {
             SameLineWrapIfNeeded(CalcButtonWidth("Отмена"));
-            if (ImGui::Button("Отмена")) {
+            if (RenderSecondaryButton("Отмена")) {
                 diagnostics_.RequestCancel();
             }
             const std::string phase = diagnostics_.ActionPhase();
@@ -1751,45 +2074,59 @@ private:
                 ImGui::TextColored(ImVec4(0.98f, 0.75f, 0.14f, 1.00f), "%s", phase.c_str());
             }
         } else if (diagCache_.valid) {
-            ImGui::SameLine(0.0f, 14.0f);
-            ImGui::AlignTextToFramePadding();
+            ImGui::SameLine(0.0f, 12.0f);
             if (diagCache_.disabledCriticalServices > 0) {
-                ImGui::TextColored(
-                    ImVec4(0.97f, 0.44f, 0.44f, 1.00f),
+                char msg[96];
+                std::snprintf(
+                    msg,
+                    sizeof(msg),
                     "Отключено критичных служб: %zu",
                     diagCache_.disabledCriticalServices);
+                RenderStatusBadge(ImVec4(0.97f, 0.44f, 0.44f, 1.00f), msg, true);
             } else if (diagCache_.attentionControllers > 0) {
-                ImGui::TextColored(
-                    ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
-                    "Требуют проверки (контроллеры): %zu",
+                char msg[96];
+                std::snprintf(
+                    msg,
+                    sizeof(msg),
+                    "Контроллеры требуют внимания: %zu",
                     diagCache_.attentionControllers);
+                RenderStatusBadge(ImVec4(0.98f, 0.75f, 0.14f, 1.00f), msg, true);
             } else {
-                ImGui::TextColored(
+                RenderStatusBadge(
                     ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
-                    "Системное окружение готово к обновлениям");
+                    "Системное окружение готово к обновлениям",
+                    true);
             }
         }
-
-        ImGui::Spacing();
 
         if (!diagCache_.valid) {
             ImGui::TextDisabled("Выполняется сбор сведений о материнской плате, службах и драйверах...");
             return;
         }
 
-        // Top cards: Motherboard/BIOS & Windows Readiness
-        const float cardH = std::max(126.0f, ImGui::GetTextLineHeight() * 6.5f + style.WindowPadding.y * 2.0f);
-        if (ImGui::BeginTable("##DiagSummaryCards", 2, ImGuiTableFlags_SizingStretchSame)) {
-            ImGui::TableNextRow();
+        // Top cards: Motherboard/BIOS & Windows Readiness (compact padding so table & footer fit cleanly)
+        const float cardPadY = std::round(9.0f * uiScale);
+        const float cardSpacingY = std::round(5.0f * uiScale);
+        const float badgeH = ImGui::GetTextLineHeight() + std::round(6.0f * uiScale);
+        const float cardH = std::max(
+            126.0f * uiScale,
+            ImGui::GetTextLineHeight() + cardSpacingY * 2.0f + 4.0f +
+                (badgeH + cardSpacingY) * 3.0f + cardPadY * 2.0f);
+        const float cardGap = style.ItemSpacing.x;
+        const float cardW = std::max(260.0f, (ImGui::GetContentRegionAvail().x - cardGap) * 0.5f);
 
-            ImGui::TableSetColumnIndex(0);
-            ImGui::BeginChild(
-                "##MoboDiagCard",
-                ImVec2(0.0f, cardH),
-                true,
-                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.WindowPadding.x, cardPadY));
+        ImGui::BeginChild(
+            "##MoboDiagCard",
+            ImVec2(cardW, cardH),
+            true,
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x, cardSpacingY));
+        {
             const auto& mb = diagCache_.motherboard;
-            ImGui::TextColored(ImVec4(0.42f, 0.70f, 1.00f, 1.00f), "Материнская плата и BIOS");
+            ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "Материнская плата и BIOS");
+            ImGui::Separator();
+
             std::string boardTitle;
             if (!mb.manufacturer.empty() && mb.manufacturer != "—") {
                 boardTitle = mb.manufacturer;
@@ -1806,41 +2143,60 @@ private:
             if (boardTitle.empty()) {
                 boardTitle = "Модель не определена в SMBIOS";
             }
-            ImGui::Text("Плата: %s", boardTitle.c_str());
-            ImGui::TextDisabled(
-                "BIOS: %s  (%s)",
-                mb.biosVersion.empty() ? "—" : mb.biosVersion.c_str(),
-                mb.biosDate.empty() ? "—" : mb.biosDate.c_str());
 
-            ImGui::Spacing();
+            ImGui::TextDisabled("Плата:");
+            ImGui::SameLine();
+            if (RenderCellText(boardTitle) && isAppForeground &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                ImGui::SetTooltip("%s", boardTitle.c_str());
+            }
+
+            const std::string biosInfo =
+                (mb.biosVersion.empty() ? "—" : mb.biosVersion) + "  (" +
+                (mb.biosDate.empty() ? "—" : mb.biosDate) + ")";
+            ImGui::TextDisabled("BIOS:");
+            ImGui::SameLine();
+            RenderCellText(biosInfo, true);
+
+            const float btnsY = cardH - cardPadY - ImGui::GetFrameHeight();
+            if (ImGui::GetCursorPosY() < btnsY) {
+                ImGui::SetCursorPosY(btnsY);
+            }
             if (!mb.supportUrl.empty()) {
-                if (ImGui::Button("Сайт поддержки платы")) {
+                if (RenderSecondaryButton("Сайт платы")) {
                     OpenUrlInBrowser(mb.supportUrl);
                 }
                 ImGui::SameLine();
             }
-            if (ImGui::Button("Найти драйверы (Google)")) {
+            if (RenderSecondaryButton("Поиск драйверов")) {
                 OpenUrlInBrowser(
                     "https://www.google.com/search?q=" +
                     UrlEncode(boardTitle + " chipset lan audio drivers Windows"));
             }
             ImGui::SameLine();
-            if (ImGui::Button("Копировать")) {
-                const std::string copyText =
-                    boardTitle + " | BIOS: " + mb.biosVersion + " (" + mb.biosDate + ")";
+            if (RenderSecondaryButton("Копировать")) {
+                const std::string copyText = boardTitle + " | BIOS: " + biosInfo;
                 ImGui::SetClipboardText(copyText.c_str());
                 logBuffer_.Push(hdm::LogLevel::Info, "Скопировано в буфер: " + copyText);
             }
-            ImGui::EndChild();
+        }
+        ImGui::PopStyleVar();
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
 
-            ImGui::TableSetColumnIndex(1);
-            ImGui::BeginChild(
-                "##ReadinessDiagCard",
-                ImVec2(0.0f, cardH),
-                true,
-                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::SameLine(0.0f, cardGap);
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.WindowPadding.x, cardPadY));
+        ImGui::BeginChild(
+            "##ReadinessDiagCard",
+            ImVec2(cardW, cardH),
+            true,
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x, cardSpacingY));
+        {
             const auto& rd = diagCache_.readiness;
-            ImGui::TextColored(ImVec4(0.42f, 0.70f, 1.00f, 1.00f), "Готовность Windows и защита");
+            ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "Готовность Windows и защита");
+            ImGui::Separator();
 
             if (rd.cbsRebootPending || rd.wuRebootRequired) {
                 RenderStatusBadge(
@@ -1883,12 +2239,10 @@ private:
                     ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
                     "Критичные службы обновлений и защиты не отключены");
             }
-            ImGui::EndChild();
-
-            ImGui::EndTable();
         }
-
-        ImGui::Spacing();
+        ImGui::PopStyleVar();
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
 
         // Section switcher pills: Controllers vs Windows Services
         char ctrlPill[96];
@@ -1921,24 +2275,24 @@ private:
             diagSectionIndex_ = 1;
         }
 
-        ImGui::Spacing();
-
-        const float bottomBarH = ImGui::GetFrameHeightWithSpacing() + style.ItemSpacing.y;
-        const float tableH = std::max(140.0f, ImGui::GetContentRegionAvail().y - bottomBarH);
+        const float footerPadY = std::round(7.0f * uiScale);
+        const float footerH = ImGui::GetFrameHeight() + footerPadY * 2.0f;
+        const float tableH = std::max(84.0f, ImGui::GetContentRegionAvail().y - footerH - style.ItemSpacing.y);
         constexpr ImGuiTableFlags kDiagTableFlags =
             ImGuiTableFlags_Resizable | ImGuiTableFlags_RowBg |
             ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_ScrollY;
 
         if (diagSectionIndex_ == 0) {
-            const float actionColW =
-                CalcButtonWidth("Каталог MS") + style.ItemSpacing.x + CalcButtonWidth("Поиск") +
-                style.CellPadding.x * 2.0f + 6.0f;
+            const float catW = CalcButtonWidth("Каталог MS") + 6.0f * uiScale;
+            const float searchW = CalcButtonWidth("Поиск") + 6.0f * uiScale;
+            const float actionColW = catW + style.ItemSpacing.x + searchW + style.CellPadding.x * 2.0f + 4.0f;
+
             if (ImGui::BeginTable("##DiagControllersTable", 5, kDiagTableFlags, ImVec2(0.0f, tableH))) {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("Состояние", ImGuiTableColumnFlags_WidthStretch, 0.95f);
-                ImGui::TableSetupColumn("Роль", ImGuiTableColumnFlags_WidthStretch, 0.65f);
-                ImGui::TableSetupColumn("Устройство", ImGuiTableColumnFlags_WidthStretch, 1.45f);
-                ImGui::TableSetupColumn("Драйвер / Дата", ImGuiTableColumnFlags_WidthStretch, 1.05f);
+                ImGui::TableSetupColumn("Состояние", ImGuiTableColumnFlags_WidthStretch, 1.34f);
+                ImGui::TableSetupColumn("Роль", ImGuiTableColumnFlags_WidthStretch, 0.62f);
+                ImGui::TableSetupColumn("Устройство", ImGuiTableColumnFlags_WidthStretch, 1.20f);
+                ImGui::TableSetupColumn("Драйвер / Дата", ImGuiTableColumnFlags_WidthStretch, 0.94f);
                 ImGui::TableSetupColumn("Действие", ImGuiTableColumnFlags_WidthFixed, actionColW);
                 ImGui::TableHeadersRow();
 
@@ -1954,17 +2308,17 @@ private:
                     } else if (item.health == hdm::ControllerHealth::Attention) {
                         col = ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
                     }
-                    RenderStatusBadge(col, item.statusText.c_str());
+                    RenderStatusBadge(col, item.statusText.c_str(), true);
 
                     ImGui::TableSetColumnIndex(1);
-                    ImGui::TextUnformatted(item.role.c_str());
+                    RenderCellText(item.role, false, true);
 
                     ImGui::TableSetColumnIndex(2);
-                    ImGui::TextUnformatted(item.deviceName.c_str());
+                    RenderCellText(item.deviceName, false, true);
                     if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                         ImGui::BeginTooltip();
-                        ImGui::PushTextWrapPos(420.0f * uiScale);
-                        ImGui::TextColored(ImVec4(0.42f, 0.70f, 1.00f, 1.00f), "%s", item.deviceName.c_str());
+                        ImGui::PushTextWrapPos(440.0f * uiScale);
+                        ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s", item.deviceName.c_str());
                         ImGui::TextDisabled(
                             "Поставщик: %s | INF: %s",
                             item.manufacturer.empty() ? "—" : item.manufacturer.c_str(),
@@ -1981,19 +2335,19 @@ private:
                     if (!item.driverDate.empty()) {
                         verDate += " (" + item.driverDate + ")";
                     }
-                    ImGui::TextUnformatted(verDate.c_str());
+                    RenderCellText(verDate, false, true);
 
                     ImGui::TableSetColumnIndex(4);
                     const bool hasKey = !item.searchKey.empty();
                     ImGui::BeginDisabled(!hasKey);
-                    if (ImGui::SmallButton("Каталог MS")) {
+                    if (RenderSecondaryButton("Каталог MS", ImVec2(catW, 0.0f))) {
                         OpenUrlInBrowser(
                             "https://www.catalog.update.microsoft.com/Search.aspx?q=" +
                             UrlEncode(item.searchKey));
                     }
                     ImGui::EndDisabled();
                     ImGui::SameLine();
-                    if (ImGui::SmallButton("Поиск")) {
+                    if (RenderSecondaryButton("Поиск", ImVec2(searchW, 0.0f))) {
                         const std::string q =
                             (hasKey ? (item.searchKey + " " + item.deviceName) : item.deviceName) +
                             " Windows driver";
@@ -2005,13 +2359,14 @@ private:
                 ImGui::EndTable();
             }
         } else {
-            const float svcActionW = CalcButtonWidth("Включить") + style.CellPadding.x * 2.0f + 8.0f;
+            const float svcBtnW = CalcButtonWidth("Включить") + 10.0f * uiScale;
+            const float svcActionW = svcBtnW + style.CellPadding.x * 2.0f + 4.0f;
             if (ImGui::BeginTable("##DiagServicesTable", 5, kDiagTableFlags, ImVec2(0.0f, tableH))) {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("Статус", ImGuiTableColumnFlags_WidthStretch, 0.72f);
-                ImGui::TableSetupColumn("Служба", ImGuiTableColumnFlags_WidthStretch, 1.15f);
-                ImGui::TableSetupColumn("Назначение", ImGuiTableColumnFlags_WidthStretch, 1.45f);
-                ImGui::TableSetupColumn("Тип запуска", ImGuiTableColumnFlags_WidthStretch, 0.72f);
+                ImGui::TableSetupColumn("Статус", ImGuiTableColumnFlags_WidthStretch, 1.18f);
+                ImGui::TableSetupColumn("Служба", ImGuiTableColumnFlags_WidthStretch, 1.12f);
+                ImGui::TableSetupColumn("Назначение", ImGuiTableColumnFlags_WidthStretch, 1.15f);
+                ImGui::TableSetupColumn("Тип запуска", ImGuiTableColumnFlags_WidthStretch, 0.62f);
                 ImGui::TableSetupColumn("Действие", ImGuiTableColumnFlags_WidthFixed, svcActionW);
                 ImGui::TableHeadersRow();
 
@@ -2027,22 +2382,28 @@ private:
                     } else if (svc.health == hdm::ServiceHealthState::MissingOrError) {
                         col = ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
                     }
-                    RenderStatusBadge(col, svc.stateText.c_str());
+                    RenderStatusBadge(col, svc.stateText.c_str(), true);
 
                     ImGui::TableSetColumnIndex(1);
                     const std::string svcLabel = svc.serviceName + " — " + svc.displayName;
-                    ImGui::TextUnformatted(svcLabel.c_str());
+                    if (RenderCellText(svcLabel, false, true) && isAppForeground &&
+                        ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                        ImGui::SetTooltip("%s", svcLabel.c_str());
+                    }
 
                     ImGui::TableSetColumnIndex(2);
-                    ImGui::TextUnformatted(svc.purpose.c_str());
+                    if (RenderCellText(svc.purpose, true, true) && isAppForeground &&
+                        ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                        ImGui::SetTooltip("%s", svc.purpose.c_str());
+                    }
 
                     ImGui::TableSetColumnIndex(3);
-                    ImGui::TextUnformatted(svc.startTypeText.c_str());
+                    RenderCellText(svc.startTypeText, false, true);
 
                     ImGui::TableSetColumnIndex(4);
                     if (svc.health == hdm::ServiceHealthState::Disabled) {
                         ImGui::BeginDisabled(busy);
-                        if (ImGui::SmallButton("Включить")) {
+                        if (ImGui::Button("Включить", ImVec2(svcBtnW, 0.0f))) {
                             diagnostics_.RunMaintenanceAsync(
                                 hdm::MaintenanceAction::EnableService,
                                 svc.serviceName,
@@ -2051,7 +2412,13 @@ private:
                         }
                         ImGui::EndDisabled();
                     } else {
-                        ImGui::TextDisabled("—");
+                        const float okW = ImGui::CalcTextSize("ОК").x;
+                        const float availCell = ImGui::GetContentRegionAvail().x;
+                        if (availCell > okW) {
+                            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availCell - okW) * 0.5f);
+                        }
+                        ImGui::AlignTextToFramePadding();
+                        ImGui::TextDisabled("ОК");
                     }
 
                     ImGui::PopID();
@@ -2060,42 +2427,53 @@ private:
             }
         }
 
-        ImGui::Spacing();
-
-        // Bottom Maintenance Toolbar (always reachable)
+        // Bottom Maintenance Dock (bordered card footer aligned symmetrically)
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.WindowPadding.x, footerPadY));
+        ImGui::BeginChild(
+            "##DiagFooterBar",
+            ImVec2(0.0f, footerH),
+            true,
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("Проверка системных файлов:");
         ImGui::BeginDisabled(busy);
-        SameLineWrapIfNeeded(CalcButtonWidth("SFC /scannow"));
-        if (ImGui::Button("SFC /scannow")) {
+        ImGui::SameLine(0.0f, 10.0f);
+        if (RenderSecondaryButton("SFC /scannow")) {
             diagnostics_.RunMaintenanceAsync(
                 hdm::MaintenanceAction::SfcScan, "", devicesCache_, MakeLogger());
         }
-        if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        if (isAppForeground &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip("Запускает встроенную проверку и восстановление защищённых файлов Windows (sfc.exe /scannow).");
         }
 
-        SameLineWrapIfNeeded(CalcButtonWidth("DISM CheckHealth"));
-        if (ImGui::Button("DISM CheckHealth")) {
+        ImGui::SameLine();
+        if (RenderSecondaryButton("DISM CheckHealth")) {
             diagnostics_.RunMaintenanceAsync(
                 hdm::MaintenanceAction::DismCheckHealth, "", devicesCache_, MakeLogger());
         }
-        if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        if (isAppForeground &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip("Быстрая проверка хранилища компонентов Windows без изменений (DISM /CheckHealth).");
         }
 
-        SameLineWrapIfNeeded(CalcButtonWidth("DISM RestoreHealth"));
-        if (ImGui::Button("DISM RestoreHealth")) {
+        ImGui::SameLine();
+        if (RenderSecondaryButton("DISM RestoreHealth")) {
             diagnostics_.RunMaintenanceAsync(
                 hdm::MaintenanceAction::DismRestoreHealth, "", devicesCache_, MakeLogger());
         }
-        if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        if (isAppForeground &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip("Глубокое восстановление хранилища компонентов Windows через Windows Update (DISM /RestoreHealth).");
         }
         ImGui::EndDisabled();
+        ImGui::EndChild();
+        ImGui::PopStyleVar();
     }
 
     void RenderLogPanel() {
+        const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+        const ImGuiStyle& style = ImGui::GetStyle();
         bool wasDirty = false;
         const auto entries = logBuffer_.Snapshot(&wasDirty);
 
@@ -2106,11 +2484,26 @@ private:
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
         ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(ImVec4(0.62f, 0.72f, 0.88f, 1.00f), "Журнал событий");
-        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.62f, 0.74f, 0.90f, 1.00f), "Журнал событий");
+        ImGui::SameLine(0.0f, 8.0f);
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("(%zu)", entries.size());
+
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(9.0f * uiScale, 3.0f * uiScale));
+        const float copyW = ImGui::CalcTextSize("Копировать").x + 18.0f * uiScale;
+        const float clearW = ImGui::CalcTextSize("Очистить").x + 18.0f * uiScale;
+        const float autoW = ImGui::CalcTextSize("Автопрокрутка").x + ImGui::GetFrameHeight() + 8.0f;
+        const float totalRightW = autoW + copyW + clearW + style.ItemSpacing.x * 2.0f;
+        const float winRight = ImGui::GetWindowContentRegionMax().x;
+        if (winRight - totalRightW > ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x + 12.0f) {
+            ImGui::SameLine(winRight - totalRightW);
+        } else {
+            ImGui::SameLine(0.0f, 16.0f);
+        }
+
         ImGui::Checkbox("Автопрокрутка", &logAutoScroll_);
         ImGui::SameLine();
-        if (ImGui::SmallButton("Копировать")) {
+        if (RenderSecondaryButton("Копировать", ImVec2(copyW, 0.0f))) {
             std::string all;
             for (const auto& e : entries) {
                 all += "[" + e.timestamp + "] " + e.message + "\n";
@@ -2118,9 +2511,10 @@ private:
             ImGui::SetClipboardText(all.c_str());
         }
         ImGui::SameLine();
-        if (ImGui::SmallButton("Очистить")) {
+        if (RenderSecondaryButton("Очистить", ImVec2(clearW, 0.0f))) {
             logBuffer_.Clear();
         }
+        ImGui::PopStyleVar();
         ImGui::Separator();
 
         ImGui::BeginChild("##LogScroll", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_HorizontalScrollbar);
@@ -2154,6 +2548,7 @@ private:
 
     HWND hwnd_{nullptr};
     bool isElevated_{false};
+    int pendingInitialTab_{-1};
     bool exitRequested_{false};
     std::atomic<bool> rebootRequired_{false};
     std::atomic<bool> pendingDeviceRescan_{false};
@@ -2299,11 +2694,33 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
+    int initialTab = -1;
+    int initialDiagSection = 0;
+    std::wstring screenshotPath;
     {
-        DriverLoomApp app(hwnd);
-        const ImVec4 clearColor(0.067f, 0.078f, 0.106f, 1.00f);
+        int argc = 0;
+        if (LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
+            for (int i = 1; i < argc; ++i) {
+                const std::wstring arg = argv[i];
+                if (arg == L"--start-tab" && i + 1 < argc) {
+                    initialTab = _wtoi(argv[++i]);
+                } else if (arg == L"--diag-section" && i + 1 < argc) {
+                    initialDiagSection = _wtoi(argv[++i]);
+                } else if (arg == L"--screenshot" && i + 1 < argc) {
+                    screenshotPath = argv[++i];
+                }
+            }
+            LocalFree(argv);
+        }
+    }
+
+    {
+        DriverLoomApp app(hwnd, initialTab);
+        app.SetInitialDiagSection(initialDiagSection);
+        const ImVec4 clearColor(0.059f, 0.071f, 0.098f, 1.00f);
 
         bool done = false;
+        bool screenshotTaken = false;
         while (!done && !app.ShouldExitApp()) {
             MSG msg{};
             while (PeekMessageW(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
@@ -2317,7 +2734,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                 break;
             }
 
-            if (g_swapChainOccluded &&
+            if (screenshotPath.empty() && g_swapChainOccluded &&
                 g_pSwapChain->Present(0, DXGI_PRESENT_TEST) == DXGI_STATUS_OCCLUDED) {
                 Sleep(10);
                 continue;
@@ -2344,6 +2761,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
             g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clearColorWithAlpha);
             ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+            if (!screenshotPath.empty() && !screenshotTaken) {
+                const double elapsed = ImGui::GetTime();
+                if ((elapsed >= 1.8 && app.IsInitialScanSettled()) || elapsed >= 4.0) {
+                    SaveBackBufferToBmp(screenshotPath);
+                    screenshotTaken = true;
+                    done = true;
+                }
+            }
 
             const HRESULT hr = g_pSwapChain->Present(1, 0);
             g_swapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
