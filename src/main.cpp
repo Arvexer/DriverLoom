@@ -1198,7 +1198,8 @@ private:
 
         // Row 1: Scan button + PnP rescan + Category filter pills (auto-wrap on narrow windows)
         const bool scanning = scanner_.IsScanning();
-        const bool devBusy = scanner_.IsBusy();
+        const bool catalogBusy = componentsScanner_.IsInstalling();
+        const bool devBusy = scanner_.IsBusy() || catalogBusy;
         ImGui::BeginDisabled(devBusy);
         if (ImGui::Button(scanning ? "Сканирование..."
                                    : (devBusy ? "Выполнение..." : "Сканировать"))) {
@@ -1282,6 +1283,28 @@ private:
             deviceViewDirty_ = true;
         }
 
+        if (catalogBusy) {
+            const float prog = componentsScanner_.Progress();
+            const std::string phase = componentsScanner_.PhaseMessage();
+            char overlay[256];
+            std::snprintf(
+                overlay,
+                sizeof(overlay),
+                "%s (%.0f%%)",
+                phase.empty() ? "Установка драйвера из Microsoft Update Catalog..." : phase.c_str(),
+                prog * 100.0f);
+            const float cancelW = CalcButtonWidth("Отмена") + 8.0f * uiScale;
+            ImGui::ProgressBar(
+                prog,
+                ImVec2(std::max(120.0f, ImGui::GetContentRegionAvail().x - cancelW - ImGui::GetStyle().ItemSpacing.x),
+                       ImGui::GetFrameHeight()),
+                overlay);
+            ImGui::SameLine();
+            if (RenderSecondaryButton("Отмена", ImVec2(cancelW, 0.0f))) {
+                componentsScanner_.RequestCancelInstall();
+            }
+        }
+
         ImGui::Spacing();
 
         constexpr ImGuiTableFlags kTableFlags =
@@ -1333,6 +1356,30 @@ private:
                         ImVec2(0.0f, rowBadgeH));
                     if (ImGui::BeginPopupContextItem("##DevCtxMenu")) {
                         ImGui::TextDisabled("%s", dev.name.c_str());
+                        ImGui::Separator();
+
+                        const bool hasHwKey = !dev.searchHardwareKey.empty() || !dev.hardwareId.empty();
+                        if (ImGui::MenuItem(
+                                "Скачать и установить драйвер (Catalog WHQL)",
+                                nullptr,
+                                false,
+                                !devBusy && hasHwKey)) {
+                            componentsScanner_.SearchAndInstallFromCatalogAsync(
+                                dev.name,
+                                dev.searchHardwareKey,
+                                dev.hardwareId,
+                                dev.driverVersion,
+                                devicesCache_,
+                                MakeLogger(),
+                                [this](bool ok, bool rebootReq) {
+                                    if (rebootReq) {
+                                        rebootRequired_.store(true);
+                                    }
+                                    if (ok) {
+                                        pendingDeviceRescan_.store(true);
+                                    }
+                                });
+                        }
                         ImGui::Separator();
 
                         const bool canControl = !devBusy && !dev.instanceId.empty();
@@ -2659,12 +2706,24 @@ private:
         }
         ImGui::EndDisabled();
 
+        const bool compInstalling = componentsScanner_.IsInstalling();
         if (diagnostics_.IsRunningAction()) {
             SameLineWrapIfNeeded(CalcButtonWidth("Отмена"));
             if (RenderSecondaryButton("Отмена")) {
                 diagnostics_.RequestCancel();
             }
             const std::string phase = diagnostics_.ActionPhase();
+            if (!phase.empty()) {
+                ImGui::SameLine(0.0f, 12.0f);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextColored(ImVec4(0.98f, 0.75f, 0.14f, 1.00f), "%s", phase.c_str());
+            }
+        } else if (compInstalling) {
+            SameLineWrapIfNeeded(CalcButtonWidth("Отмена"));
+            if (RenderSecondaryButton("Отмена")) {
+                componentsScanner_.RequestCancelInstall();
+            }
+            const std::string phase = componentsScanner_.PhaseMessage();
             if (!phase.empty()) {
                 ImGui::SameLine(0.0f, 12.0f);
                 ImGui::AlignTextToFramePadding();
@@ -2880,9 +2939,9 @@ private:
             ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_ScrollY;
 
         if (diagSectionIndex_ == 0) {
-            const float catW = CalcButtonWidth("Каталог MS") + 6.0f * uiScale;
-            const float searchW = CalcButtonWidth("Поиск") + 6.0f * uiScale;
-            const float actionColW = catW + style.ItemSpacing.x + searchW + style.CellPadding.x * 2.0f + 4.0f;
+            const float instW = CalcButtonWidth("Установить") + 6.0f * uiScale;
+            const float catW = CalcButtonWidth("Каталог") + 6.0f * uiScale;
+            const float actionColW = instW + style.ItemSpacing.x + catW + style.CellPadding.x * 2.0f + 4.0f;
 
             if (ImGui::BeginTable("##DiagControllersTable", 5, kDiagTableFlags, ImVec2(0.0f, tableH))) {
                 ImGui::TableSetupScrollFreeze(0, 1);
@@ -2935,21 +2994,40 @@ private:
                     RenderCellText(verDate, false, true);
 
                     ImGui::TableSetColumnIndex(4);
-                    const bool hasKey = !item.searchKey.empty();
-                    ImGui::BeginDisabled(!hasKey);
-                    if (RenderSecondaryButton("Каталог MS", ImVec2(catW, 0.0f))) {
+                    const bool hasKey = !item.searchKey.empty() || !item.hardwareId.empty();
+                    const bool instPrimary = (item.health != hdm::ControllerHealth::Ok);
+                    ImGui::BeginDisabled(busy || compInstalling || !hasKey);
+                    if (RenderActionButton("Установить", ImVec2(instW, 0.0f), instPrimary)) {
+                        componentsScanner_.SearchAndInstallFromCatalogAsync(
+                            item.deviceName,
+                            item.searchKey,
+                            item.hardwareId,
+                            item.driverVersion,
+                            devicesCache_,
+                            MakeLogger(),
+                            [this](bool ok, bool rebootReq) {
+                                if (rebootReq) {
+                                    rebootRequired_.store(true);
+                                }
+                                if (ok) {
+                                    pendingDeviceRescan_.store(true);
+                                }
+                            });
+                    }
+                    ImGui::EndDisabled();
+                    if (isAppForeground &&
+                        ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+                        ImGui::SetTooltip(
+                            "Автоматически найти, скачать (.cab), проверить подпись и установить свежий WHQL-драйвер из Microsoft Update Catalog.");
+                    }
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(item.searchKey.empty());
+                    if (RenderSecondaryButton("Каталог", ImVec2(catW, 0.0f))) {
                         OpenUrlInBrowser(
                             "https://www.catalog.update.microsoft.com/Search.aspx?q=" +
                             UrlEncode(item.searchKey));
                     }
                     ImGui::EndDisabled();
-                    ImGui::SameLine();
-                    if (RenderSecondaryButton("Поиск", ImVec2(searchW, 0.0f))) {
-                        const std::string q =
-                            (hasKey ? (item.searchKey + " " + item.deviceName) : item.deviceName) +
-                            " Windows driver";
-                        OpenUrlInBrowser("https://www.google.com/search?q=" + UrlEncode(q));
-                    }
 
                     ImGui::PopID();
                 }

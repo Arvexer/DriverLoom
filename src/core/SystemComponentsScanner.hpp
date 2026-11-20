@@ -44,6 +44,8 @@ struct SystemComponentItem {
 
 class SystemComponentsScanner {
 public:
+    using CatalogInstallCallback = std::function<void(bool ok, bool rebootRequired)>;
+
     SystemComponentsScanner() = default;
     ~SystemComponentsScanner();
 
@@ -75,6 +77,18 @@ public:
         std::vector<DeviceInfo> devicesSnapshot,
         LogCallback onLog);
 
+    // Queries Microsoft Update Catalog by hardware search key (VEN_xxxx&DEV_xxxx / VID_xxxx&PID_xxxx),
+    // downloads the latest WHQL .cab package, verifies Authenticode signature via WinVerifyTrust,
+    // extracts .cab via SetupIterateCabinetW, and installs .inf via DiInstallDriverW.
+    void SearchAndInstallFromCatalogAsync(
+        const std::string& deviceName,
+        const std::string& searchHardwareKey,
+        const std::string& fullHardwareId,
+        const std::string& installedVersion,
+        std::vector<DeviceInfo> devicesSnapshot,
+        LogCallback onLog,
+        CatalogInstallCallback onComplete = nullptr);
+
     void RequestCancelInstall() noexcept { cancelInstallRequested_.store(true); }
 
     [[nodiscard]] bool IsScanning() const noexcept { return scanning_.load(); }
@@ -96,7 +110,8 @@ private:
         float baseProgress,
         float progressSpan,
         const std::vector<DeviceInfo>& devs,
-        const LogCallback& log);
+        const LogCallback& log,
+        bool* outRebootRequired = nullptr);
 
     std::atomic<bool> scanning_{false};
     std::atomic<bool> checkingOnline_{false};

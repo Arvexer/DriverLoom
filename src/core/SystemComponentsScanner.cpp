@@ -2043,7 +2043,11 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
     float baseProgress,
     float progressSpan,
     const std::vector<DeviceInfo>& devs,
-    const LogCallback& log) {
+    const LogCallback& log,
+    bool* outRebootRequired) {
+    if (outRebootRequired != nullptr) {
+        *outRebootRequired = false;
+    }
     if (cancelInstallRequested_.load() || item.directInstallerUrl.empty()) {
         return false;
     }
@@ -2125,6 +2129,9 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             const LocalInstallSummary sum = LocalDriverInstaller::InstallFromFolderSync(
                 cabExtractDir.wstring(), false, false, log);
             cabOk = (sum.failedCount == 0 && (sum.installedCount > 0 || sum.stagedOnlyCount > 0));
+            if (outRebootRequired != nullptr && sum.rebootRequired) {
+                *outRebootRequired = true;
+            }
         } else {
             const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_cab_inf");
             const std::wstring cliArgs =
@@ -2141,6 +2148,9 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
                 }
             } else {
                 cabOk = (run.exitCode == 0 || run.exitCode == 2);
+                if (outRebootRequired != nullptr && run.exitCode == 2) {
+                    *outRebootRequired = true;
+                }
             }
         }
         std::filesystem::remove_all(cabExtractDir, ec);
@@ -2303,6 +2313,9 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         }
     } else if (exitCode == 0 || exitCode == 3010) {
         succeeded = true;
+        if (outRebootRequired != nullptr && exitCode == 3010) {
+            *outRebootRequired = true;
+        }
         if (log) {
             log(LogLevel::Success,
                 item.name + " успешно установлен" +
@@ -2458,6 +2471,114 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
             log(okCount == total ? LogLevel::Success : LogLevel::Warning, doneMsg + ".");
         }
         installing_.store(false);
+    });
+}
+
+void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
+    const std::string& deviceName,
+    const std::string& searchHardwareKey,
+    const std::string& fullHardwareId,
+    const std::string& installedVersion,
+    std::vector<DeviceInfo> devicesSnapshot,
+    LogCallback onLog,
+    CatalogInstallCallback onComplete) {
+    if (scanning_.load() || checkingOnline_.load() || installing_.exchange(true)) {
+        if (onLog) {
+            onLog(LogLevel::Warning, "Модуль компонентов уже выполняет другую операцию.");
+        }
+        return;
+    }
+
+    cancelInstallRequested_.store(false);
+    progress_.store(0.04f);
+    if (installThread_.joinable()) {
+        installThread_.join();
+    }
+
+    installThread_ = std::thread([this,
+                                  deviceName,
+                                  searchHardwareKey,
+                                  fullHardwareId,
+                                  installedVersion,
+                                  devs = std::move(devicesSnapshot),
+                                  log = std::move(onLog),
+                                  cb = std::move(onComplete)]() {
+        const std::string primaryKey =
+            !searchHardwareKey.empty() ? searchHardwareKey : fullHardwareId;
+        if (primaryKey.empty()) {
+            if (log) {
+                log(LogLevel::Error,
+                    "Не удалось определить Hardware ID для поиска в Microsoft Update Catalog («" +
+                        deviceName + "»).");
+            }
+            SetPhaseMessage("Недостаточно данных для поиска драйвера");
+            progress_.store(1.0f);
+            installing_.store(false);
+            if (cb) cb(false, false);
+            return;
+        }
+
+        SetPhaseMessage("Поиск драйвера в Microsoft Update Catalog: " + deviceName + "...");
+        if (log) {
+            log(LogLevel::Info,
+                "Поиск WHQL-драйвера в Microsoft Update Catalog для «" + deviceName + "» (" +
+                    primaryKey + ")...");
+        }
+
+        auto [catVer, cabUrl] = ResolveMsCatalogDriverCab(primaryKey);
+        if (cabUrl.empty() && !fullHardwareId.empty() && fullHardwareId != primaryKey &&
+            !cancelInstallRequested_.load()) {
+            std::tie(catVer, cabUrl) = ResolveMsCatalogDriverCab(fullHardwareId);
+        }
+
+        if (cancelInstallRequested_.load()) {
+            SetPhaseMessage("Установка отменена");
+            progress_.store(1.0f);
+            installing_.store(false);
+            if (cb) cb(false, false);
+            return;
+        }
+
+        if (cabUrl.empty()) {
+            if (log) {
+                log(LogLevel::Warning,
+                    "В Microsoft Update Catalog не найден .cab-пакет драйвера для «" +
+                        deviceName + "» (" + primaryKey + ").");
+            }
+            SetPhaseMessage("Драйвер в Microsoft Update Catalog не найден");
+            progress_.store(1.0f);
+            installing_.store(false);
+            if (cb) cb(false, false);
+            return;
+        }
+
+        if (log) {
+            std::string note;
+            if (!installedVersion.empty() && !catVer.empty() &&
+                !IsVersionNewer(catVer, installedVersion)) {
+                note = " (в системе уже установлена версия " + installedVersion + ")";
+            }
+            log(LogLevel::Info,
+                "Найден WHQL-пакет в Microsoft Update Catalog: версия " + catVer + note +
+                    " — загрузка и установка (.cab)...");
+        }
+
+        SystemComponentItem tempItem;
+        tempItem.id = "catalog_autoinstall";
+        tempItem.name = deviceName + " (WHQL " + catVer + ")";
+        tempItem.directInstallerUrl = cabUrl;
+
+        bool rebootReq = false;
+        const bool ok = InstallSingleComponentSync(
+            tempItem, 0.15f, 0.85f, devs, log, &rebootReq);
+
+        SetPhaseMessage(ok ? ("Установлен драйвер " + catVer + " для " + deviceName)
+                           : "Ошибка установки драйвера из Catalog");
+        progress_.store(1.0f);
+        installing_.store(false);
+        if (cb) {
+            cb(ok, rebootReq);
+        }
     });
 }
 
