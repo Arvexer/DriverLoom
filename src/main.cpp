@@ -837,6 +837,88 @@ bool RenderActionButton(const char* label, const ImVec2& size, bool primary) {
     return RenderSecondaryButton(label, size);
 }
 
+float CalcMetricChipWidth(const char* label, const char* valueStr) {
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    const float padX = std::round(6.0f * uiScale);
+    const float gap = std::round(3.0f * uiScale);
+    const float labelW =
+        (label != nullptr && label[0] != '\0') ? ImGui::CalcTextSize(label).x : 0.0f;
+    float valueW = 0.0f;
+    if (valueStr != nullptr && valueStr[0] != '\0') {
+        PushFontSafe(g_fontSecondaryHeader);
+        valueW = ImGui::CalcTextSize(valueStr).x;
+        PopFontSafe(g_fontSecondaryHeader);
+    }
+    return padX * 2.0f + labelW + (labelW > 0.0f && valueW > 0.0f ? gap : 0.0f) + valueW;
+}
+
+bool RenderMetricChip(
+    const char* id,
+    const char* label,
+    const char* valueStr,
+    const ImVec4& accentColor,
+    bool active = false,
+    bool clickable = true) {
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    const float padX = std::round(6.0f * uiScale);
+    const float gap = std::round(3.0f * uiScale);
+    const float frameH = ImGui::GetFrameHeight();
+    const float chipW = CalcMetricChipWidth(label, valueStr);
+
+    const ImVec2 pMin = ImGui::GetCursorScreenPos();
+    const ImVec2 pMax(pMin.x + chipW, pMin.y + frameH);
+    bool clicked = false;
+    bool hovered = false;
+    if (clickable) {
+        clicked = ImGui::InvisibleButton(id, ImVec2(chipW, frameH));
+        hovered = ImGui::IsItemHovered();
+    } else {
+        ImGui::Dummy(ImVec2(chipW, frameH));
+    }
+
+    const float bgAlpha = active ? (g_isLightTheme ? 0.18f : 0.22f)
+                                 : (hovered ? (g_isLightTheme ? 0.15f : 0.18f)
+                                            : (g_isLightTheme ? 0.10f : 0.12f));
+    const float borderAlpha = active ? 0.72f : (hovered ? 0.56f : 0.38f);
+    const ImVec4 bgCol(accentColor.x, accentColor.y, accentColor.z, bgAlpha);
+    const ImVec4 borderCol =
+        g_isLightTheme
+            ? ImVec4(accentColor.x * 0.72f, accentColor.y * 0.72f, accentColor.z * 0.72f, borderAlpha)
+            : ImVec4(accentColor.x, accentColor.y, accentColor.z, borderAlpha);
+    const ImVec4 labelCol =
+        g_isLightTheme ? ImVec4(0.30f, 0.36f, 0.46f, 1.00f) : ImVec4(0.70f, 0.77f, 0.88f, 1.00f);
+    const ImVec4 valueCol =
+        g_isLightTheme
+            ? ImVec4(accentColor.x * 0.52f, accentColor.y * 0.52f, accentColor.z * 0.52f, 1.00f)
+            : accentColor;
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float rounding = std::round(6.0f * uiScale);
+    dl->AddRectFilled(pMin, pMax, ImGui::ColorConvertFloat4ToU32(bgCol), rounding);
+    dl->AddRect(pMin, pMax, ImGui::ColorConvertFloat4ToU32(borderCol), rounding, 0, 1.0f);
+
+    float curX = pMin.x + padX;
+    if (label != nullptr && label[0] != '\0') {
+        const ImVec2 lblSize = ImGui::CalcTextSize(label);
+        dl->AddText(
+            ImVec2(curX, pMin.y + (frameH - lblSize.y) * 0.5f),
+            ImGui::ColorConvertFloat4ToU32(labelCol),
+            label);
+        curX += lblSize.x + gap;
+    }
+    if (valueStr != nullptr && valueStr[0] != '\0') {
+        PushFontSafe(g_fontSecondaryHeader);
+        const ImVec2 valSize = ImGui::CalcTextSize(valueStr);
+        dl->AddText(
+            ImVec2(curX, pMin.y + (frameH - valSize.y) * 0.5f),
+            ImGui::ColorConvertFloat4ToU32(valueCol),
+            valueStr);
+        PopFontSafe(g_fontSecondaryHeader);
+    }
+
+    return clicked;
+}
+
 int CompareVersionOrString(const std::string& a, const std::string& b) {
     if (a.empty() && b.empty()) return 0;
     if (a.empty()) return 1; // Put empty values ("—") last in ascending order
@@ -1230,26 +1312,26 @@ public:
                 ImGuiStyleVar_FramePadding,
                 ImVec2(std::round(14.0f * uiScale), std::round(7.0f * uiScale)));
             ImGui::PushStyleVar(ImGuiStyleVar_TabBorderSize, 1.0f);
-            ImGui::PushStyleVar(ImGuiStyleVar_TabBarBorderSize, std::round(2.0f * uiScale));
+            ImGui::PushStyleVar(ImGuiStyleVar_TabBarBorderSize, std::round(1.0f * uiScale));
             ImGui::PushStyleVar(ImGuiStyleVar_TabBarOverlineSize, std::max(2.0f, 2.5f * uiScale));
             if (g_isLightTheme) {
-                ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.90f, 0.92f, 0.96f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.80f, 0.88f, 0.98f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_TabSelected, ImVec4(0.76f, 0.86f, 0.99f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.89f, 0.92f, 0.96f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.93f, 0.96f, 0.99f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabSelected, ImVec4(0.99f, 0.995f, 1.00f, 1.00f));
                 ImGui::PushStyleColor(ImGuiCol_TabSelectedOverline, ImVec4(0.14f, 0.45f, 0.88f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_TabDimmed, ImVec4(0.90f, 0.92f, 0.96f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_TabDimmedSelected, ImVec4(0.76f, 0.86f, 0.99f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabDimmed, ImVec4(0.89f, 0.92f, 0.96f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabDimmedSelected, ImVec4(0.99f, 0.995f, 1.00f, 1.00f));
                 ImGui::PushStyleColor(ImGuiCol_TabDimmedSelectedOverline, ImVec4(0.14f, 0.45f, 0.88f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.76f, 0.81f, 0.88f, 0.90f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.75f, 0.80f, 0.87f, 0.90f));
             } else {
-                ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.086f, 0.106f, 0.149f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.22f, 0.46f, 0.85f, 0.90f));
-                ImGui::PushStyleColor(ImGuiCol_TabSelected, ImVec4(0.18f, 0.43f, 0.84f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_TabSelectedOverline, ImVec4(0.52f, 0.82f, 1.00f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_TabDimmed, ImVec4(0.086f, 0.106f, 0.149f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_TabDimmedSelected, ImVec4(0.18f, 0.43f, 0.84f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_TabDimmedSelectedOverline, ImVec4(0.52f, 0.82f, 1.00f, 1.00f));
-                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.18f, 0.23f, 0.32f, 0.85f));
+                ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.072f, 0.088f, 0.122f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.108f, 0.138f, 0.195f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabSelected, ImVec4(0.128f, 0.172f, 0.248f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabSelectedOverline, ImVec4(0.36f, 0.70f, 1.00f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabDimmed, ImVec4(0.072f, 0.088f, 0.122f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabDimmedSelected, ImVec4(0.128f, 0.172f, 0.248f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabDimmedSelectedOverline, ImVec4(0.36f, 0.70f, 1.00f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.15f, 0.19f, 0.26f, 0.85f));
             }
         };
         auto popMainTabBarStyle = []() {
@@ -1270,12 +1352,12 @@ public:
                     (pendingInitialTab_ >= 0) ? (pendingInitialTab_ == idx) : (activeTabIndex_ == idx);
                 const ImVec4 borderCol =
                     g_isLightTheme
-                        ? (isSel ? ImVec4(0.22f, 0.50f, 0.88f, 0.95f) : ImVec4(0.76f, 0.81f, 0.88f, 0.90f))
-                        : (isSel ? ImVec4(0.46f, 0.76f, 1.00f, 0.95f) : ImVec4(0.18f, 0.23f, 0.32f, 0.85f));
+                        ? (isSel ? ImVec4(0.32f, 0.54f, 0.84f, 0.95f) : ImVec4(0.75f, 0.80f, 0.87f, 0.90f))
+                        : (isSel ? ImVec4(0.28f, 0.46f, 0.72f, 0.95f) : ImVec4(0.15f, 0.19f, 0.26f, 0.85f));
                 const ImVec4 textCol =
                     g_isLightTheme
-                        ? (isSel ? ImVec4(0.06f, 0.14f, 0.30f, 1.00f) : ImVec4(0.32f, 0.38f, 0.48f, 1.00f))
-                        : (isSel ? ImVec4(0.98f, 0.99f, 1.00f, 1.00f) : ImVec4(0.74f, 0.80f, 0.90f, 1.00f));
+                        ? (isSel ? ImVec4(0.06f, 0.14f, 0.28f, 1.00f) : ImVec4(0.36f, 0.42f, 0.52f, 1.00f))
+                        : (isSel ? ImVec4(0.97f, 0.99f, 1.00f, 1.00f) : ImVec4(0.60f, 0.67f, 0.78f, 1.00f));
                 ImGui::PushStyleColor(ImGuiCol_Border, borderCol);
                 ImGui::PushStyleColor(ImGuiCol_Text, textCol);
                 const bool open = ImGui::BeginTabItem(label, nullptr, tabFlag(idx));
@@ -1989,26 +2071,61 @@ private:
             deviceViewDirty_ = true;
         }
 
-        char summaryBuf[128];
-        std::snprintf(
-            summaryBuf,
-            sizeof(summaryBuf),
-            hdm::Tr(
-                "Всего: %zu | Мониторы: %zu | Проблемные: %zu",
-                "Усього: %zu | Монітори: %zu | Проблемні: %zu",
-                "Total: %zu | Monitors: %zu | Issues: %zu"),
-            totalDevicesCount_,
-            monitorDevicesCount_,
-            problemDevicesCount_);
-        const float summaryW = ImGui::CalcTextSize(summaryBuf).x;
-        const float lastItemEndLocalX = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
-        const float winRightX = ImGui::GetWindowContentRegionMax().x;
-        if (winRightX - summaryW > lastItemEndLocalX + 16.0f) {
-            ImGui::SameLine(winRightX - summaryW);
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("%s", summaryBuf);
-        } else {
-            ImGui::TextDisabled("%s", summaryBuf);
+        {
+            char totStr[32], monStr[32], probStr[32];
+            std::snprintf(totStr, sizeof(totStr), "%zu", totalDevicesCount_);
+            std::snprintf(monStr, sizeof(monStr), "%zu", monitorDevicesCount_);
+            std::snprintf(probStr, sizeof(probStr), "%zu", problemDevicesCount_);
+
+            const char* totLbl = hdm::Tr("Всего:", "Усього:", "Total:");
+            const char* monLbl = hdm::Tr("Мониторы:", "Монітори:", "Monitors:");
+            const char* probLbl = hdm::Tr("Проблемные:", "Проблемні:", "Issues:");
+
+            const float chipGap = std::round(4.0f * uiScale);
+            const float totW = CalcMetricChipWidth(totLbl, totStr);
+            const float monW = CalcMetricChipWidth(monLbl, monStr);
+            const float probW = CalcMetricChipWidth(probLbl, probStr);
+            const float summaryW = totW + monW + probW + chipGap * 2.0f;
+
+            const float lastItemEndLocalX = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+            const float winRightX = ImGui::GetWindowContentRegionMax().x;
+            if (winRightX - summaryW > lastItemEndLocalX + 8.0f * uiScale) {
+                ImGui::SameLine(winRightX - summaryW);
+            }
+
+            if (RenderMetricChip(
+                    "##DevTotChip",
+                    totLbl,
+                    totStr,
+                    ImVec4(0.46f, 0.74f, 0.98f, 1.00f),
+                    deviceFilterMode_ == DeviceFilterMode::All)) {
+                deviceFilterMode_ = DeviceFilterMode::All;
+                deviceViewDirty_ = true;
+            }
+            ImGui::SameLine(0.0f, chipGap);
+            if (RenderMetricChip(
+                    "##DevMonChip",
+                    monLbl,
+                    monStr,
+                    ImVec4(0.26f, 0.82f, 0.92f, 1.00f),
+                    deviceFilterMode_ == DeviceFilterMode::Monitors)) {
+                deviceFilterMode_ = DeviceFilterMode::Monitors;
+                deviceViewDirty_ = true;
+            }
+            ImGui::SameLine(0.0f, chipGap);
+            const ImVec4 probAccent =
+                (problemDevicesCount_ > 0)
+                    ? ImVec4(0.98f, 0.72f, 0.16f, 1.00f)
+                    : ImVec4(0.20f, 0.83f, 0.60f, 1.00f);
+            if (RenderMetricChip(
+                    "##DevProbChip",
+                    probLbl,
+                    probStr,
+                    probAccent,
+                    deviceFilterMode_ == DeviceFilterMode::ProblemOnly)) {
+                deviceFilterMode_ = DeviceFilterMode::ProblemOnly;
+                deviceViewDirty_ = true;
+            }
         }
 
         // Row 2: Responsive full-width search bar
@@ -3666,26 +3783,57 @@ private:
         ImGui::EndDisabled();
 
         if (driverStoreCache_.valid) {
-            char storeSummary[128];
-            std::snprintf(
-                storeSummary,
-                sizeof(storeSummary),
-                hdm::Tr(
-                    "Всего: %s  |  Активных: %zu  |  Дубликатов: %zu",
-                    "Усього: %s  |  Активних: %zu  |  Дублікатів: %zu",
-                    "Total: %s  |  Active: %zu  |  Duplicates: %zu"),
-                hdm::FormatBytes(driverStoreCache_.totalStoreBytes).c_str(),
-                driverStoreCache_.activeCount,
-                driverStoreCache_.duplicateCount);
-            const float sumW = ImGui::CalcTextSize(storeSummary).x;
+            const std::string totalSizeStr = hdm::FormatBytes(driverStoreCache_.totalStoreBytes);
+            char actStr[32], dupStr[32];
+            std::snprintf(actStr, sizeof(actStr), "%zu", driverStoreCache_.activeCount);
+            std::snprintf(dupStr, sizeof(dupStr), "%zu", driverStoreCache_.duplicateCount);
+
+            const char* totLbl = hdm::Tr("Всего:", "Усього:", "Total:");
+            const char* actLblChip = hdm::Tr("Активных:", "Активних:", "Active:");
+            const char* dupLblChip = hdm::Tr("Дубликатов:", "Дублікатів:", "Duplicates:");
+
+            const float chipGap = std::round(5.0f * uiScale);
+            const float sumW = CalcMetricChipWidth(totLbl, totalSizeStr.c_str()) +
+                               CalcMetricChipWidth(actLblChip, actStr) +
+                               CalcMetricChipWidth(dupLblChip, dupStr) + chipGap * 2.0f;
             const float winRight = ImGui::GetWindowContentRegionMax().x;
             const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
-            if (winRight - sumW > lastEnd + 16.0f) {
+            if (winRight - sumW > lastEnd + 12.0f * uiScale) {
                 ImGui::SameLine(winRight - sumW);
-                ImGui::AlignTextToFramePadding();
-                ImGui::TextDisabled("%s", storeSummary);
-            } else {
-                ImGui::TextDisabled("%s", storeSummary);
+            }
+
+            if (RenderMetricChip(
+                    "##DsTotChip",
+                    totLbl,
+                    totalSizeStr.c_str(),
+                    ImVec4(0.46f, 0.74f, 0.98f, 1.00f),
+                    storeFilterMode_ == DriverStoreFilterMode::All)) {
+                storeFilterMode_ = DriverStoreFilterMode::All;
+                storeViewDirty_ = true;
+            }
+            ImGui::SameLine(0.0f, chipGap);
+            if (RenderMetricChip(
+                    "##DsActChip",
+                    actLblChip,
+                    actStr,
+                    ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
+                    storeFilterMode_ == DriverStoreFilterMode::ActiveOnly)) {
+                storeFilterMode_ = DriverStoreFilterMode::ActiveOnly;
+                storeViewDirty_ = true;
+            }
+            ImGui::SameLine(0.0f, chipGap);
+            const ImVec4 dupAccent =
+                (driverStoreCache_.duplicateCount > 0)
+                    ? ImVec4(0.98f, 0.72f, 0.16f, 1.00f)
+                    : ImVec4(0.20f, 0.83f, 0.60f, 1.00f);
+            if (RenderMetricChip(
+                    "##DsDupChip",
+                    dupLblChip,
+                    dupStr,
+                    dupAccent,
+                    storeFilterMode_ == DriverStoreFilterMode::OldDuplicates)) {
+                storeFilterMode_ = DriverStoreFilterMode::OldDuplicates;
+                storeViewDirty_ = true;
             }
         }
 
@@ -4064,21 +4212,21 @@ private:
         }
         ImGui::EndDisabled();
 
-        char infCountBuf[64];
-        std::snprintf(
-            infCountBuf,
-            sizeof(infCountBuf),
-            hdm::Tr("Найдено .inf: %zu", "Знайдено .inf: %zu", "Found .inf: %zu"),
-            infFiles.size());
-        const float countW = ImGui::CalcTextSize(infCountBuf).x;
-        const float winRight = ImGui::GetWindowContentRegionMax().x;
-        const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
-        if (winRight - countW > lastEnd + 16.0f) {
-            ImGui::SameLine(winRight - countW);
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("%s", infCountBuf);
-        } else {
-            ImGui::TextDisabled("%s", infCountBuf);
+        {
+            char infValStr[32];
+            std::snprintf(infValStr, sizeof(infValStr), "%zu", infFiles.size());
+            const char* infLbl = hdm::Tr("Найдено .inf:", "Знайдено .inf:", "Found .inf:");
+            const float countW = CalcMetricChipWidth(infLbl, infValStr);
+            const float winRight = ImGui::GetWindowContentRegionMax().x;
+            const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+            if (winRight - countW > lastEnd + 12.0f * uiScale) {
+                ImGui::SameLine(winRight - countW);
+            }
+            const ImVec4 infAccent =
+                infFiles.empty()
+                    ? ImVec4(0.58f, 0.68f, 0.86f, 1.00f)
+                    : ImVec4(0.46f, 0.74f, 0.98f, 1.00f);
+            RenderMetricChip("##InfCntChip", infLbl, infValStr, infAccent, false, false);
         }
 
         if (localInstaller_.IsInstalling()) {
