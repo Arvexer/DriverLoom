@@ -27,8 +27,12 @@ const CLSID kClsidUpdateCollection = {
 // IUpdateDownloader::BeginDownload, and IUpdateInstaller::BeginInstall.
 const IID kIidSearchCompletedCallback = {
     0x88aee058, 0xd4b0, 0x4725, {0xa2, 0xf1, 0x81, 0x4a, 0x67, 0xae, 0x96, 0x4c}};
+const IID kIidDownloadProgressChangedCallback = {
+    0x8c3f1cdd, 0x6173, 0x4591, {0xae, 0xbd, 0xa5, 0x6a, 0x53, 0xca, 0x77, 0xc1}};
 const IID kIidDownloadCompletedCallback = {
     0x77254866, 0x9f5b, 0x4c8e, {0xb9, 0xe2, 0xc7, 0x7a, 0x85, 0x30, 0xd6, 0x4b}};
+const IID kIidInstallationProgressChangedCallback = {
+    0xe01402d5, 0xf8da, 0x43ba, {0xa0, 0x12, 0x38, 0x89, 0x4b, 0xd0, 0x48, 0xf1}};
 const IID kIidInstallationCompletedCallback = {
     0x45f4f6f3, 0xd602, 0x4f98, {0x9a, 0x8a, 0x3e, 0xfa, 0x15, 0x2a, 0xd2, 0xd3}};
 
@@ -90,6 +94,48 @@ private:
     std::atomic<LONG> refCount_{1};
     IID callbackIid_{};
     HandleGuard event_;
+};
+
+class WuProgressCallback final : public IUnknown {
+public:
+    explicit WuProgressCallback(REFIID callbackIid) noexcept
+        : callbackIid_(callbackIid) {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override {
+        if (ppvObject == nullptr) {
+            return E_POINTER;
+        }
+        if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, callbackIid_)) {
+            *ppvObject = static_cast<IUnknown*>(this);
+            AddRef();
+            return S_OK;
+        }
+        *ppvObject = nullptr;
+        return E_NOINTERFACE;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return static_cast<ULONG>(refCount_.fetch_add(1, std::memory_order_relaxed) + 1);
+    }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+        const LONG remaining = refCount_.fetch_sub(1, std::memory_order_acq_rel) - 1;
+        if (remaining == 0) {
+            delete this;
+            return 0;
+        }
+        return static_cast<ULONG>(remaining);
+    }
+
+    virtual HRESULT STDMETHODCALLTYPE Invoke(IUnknown* /*job*/, IUnknown* /*callbackArgs*/) {
+        return S_OK;
+    }
+
+private:
+    ~WuProgressCallback() = default;
+
+    std::atomic<LONG> refCount_{1};
+    IID callbackIid_{};
 };
 
 std::string TryGetDispatchStringProperty(IDispatch* disp, const wchar_t* propName) {
@@ -1367,11 +1413,13 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
 
             VARIANT emptyState;
             VariantInit(&emptyState);
+            ComPtr<WuProgressCallback> dlProgCb;
+            *dlProgCb.Put() = new WuProgressCallback(kIidDownloadProgressChangedCallback);
             ComPtr<WuCompletedCallback> dlCb;
             *dlCb.Put() = new WuCompletedCallback(kIidDownloadCompletedCallback);
 
             ComPtr<IDownloadJob> dlJob;
-            hr = downloader->BeginDownload(nullptr, dlCb.Get(), emptyState, dlJob.Put());
+            hr = downloader->BeginDownload(dlProgCb.Get(), dlCb.Get(), emptyState, dlJob.Put());
             if (FAILED(hr) || !dlJob) {
                 if (onLog) {
                     onLog(LogLevel::Error,
@@ -1566,11 +1614,13 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
 
         VARIANT emptyState;
         VariantInit(&emptyState);
+        ComPtr<WuProgressCallback> instProgCb;
+        *instProgCb.Put() = new WuProgressCallback(kIidInstallationProgressChangedCallback);
         ComPtr<WuCompletedCallback> instCb;
         *instCb.Put() = new WuCompletedCallback(kIidInstallationCompletedCallback);
 
         ComPtr<IInstallationJob> instJob;
-        hr = installer->BeginInstall(nullptr, instCb.Get(), emptyState, instJob.Put());
+        hr = installer->BeginInstall(instProgCb.Get(), instCb.Get(), emptyState, instJob.Put());
         if (FAILED(hr) || !instJob) {
             if (onLog) {
                 onLog(LogLevel::Error,

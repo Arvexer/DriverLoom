@@ -1,5 +1,6 @@
 #include "core/SystemDiagnostics.hpp"
 
+#include <shobjidl.h>
 #include <winsvc.h>
 
 #include <algorithm>
@@ -8,7 +9,9 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <set>
+#include <sstream>
 
 namespace hdm {
 
@@ -589,6 +592,9 @@ SystemDiagnostics::~SystemDiagnostics() {
     if (actionThread_.joinable()) {
         actionThread_.join();
     }
+    if (exportThread_.joinable()) {
+        exportThread_.join();
+    }
 }
 
 void SystemDiagnostics::SetActionPhase(const std::string& msg) {
@@ -987,6 +993,698 @@ bool SystemDiagnostics::RunSystemToolSync(
               title + " завершилась с кодом " + std::to_string(exitCode) + ".");
     }
     return exitCode == 0;
+}
+
+namespace {
+
+std::string SanitizePersonalPaths(std::string text) {
+    const std::string lower = ToLowerAscii(text);
+    std::string out;
+    out.reserve(text.size());
+
+    size_t i = 0;
+    while (i < text.size()) {
+        if (i + 6 <= lower.size() &&
+            lower.compare(i, 5, "users") == 0 &&
+            (lower[i + 5] == '\\' || lower[i + 5] == '/')) {
+            const bool boundaryBefore =
+                (i == 0 || text[i - 1] == '\\' || text[i - 1] == '/' ||
+                 text[i - 1] == ':' || std::isspace(static_cast<unsigned char>(text[i - 1])) != 0 ||
+                 text[i - 1] == '"' || text[i - 1] == '\'' || text[i - 1] == '(' ||
+                 text[i - 1] == ',' || text[i - 1] == ';');
+            if (boundaryBefore) {
+                const char sep = text[i + 5];
+                size_t segStart = i + 6;
+                size_t segEnd = segStart;
+                while (segEnd < text.size()) {
+                    const char c = text[segEnd];
+                    if (c == '\\' || c == '/' || c == '"' || c == '\'' ||
+                        c == '|' || c == ')' || c == ',' || c == ';' ||
+                        std::isspace(static_cast<unsigned char>(c)) != 0) {
+                        break;
+                    }
+                    ++segEnd;
+                }
+                if (segEnd > segStart) {
+                    out.append(text, i, 5);
+                    out.push_back(sep);
+                    out.append("<user>");
+                    i = segEnd;
+                    continue;
+                }
+            }
+        }
+        out.push_back(text[i]);
+        ++i;
+    }
+    return out;
+}
+
+std::string CleanSingleLine(std::string_view sv) {
+    std::string cleaned = SanitizePersonalPaths(std::string(sv));
+    for (char& ch : cleaned) {
+        if (ch == '\r' || ch == '\n' || ch == '\t') {
+            ch = ' ';
+        }
+    }
+    return cleaned;
+}
+
+std::string MdCell(std::string_view sv) {
+    std::string s = CleanSingleLine(sv);
+    if (s.empty()) {
+        return "—";
+    }
+    for (char& ch : s) {
+        if (ch == '|') {
+            ch = '/';
+        }
+    }
+    return s;
+}
+
+std::string TxtVal(std::string_view sv) {
+    std::string s = CleanSingleLine(sv);
+    return s.empty() ? "—" : s;
+}
+
+std::string JsonEscape(std::string_view sv) {
+    const std::string clean = SanitizePersonalPaths(std::string(sv));
+    std::string out;
+    out.reserve(clean.size() + 8);
+    for (unsigned char c : clean) {
+        switch (c) {
+        case '"': out += "\\\""; break;
+        case '\\': out += "\\\\"; break;
+        case '\b': out += "\\b"; break;
+        case '\f': out += "\\f"; break;
+        case '\n': out += "\\n"; break;
+        case '\r': out += "\\r"; break;
+        case '\t': out += "\\t"; break;
+        default:
+            if (c < 0x20) {
+                char buf[8];
+                std::snprintf(buf, sizeof(buf), "\\u%04X", static_cast<unsigned>(c));
+                out += buf;
+            } else {
+                out.push_back(static_cast<char>(c));
+            }
+            break;
+        }
+    }
+    return out;
+}
+
+std::string FormatLocalTimestamp() {
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    char buf[32];
+    std::snprintf(
+        buf,
+        sizeof(buf),
+        "%04u-%02u-%02u %02u:%02u:%02u",
+        st.wYear,
+        st.wMonth,
+        st.wDay,
+        st.wHour,
+        st.wMinute,
+        st.wSecond);
+    return buf;
+}
+
+std::string FormatMotherboardTitle(const MotherboardInfo& mb) {
+    std::string title;
+    if (!mb.manufacturer.empty() && mb.manufacturer != "—") {
+        title = mb.manufacturer;
+    } else if (!mb.systemManufacturer.empty() && mb.systemManufacturer != "—") {
+        title = mb.systemManufacturer;
+    }
+    if (!mb.product.empty() && mb.product != "—") {
+        if (!title.empty()) title += " ";
+        title += mb.product;
+    } else if (!mb.systemProduct.empty() && mb.systemProduct != "—") {
+        if (!title.empty()) title += " ";
+        title += mb.systemProduct;
+    }
+    return title.empty() ? "Не определена в SMBIOS" : title;
+}
+
+std::string FormatVersionAndDate(std::string_view ver, std::string_view date) {
+    std::string out = ver.empty() ? "—" : std::string(ver);
+    if (!date.empty()) {
+        out += " (" + std::string(date) + ")";
+    }
+    return out;
+}
+
+const char* ControllerHealthLabel(ControllerHealth h) noexcept {
+    switch (h) {
+    case ControllerHealth::Ok: return "OK";
+    case ControllerHealth::Attention: return "Внимание";
+    case ControllerHealth::Problem: return "Проблема";
+    }
+    return "OK";
+}
+
+const char* ServiceHealthLabel(ServiceHealthState s) noexcept {
+    switch (s) {
+    case ServiceHealthState::Healthy: return "OK";
+    case ServiceHealthState::Disabled: return "Отключена";
+    case ServiceHealthState::MissingOrError: return "Ошибка / Недоступна";
+    }
+    return "OK";
+}
+
+struct ReportSummaryCounts {
+    std::string generatedAt;
+    std::string boardTitle;
+    std::string biosSummary;
+    std::vector<const DeviceInfo*> problemDevices;
+    std::vector<const DeviceInfo*> monitors;
+};
+
+ReportSummaryCounts GatherReportSummary(
+    const SystemDiagnosticsSnapshot& diag,
+    const std::vector<DeviceInfo>& devices) {
+    ReportSummaryCounts summary;
+    summary.generatedAt = FormatLocalTimestamp();
+    summary.boardTitle = FormatMotherboardTitle(diag.motherboard);
+    summary.biosSummary =
+        (diag.motherboard.biosVersion.empty() ? "—" : diag.motherboard.biosVersion) +
+        " (" + (diag.motherboard.biosDate.empty() ? "—" : diag.motherboard.biosDate) + ")";
+    for (const auto& d : devices) {
+        if (d.health != DeviceHealth::Ok) {
+            summary.problemDevices.push_back(&d);
+        }
+        if (d.category == DeviceCategory::Monitor) {
+            summary.monitors.push_back(&d);
+        }
+    }
+    return summary;
+}
+
+std::string BuildMarkdownReport(
+    const SystemDiagnosticsSnapshot& diag,
+    const std::vector<DeviceInfo>& devices,
+    const std::vector<SystemComponentItem>& components,
+    const ReportSummaryCounts& s) {
+    std::ostringstream oss;
+    oss << "# Отчёт о системе DriverLoom\n\n";
+    oss << "- **Сформирован**: " << s.generatedAt << "\n";
+    oss << "- **Примечание**: отчёт очищен от имени пользователя и личных путей.\n\n";
+
+    oss << "## 1. Материнская плата, BIOS и готовность Windows\n\n";
+    oss << "| Параметр | Значение |\n";
+    oss << "| --- | --- |\n";
+    oss << "| Материнская плата | " << MdCell(s.boardTitle) << " |\n";
+    oss << "| BIOS | " << MdCell(s.biosSummary) << " |\n";
+    oss << "| Сайт поддержки платы | " << MdCell(diag.motherboard.supportUrl) << " |\n";
+    oss << "| Ожидается перезагрузка (CBS / WU) | "
+        << ((diag.readiness.cbsRebootPending || diag.readiness.wuRebootRequired) ? "Да" : "Нет") << " |\n";
+    oss << "| Отложенная замена файлов (PendingFileRename) | "
+        << (diag.readiness.pendingFileRenames ? "Да" : "Нет") << " |\n";
+    oss << "| Защита системы (точки восстановления) | "
+        << (diag.readiness.systemRestorePolicyDisabled
+                ? "Запрещена политикой (DisableSR)"
+                : (diag.readiness.systemRestoreEnabled ? "Активна" : "Отключена"))
+        << " |\n";
+    oss << "| Всего PnP-устройств | " << devices.size() << " |\n";
+    oss << "| Мониторов | " << s.monitors.size() << " |\n";
+    oss << "| Устройств с замечаниями | " << s.problemDevices.size() << " |\n";
+    oss << "| Отключённых критичных служб | " << diag.disabledCriticalServices << " |\n";
+    oss << "| Контроллеров с замечаниями | " << diag.attentionControllers << " |\n\n";
+
+    oss << "## 2. Ключевые контроллеры платы (" << diag.controllers.size() << ")\n\n";
+    if (diag.controllers.empty()) {
+        oss << "_Ключевые контроллеры не обнаружены._\n\n";
+    } else {
+        oss << "| Роль | Состояние | Устройство | Поставщик | Драйвер / Дата | INF | Hardware ID |\n";
+        oss << "| --- | --- | --- | --- | --- | --- | --- |\n";
+        for (const auto& c : diag.controllers) {
+            oss << "| " << MdCell(c.role)
+                << " | " << MdCell(c.statusText)
+                << " | " << MdCell(c.deviceName)
+                << " | " << MdCell(c.manufacturer)
+                << " | " << MdCell(FormatVersionAndDate(c.driverVersion, c.driverDate))
+                << " | " << MdCell(c.infName)
+                << " | " << MdCell(c.hardwareId) << " |\n";
+        }
+        oss << "\n";
+    }
+
+    oss << "## 3. Устройства, требующие внимания (" << s.problemDevices.size() << ")\n\n";
+    if (s.problemDevices.empty()) {
+        oss << "_Проблемных устройств и устройств без драйверов не обнаружено._\n\n";
+    } else {
+        oss << "| Статус | Устройство | Класс | Поставщик | Версия / Дата | INF | Hardware ID |\n";
+        oss << "| --- | --- | --- | --- | --- | --- | --- |\n";
+        for (const DeviceInfo* d : s.problemDevices) {
+            oss << "| " << MdCell(d->statusText)
+                << " | " << MdCell(d->name)
+                << " | " << MdCell(d->deviceClass)
+                << " | " << MdCell(d->manufacturer)
+                << " | " << MdCell(FormatVersionAndDate(d->driverVersion, d->driverDate))
+                << " | " << MdCell(d->infName)
+                << " | " << MdCell(d->hardwareId) << " |\n";
+        }
+        oss << "\n";
+    }
+
+    oss << "## 4. Мониторы (EDID) (" << s.monitors.size() << ")\n\n";
+    if (s.monitors.empty()) {
+        oss << "_Мониторы не обнаружены._\n\n";
+    } else {
+        oss << "| Название | Модель (EDID) | Производитель | Драйвер / Дата | INF | Статус |\n";
+        oss << "| --- | --- | --- | --- | --- | --- |\n";
+        for (const DeviceInfo* m : s.monitors) {
+            oss << "| " << MdCell(m->name)
+                << " | " << MdCell(m->edidModel)
+                << " | " << MdCell(m->manufacturer)
+                << " | " << MdCell(FormatVersionAndDate(m->driverVersion, m->driverDate))
+                << " | " << MdCell(m->infName)
+                << " | " << MdCell(m->statusText) << " |\n";
+        }
+        oss << "\n";
+    }
+
+    oss << "## 5. Системные библиотеки, компоненты и ПО периферии (" << components.size() << ")\n\n";
+    if (components.empty()) {
+        oss << "_Список компонентов ещё не заполнен._\n\n";
+    } else {
+        oss << "| Статус | Компонент | Устройство / Назначение | Установлено | Актуальная |\n";
+        oss << "| --- | --- | --- | --- | --- |\n";
+        for (const auto& c : components) {
+            const std::string& hwOrDesc =
+                c.detectedHardware.empty() ? c.purposeDescription : c.detectedHardware;
+            oss << "| " << MdCell(c.statusText)
+                << " | " << MdCell(c.name)
+                << " | " << MdCell(hwOrDesc)
+                << " | " << MdCell(c.installedVersion)
+                << " | " << MdCell(c.latestVersion) << " |\n";
+        }
+        oss << "\n";
+    }
+
+    oss << "## 6. Службы Windows и обновления (" << diag.services.size() << ")\n\n";
+    if (diag.services.empty()) {
+        oss << "_Сведения о службах отсутствуют._\n";
+    } else {
+        oss << "| Служба | Название | Статус | Тип запуска | Назначение |\n";
+        oss << "| --- | --- | --- | --- | --- |\n";
+        for (const auto& svc : diag.services) {
+            oss << "| " << MdCell(svc.serviceName)
+                << " | " << MdCell(svc.displayName)
+                << " | " << MdCell(svc.stateText)
+                << " | " << MdCell(svc.startTypeText)
+                << " | " << MdCell(svc.purpose) << " |\n";
+        }
+    }
+
+    return SanitizePersonalPaths(oss.str());
+}
+
+std::string BuildTextReport(
+    const SystemDiagnosticsSnapshot& diag,
+    const std::vector<DeviceInfo>& devices,
+    const std::vector<SystemComponentItem>& components,
+    const ReportSummaryCounts& s) {
+    std::ostringstream oss;
+    oss << "====================================================================\n";
+    oss << "DriverLoom — Отчёт о состоянии ПК и драйверов (без личных данных)\n";
+    oss << "Сформирован: " << s.generatedAt << "\n";
+    oss << "====================================================================\n\n";
+
+    oss << "[1] МАТЕРИНСКАЯ ПЛАТА, BIOS И ГОТОВНОСТЬ WINDOWS\n";
+    oss << "  Плата: " << TxtVal(s.boardTitle) << "\n";
+    oss << "  BIOS: " << TxtVal(s.biosSummary) << "\n";
+    oss << "  Поддержка платы: " << TxtVal(diag.motherboard.supportUrl) << "\n";
+    oss << "  Перезагрузка Windows (CBS/WU): "
+        << ((diag.readiness.cbsRebootPending || diag.readiness.wuRebootRequired) ? "Требуется" : "Нет")
+        << "\n";
+    oss << "  Отложенная замена файлов: "
+        << (diag.readiness.pendingFileRenames ? "Да" : "Нет") << "\n";
+    oss << "  Защита системы: "
+        << (diag.readiness.systemRestorePolicyDisabled
+                ? "Запрещена политикой (DisableSR)"
+                : (diag.readiness.systemRestoreEnabled ? "Активна" : "Отключена"))
+        << "\n";
+    oss << "  Сводка: устройств=" << devices.size()
+        << ", мониторов=" << s.monitors.size()
+        << ", проблемных=" << s.problemDevices.size()
+        << ", откл. служб=" << diag.disabledCriticalServices
+        << ", контроллеров с замечаниями=" << diag.attentionControllers << "\n\n";
+
+    oss << "[2] КЛЮЧЕВЫЕ КОНТРОЛЛЕРЫ ПЛАТЫ (" << diag.controllers.size() << ")\n";
+    if (diag.controllers.empty()) {
+        oss << "  (нет данных)\n";
+    } else {
+        for (const auto& c : diag.controllers) {
+            oss << "  - [" << ControllerHealthLabel(c.health) << "] " << TxtVal(c.role)
+                << ": " << TxtVal(c.deviceName)
+                << " | Статус: " << TxtVal(c.statusText)
+                << " | Поставщик: " << TxtVal(c.manufacturer)
+                << " | Версия: " << TxtVal(FormatVersionAndDate(c.driverVersion, c.driverDate))
+                << " | INF: " << TxtVal(c.infName)
+                << " | HWID: " << TxtVal(c.hardwareId) << "\n";
+        }
+    }
+    oss << "\n";
+
+    oss << "[3] УСТРОЙСТВА, ТРЕБУЮЩИЕ ВНИМАНИЯ (" << s.problemDevices.size() << ")\n";
+    if (s.problemDevices.empty()) {
+        oss << "  Проблемных устройств не обнаружено.\n";
+    } else {
+        for (const DeviceInfo* d : s.problemDevices) {
+            oss << "  - [" << TxtVal(d->statusText) << "] " << TxtVal(d->name)
+                << " | Класс: " << TxtVal(d->deviceClass)
+                << " | Поставщик: " << TxtVal(d->manufacturer)
+                << " | Версия: " << TxtVal(FormatVersionAndDate(d->driverVersion, d->driverDate))
+                << " | INF: " << TxtVal(d->infName)
+                << " | HWID: " << TxtVal(d->hardwareId) << "\n";
+        }
+    }
+    oss << "\n";
+
+    oss << "[4] МОНИТОРЫ (EDID) (" << s.monitors.size() << ")\n";
+    if (s.monitors.empty()) {
+        oss << "  Мониторы не обнаружены.\n";
+    } else {
+        for (const DeviceInfo* m : s.monitors) {
+            oss << "  - " << TxtVal(m->name)
+                << " | EDID: " << TxtVal(m->edidModel)
+                << " | Производитель: " << TxtVal(m->manufacturer)
+                << " | Версия: " << TxtVal(FormatVersionAndDate(m->driverVersion, m->driverDate))
+                << " | INF: " << TxtVal(m->infName)
+                << " | Статус: " << TxtVal(m->statusText) << "\n";
+        }
+    }
+    oss << "\n";
+
+    oss << "[5] СИСТЕМНЫЕ БИБЛИОТЕКИ, КОМПОНЕНТЫ И ПО ПЕРИФЕРИИ (" << components.size() << ")\n";
+    if (components.empty()) {
+        oss << "  (нет данных)\n";
+    } else {
+        for (const auto& c : components) {
+            const std::string& hwOrDesc =
+                c.detectedHardware.empty() ? c.purposeDescription : c.detectedHardware;
+            oss << "  - [" << TxtVal(c.statusText) << "] " << TxtVal(c.name)
+                << " | Назначение: " << TxtVal(hwOrDesc)
+                << " | Установлено: " << TxtVal(c.installedVersion)
+                << " | Актуальная: " << TxtVal(c.latestVersion) << "\n";
+        }
+    }
+    oss << "\n";
+
+    oss << "[6] СЛУЖБЫ WINDOWS И ОБНОВЛЕНИЯ (" << diag.services.size() << ")\n";
+    for (const auto& svc : diag.services) {
+        oss << "  - [" << ServiceHealthLabel(svc.health) << "] " << TxtVal(svc.serviceName)
+            << " (" << TxtVal(svc.displayName) << ")"
+            << " | Состояние: " << TxtVal(svc.stateText)
+            << " | Запуск: " << TxtVal(svc.startTypeText)
+            << " | Назначение: " << TxtVal(svc.purpose) << "\n";
+    }
+
+    return SanitizePersonalPaths(oss.str());
+}
+
+std::string BuildJsonReport(
+    const SystemDiagnosticsSnapshot& diag,
+    const std::vector<DeviceInfo>& devices,
+    const std::vector<SystemComponentItem>& components,
+    const ReportSummaryCounts& s) {
+    std::ostringstream oss;
+    oss << "{\n";
+    oss << "  \"generatedAt\": \"" << JsonEscape(s.generatedAt) << "\",\n";
+    oss << "  \"privacyCleaned\": true,\n";
+
+    oss << "  \"motherboard\": {\n";
+    oss << "    \"title\": \"" << JsonEscape(s.boardTitle) << "\",\n";
+    oss << "    \"manufacturer\": \"" << JsonEscape(diag.motherboard.manufacturer) << "\",\n";
+    oss << "    \"product\": \"" << JsonEscape(diag.motherboard.product) << "\",\n";
+    oss << "    \"biosVersion\": \"" << JsonEscape(diag.motherboard.biosVersion) << "\",\n";
+    oss << "    \"biosDate\": \"" << JsonEscape(diag.motherboard.biosDate) << "\",\n";
+    oss << "    \"supportUrl\": \"" << JsonEscape(diag.motherboard.supportUrl) << "\"\n";
+    oss << "  },\n";
+
+    oss << "  \"windowsReadiness\": {\n";
+    oss << "    \"cbsRebootPending\": " << (diag.readiness.cbsRebootPending ? "true" : "false") << ",\n";
+    oss << "    \"wuRebootRequired\": " << (diag.readiness.wuRebootRequired ? "true" : "false") << ",\n";
+    oss << "    \"pendingFileRenames\": " << (diag.readiness.pendingFileRenames ? "true" : "false") << ",\n";
+    oss << "    \"systemRestoreEnabled\": " << (diag.readiness.systemRestoreEnabled ? "true" : "false") << ",\n";
+    oss << "    \"systemRestorePolicyDisabled\": " << (diag.readiness.systemRestorePolicyDisabled ? "true" : "false") << "\n";
+    oss << "  },\n";
+
+    oss << "  \"counts\": {\n";
+    oss << "    \"totalDevices\": " << devices.size() << ",\n";
+    oss << "    \"monitors\": " << s.monitors.size() << ",\n";
+    oss << "    \"problemDevices\": " << s.problemDevices.size() << ",\n";
+    oss << "    \"disabledCriticalServices\": " << diag.disabledCriticalServices << ",\n";
+    oss << "    \"attentionControllers\": " << diag.attentionControllers << "\n";
+    oss << "  },\n";
+
+    oss << "  \"controllers\": [";
+    for (size_t i = 0; i < diag.controllers.size(); ++i) {
+        const auto& c = diag.controllers[i];
+        oss << (i == 0 ? "\n" : ",\n")
+            << "    {\n"
+            << "      \"role\": \"" << JsonEscape(c.role) << "\",\n"
+            << "      \"health\": \"" << ControllerHealthLabel(c.health) << "\",\n"
+            << "      \"status\": \"" << JsonEscape(c.statusText) << "\",\n"
+            << "      \"deviceName\": \"" << JsonEscape(c.deviceName) << "\",\n"
+            << "      \"manufacturer\": \"" << JsonEscape(c.manufacturer) << "\",\n"
+            << "      \"driverVersion\": \"" << JsonEscape(c.driverVersion) << "\",\n"
+            << "      \"driverDate\": \"" << JsonEscape(c.driverDate) << "\",\n"
+            << "      \"infName\": \"" << JsonEscape(c.infName) << "\",\n"
+            << "      \"hardwareId\": \"" << JsonEscape(c.hardwareId) << "\"\n"
+            << "    }";
+    }
+    oss << (diag.controllers.empty() ? "],\n" : "\n  ],\n");
+
+    oss << "  \"problemDevices\": [";
+    for (size_t i = 0; i < s.problemDevices.size(); ++i) {
+        const DeviceInfo* d = s.problemDevices[i];
+        oss << (i == 0 ? "\n" : ",\n")
+            << "    {\n"
+            << "      \"status\": \"" << JsonEscape(d->statusText) << "\",\n"
+            << "      \"name\": \"" << JsonEscape(d->name) << "\",\n"
+            << "      \"deviceClass\": \"" << JsonEscape(d->deviceClass) << "\",\n"
+            << "      \"manufacturer\": \"" << JsonEscape(d->manufacturer) << "\",\n"
+            << "      \"driverVersion\": \"" << JsonEscape(d->driverVersion) << "\",\n"
+            << "      \"driverDate\": \"" << JsonEscape(d->driverDate) << "\",\n"
+            << "      \"infName\": \"" << JsonEscape(d->infName) << "\",\n"
+            << "      \"hardwareId\": \"" << JsonEscape(d->hardwareId) << "\"\n"
+            << "    }";
+    }
+    oss << (s.problemDevices.empty() ? "],\n" : "\n  ],\n");
+
+    oss << "  \"monitors\": [";
+    for (size_t i = 0; i < s.monitors.size(); ++i) {
+        const DeviceInfo* m = s.monitors[i];
+        oss << (i == 0 ? "\n" : ",\n")
+            << "    {\n"
+            << "      \"name\": \"" << JsonEscape(m->name) << "\",\n"
+            << "      \"edidModel\": \"" << JsonEscape(m->edidModel) << "\",\n"
+            << "      \"edidManufacturer\": \"" << JsonEscape(m->edidManufacturer) << "\",\n"
+            << "      \"manufacturer\": \"" << JsonEscape(m->manufacturer) << "\",\n"
+            << "      \"driverVersion\": \"" << JsonEscape(m->driverVersion) << "\",\n"
+            << "      \"driverDate\": \"" << JsonEscape(m->driverDate) << "\",\n"
+            << "      \"infName\": \"" << JsonEscape(m->infName) << "\",\n"
+            << "      \"status\": \"" << JsonEscape(m->statusText) << "\"\n"
+            << "    }";
+    }
+    oss << (s.monitors.empty() ? "],\n" : "\n  ],\n");
+
+    oss << "  \"components\": [";
+    for (size_t i = 0; i < components.size(); ++i) {
+        const auto& c = components[i];
+        const std::string& hwOrDesc =
+            c.detectedHardware.empty() ? c.purposeDescription : c.detectedHardware;
+        oss << (i == 0 ? "\n" : ",\n")
+            << "    {\n"
+            << "      \"id\": \"" << JsonEscape(c.id) << "\",\n"
+            << "      \"name\": \"" << JsonEscape(c.name) << "\",\n"
+            << "      \"vendor\": \"" << JsonEscape(c.vendor) << "\",\n"
+            << "      \"target\": \"" << JsonEscape(hwOrDesc) << "\",\n"
+            << "      \"status\": \"" << JsonEscape(c.statusText) << "\",\n"
+            << "      \"installed\": " << (c.installed ? "true" : "false") << ",\n"
+            << "      \"updateAvailable\": " << (c.updateAvailable ? "true" : "false") << ",\n"
+            << "      \"installedVersion\": \"" << JsonEscape(c.installedVersion) << "\",\n"
+            << "      \"latestVersion\": \"" << JsonEscape(c.latestVersion) << "\"\n"
+            << "    }";
+    }
+    oss << (components.empty() ? "],\n" : "\n  ],\n");
+
+    oss << "  \"services\": [";
+    for (size_t i = 0; i < diag.services.size(); ++i) {
+        const auto& svc = diag.services[i];
+        oss << (i == 0 ? "\n" : ",\n")
+            << "    {\n"
+            << "      \"serviceName\": \"" << JsonEscape(svc.serviceName) << "\",\n"
+            << "      \"displayName\": \"" << JsonEscape(svc.displayName) << "\",\n"
+            << "      \"health\": \"" << ServiceHealthLabel(svc.health) << "\",\n"
+            << "      \"state\": \"" << JsonEscape(svc.stateText) << "\",\n"
+            << "      \"startType\": \"" << JsonEscape(svc.startTypeText) << "\",\n"
+            << "      \"purpose\": \"" << JsonEscape(svc.purpose) << "\"\n"
+            << "    }";
+    }
+    oss << (diag.services.empty() ? "]\n" : "\n  ]\n");
+    oss << "}\n";
+    return oss.str();
+}
+
+} // namespace
+
+std::string SystemDiagnostics::BuildCleanSystemReport(
+    ReportFormat format,
+    const SystemDiagnosticsSnapshot& diag,
+    const std::vector<DeviceInfo>& devices,
+    const std::vector<SystemComponentItem>& components) {
+    const ReportSummaryCounts summary = GatherReportSummary(diag, devices);
+    switch (format) {
+    case ReportFormat::Markdown:
+        return BuildMarkdownReport(diag, devices, components, summary);
+    case ReportFormat::Text:
+        return BuildTextReport(diag, devices, components, summary);
+    case ReportFormat::Json:
+        return BuildJsonReport(diag, devices, components, summary);
+    }
+    return BuildMarkdownReport(diag, devices, components, summary);
+}
+
+bool SystemDiagnostics::WriteSystemReportToFile(
+    const std::filesystem::path& filePath,
+    ReportFormat format,
+    const SystemDiagnosticsSnapshot& diag,
+    const std::vector<DeviceInfo>& devices,
+    const std::vector<SystemComponentItem>& components,
+    const LogCallback& onLog) {
+    const std::string content =
+        BuildCleanSystemReport(format, diag, devices, components);
+
+    std::ofstream ofs(filePath, std::ios::binary | std::ios::trunc);
+    if (!ofs.is_open()) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Не удалось создать файл отчёта: " +
+                      WideToUtf8(filePath.filename().wstring()));
+        }
+        return false;
+    }
+
+    ofs.write(content.data(), static_cast<std::streamsize>(content.size()));
+    ofs.flush();
+    if (!ofs.good()) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Ошибка записи файла отчёта: " +
+                      WideToUtf8(filePath.filename().wstring()));
+        }
+        return false;
+    }
+
+    if (onLog) {
+        onLog(LogLevel::Success,
+              "Отчёт о системе сохранён: " + WideToUtf8(filePath.filename().wstring()));
+    }
+    return true;
+}
+
+void SystemDiagnostics::ExportReportInteractiveAsync(
+    HWND ownerWindow,
+    SystemDiagnosticsSnapshot diagSnapshot,
+    std::vector<DeviceInfo> devicesSnapshot,
+    std::vector<SystemComponentItem> componentsSnapshot,
+    LogCallback onLog) {
+    if (exportingReport_.exchange(true)) {
+        return;
+    }
+    if (exportThread_.joinable()) {
+        exportThread_.join();
+    }
+
+    exportThread_ = std::thread(
+        [this,
+         ownerWindow,
+         diag = std::move(diagSnapshot),
+         devices = std::move(devicesSnapshot),
+         components = std::move(componentsSnapshot),
+         log = std::move(onLog)]() {
+            CoInitGuard comInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            if (!comInit.Succeeded()) {
+                if (log) {
+                    log(LogLevel::Error,
+                        "Не удалось инициализировать COM STA для сохранения отчёта: " +
+                            FormatHResult(comInit.Result()));
+                }
+                exportingReport_.store(false);
+                return;
+            }
+
+            {
+                ComPtr<IFileSaveDialog> dialog;
+                HRESULT hr = CoCreateInstance(
+                    CLSID_FileSaveDialog,
+                    nullptr,
+                    CLSCTX_INPROC_SERVER,
+                    IID_IFileSaveDialog,
+                    reinterpret_cast<void**>(dialog.Put()));
+                if (FAILED(hr) || !dialog) {
+                    if (log) {
+                        log(LogLevel::Error,
+                            "Не удалось создать диалог сохранения файла: " +
+                                FormatHResult(hr));
+                    }
+                } else {
+                    static constexpr COMDLG_FILTERSPEC kFilters[] = {
+                        {L"Отчёт Markdown (*.md)", L"*.md"},
+                        {L"Текстовый отчёт (*.txt)", L"*.txt"},
+                        {L"Отчёт JSON (*.json)", L"*.json"},
+                    };
+                    dialog->SetFileTypes(3, kFilters);
+                    dialog->SetFileTypeIndex(1);
+                    dialog->SetDefaultExtension(L"md");
+                    dialog->SetFileName(L"DriverLoom_Report.md");
+                    dialog->SetTitle(L"Сохранить отчёт о системе (без личных данных)");
+
+                    hr = dialog->Show(ownerWindow);
+                    if (SUCCEEDED(hr)) {
+                        ComPtr<IShellItem> item;
+                        if (SUCCEEDED(dialog->GetResult(item.Put())) && item) {
+                            CoTaskMemGuard<wchar_t> rawPath;
+                            if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, rawPath.Put())) &&
+                                rawPath.Get() != nullptr) {
+                                const std::filesystem::path outPath(rawPath.Get());
+                                const std::string extLower =
+                                    ToLowerAscii(WideToUtf8(outPath.extension().wstring()));
+
+                                ReportFormat fmt = ReportFormat::Markdown;
+                                if (extLower == ".json") {
+                                    fmt = ReportFormat::Json;
+                                } else if (extLower == ".txt") {
+                                    fmt = ReportFormat::Text;
+                                } else if (extLower == ".md" || extLower == ".markdown") {
+                                    fmt = ReportFormat::Markdown;
+                                } else {
+                                    UINT typeIdx = 1;
+                                    if (SUCCEEDED(dialog->GetFileTypeIndex(&typeIdx))) {
+                                        if (typeIdx == 2) fmt = ReportFormat::Text;
+                                        else if (typeIdx == 3) fmt = ReportFormat::Json;
+                                    }
+                                }
+
+                                WriteSystemReportToFile(
+                                    outPath, fmt, diag, devices, components, log);
+                            }
+                        }
+                    } else if (hr != HRESULT_FROM_WIN32(ERROR_CANCELLED) && log) {
+                        log(LogLevel::Warning,
+                            "Ошибка диалога сохранения отчёта: " + FormatHResult(hr));
+                    }
+                }
+            }
+
+            exportingReport_.store(false);
+        });
 }
 
 } // namespace hdm

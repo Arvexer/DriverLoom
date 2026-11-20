@@ -2,6 +2,7 @@
 
 #include "common/AppCommon.hpp"
 #include "core/DeviceScanner.hpp"
+#include "core/SystemComponentsScanner.hpp"
 
 #include <atomic>
 #include <functional>
@@ -84,6 +85,12 @@ enum class MaintenanceAction {
     ResetWuDownloadCache
 };
 
+enum class ReportFormat {
+    Markdown,
+    Text,
+    Json
+};
+
 class SystemDiagnostics {
 public:
     using ActionDoneCallback = std::function<void(bool ok)>;
@@ -103,10 +110,18 @@ public:
         LogCallback onLog,
         ActionDoneCallback onComplete = nullptr);
 
+    void ExportReportInteractiveAsync(
+        HWND ownerWindow,
+        SystemDiagnosticsSnapshot diagSnapshot,
+        std::vector<DeviceInfo> devicesSnapshot,
+        std::vector<SystemComponentItem> componentsSnapshot,
+        LogCallback onLog);
+
     void RequestCancel() noexcept { cancelRequested_.store(true); }
 
     [[nodiscard]] bool IsScanning() const noexcept { return scanning_.load(); }
     [[nodiscard]] bool IsRunningAction() const noexcept { return runningAction_.load(); }
+    [[nodiscard]] bool IsExportingReport() const noexcept { return exportingReport_.load(); }
     [[nodiscard]] bool IsBusy() const noexcept { return scanning_.load() || runningAction_.load(); }
     [[nodiscard]] uint64_t Generation() const noexcept { return generation_.load(); }
     [[nodiscard]] std::string ActionPhase() const;
@@ -115,6 +130,20 @@ public:
 
     static SystemDiagnosticsSnapshot CollectSynchronously(
         const std::vector<DeviceInfo>& devicesSnapshot);
+
+    static std::string BuildCleanSystemReport(
+        ReportFormat format,
+        const SystemDiagnosticsSnapshot& diag,
+        const std::vector<DeviceInfo>& devices,
+        const std::vector<SystemComponentItem>& components);
+
+    static bool WriteSystemReportToFile(
+        const std::filesystem::path& filePath,
+        ReportFormat format,
+        const SystemDiagnosticsSnapshot& diag,
+        const std::vector<DeviceInfo>& devices,
+        const std::vector<SystemComponentItem>& components,
+        const LogCallback& onLog = nullptr);
 
     // Synchronous elevated CLI operations.
     static bool EnableServiceSync(
@@ -134,6 +163,7 @@ private:
 
     std::atomic<bool> scanning_{false};
     std::atomic<bool> runningAction_{false};
+    std::atomic<bool> exportingReport_{false};
     std::atomic<bool> cancelRequested_{false};
     std::atomic<uint64_t> generation_{0};
 
@@ -143,6 +173,7 @@ private:
 
     std::thread scanThread_;
     std::thread actionThread_;
+    std::thread exportThread_;
 };
 
 } // namespace hdm

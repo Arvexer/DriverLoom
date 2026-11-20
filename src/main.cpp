@@ -2625,6 +2625,40 @@ private:
                 "Помогает, если скачивание обновлений зависло или повреждено.");
         }
 
+        const bool canExport = diagCache_.valid && !diagnostics_.IsExportingReport();
+        SameLineWrapIfNeeded(CalcButtonWidth("Сохранить отчёт..."));
+        ImGui::BeginDisabled(!canExport);
+        if (RenderSecondaryButton("Сохранить отчёт...")) {
+            diagnostics_.ExportReportInteractiveAsync(
+                hwnd_,
+                diagCache_,
+                devicesCache_,
+                componentsCache_,
+                MakeLogger());
+        }
+        ImGui::EndDisabled();
+        if (isAppForeground &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "Сохранить сводный отчёт о плате, BIOS, драйверах, проблемных устройствах, библиотеках и службах\n"
+                "в формате Markdown (.md), TXT или JSON (без имени пользователя и личных данных).");
+        }
+
+        SameLineWrapIfNeeded(CalcButtonWidth("Копировать отчёт"));
+        ImGui::BeginDisabled(!diagCache_.valid);
+        if (RenderSecondaryButton("Копировать отчёт")) {
+            const std::string mdReport = hdm::SystemDiagnostics::BuildCleanSystemReport(
+                hdm::ReportFormat::Markdown,
+                diagCache_,
+                devicesCache_,
+                componentsCache_);
+            ImGui::SetClipboardText(mdReport.c_str());
+            logBuffer_.Push(
+                hdm::LogLevel::Success,
+                "Отчёт о системе (Markdown) скопирован в буфер обмена.");
+        }
+        ImGui::EndDisabled();
+
         if (diagnostics_.IsRunningAction()) {
             SameLineWrapIfNeeded(CalcButtonWidth("Отмена"));
             if (RenderSecondaryButton("Отмена")) {
