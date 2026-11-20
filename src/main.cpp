@@ -26,6 +26,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 extern IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(
@@ -42,6 +43,35 @@ bool g_swapChainOccluded = false;
 UINT g_resizeWidth = 0;
 UINT g_resizeHeight = 0;
 std::atomic<bool> g_windowRegainedFocus{false};
+bool g_isLightTheme = false;
+float g_dpiScale = 1.0f;
+
+class DriverLoomApp;
+DriverLoomApp* g_appInstance = nullptr;
+bool g_isRenderingFrame = false;
+
+void RenderSingleFrame(
+    const std::wstring* screenshotPath = nullptr,
+    bool* screenshotTaken = nullptr,
+    bool* outCaptureDone = nullptr);
+
+// --- Multi-tier Typography ---
+ImFont* g_fontRegular = nullptr;
+ImFont* g_fontSecondaryHeader = nullptr;
+ImFont* g_fontMainTab = nullptr;
+ImFont* g_fontPrimaryHeader = nullptr;
+
+void PushFontSafe(ImFont* font) {
+    if (font != nullptr) {
+        ImGui::PushFont(font, font->LegacySize);
+    }
+}
+
+void PopFontSafe(ImFont* font) {
+    if (font != nullptr) {
+        ImGui::PopFont();
+    }
+}
 
 void CreateRenderTarget() {
     ID3D11Texture2D* pBackBuffer = nullptr;
@@ -210,7 +240,10 @@ bool SaveBackBufferToBmp(const std::wstring& bmpPath) {
     return ofs.good();
 }
 
-void EnableDarkTitleBar(HWND hwnd) {
+void SetWindowTitleBarDark(HWND hwnd, bool useDark) {
+    if (hwnd == nullptr) {
+        return;
+    }
     HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
     if (dwm == nullptr) {
         return;
@@ -219,11 +252,11 @@ void EnableDarkTitleBar(HWND hwnd) {
     auto fn = reinterpret_cast<DwmSetWindowAttributeFn>(
         reinterpret_cast<void*>(GetProcAddress(dwm, "DwmSetWindowAttribute")));
     if (fn != nullptr) {
-        const BOOL useDark = TRUE;
+        const BOOL mode = useDark ? TRUE : FALSE;
         constexpr DWORD kDwmwaUseImmersiveDarkMode = 20;
         constexpr DWORD kDwmwaUseImmersiveDarkModeOld = 19;
-        if (FAILED(fn(hwnd, kDwmwaUseImmersiveDarkMode, &useDark, sizeof(useDark)))) {
-            fn(hwnd, kDwmwaUseImmersiveDarkModeOld, &useDark, sizeof(useDark));
+        if (FAILED(fn(hwnd, kDwmwaUseImmersiveDarkMode, &mode, sizeof(mode)))) {
+            fn(hwnd, kDwmwaUseImmersiveDarkModeOld, &mode, sizeof(mode));
         }
     }
     FreeLibrary(dwm);
@@ -240,13 +273,30 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             g_windowRegainedFocus.store(true);
         }
         break;
+    case WM_ENTERSIZEMOVE:
+        SetTimer(hWnd, 1, 16, nullptr);
+        return 0;
+    case WM_EXITSIZEMOVE:
+        KillTimer(hWnd, 1);
+        return 0;
     case WM_SIZE:
         if (wParam == SIZE_MINIMIZED) {
             return 0;
         }
         g_resizeWidth = LOWORD(lParam);
         g_resizeHeight = HIWORD(lParam);
+        if (g_appInstance != nullptr && g_pd3dDevice != nullptr) {
+            RenderSingleFrame();
+        }
         return 0;
+    case WM_TIMER:
+        if (wParam == 1 && g_appInstance != nullptr && g_pd3dDevice != nullptr) {
+            RenderSingleFrame();
+            return 0;
+        }
+        break;
+    case WM_ERASEBKGND:
+        return 1;
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
         mmi->ptMinTrackSize.x = 980;
@@ -259,6 +309,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
         break;
     case WM_DESTROY:
+        KillTimer(hWnd, 1);
         PostQuitMessage(0);
         return 0;
     default:
@@ -291,9 +342,38 @@ void OpenUrlInBrowser(const std::string& url) {
     ShellExecuteW(nullptr, L"open", wUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
-// --- Refined Modern Dark Slate Theme ---
-void ApplyModernDarkTheme(float scale) {
-    ImGuiStyle& style = ImGui::GetStyle();
+// --- Theme & Typography Helpers ---
+ImVec4 AccentTextColor() {
+    return g_isLightTheme
+               ? ImVec4(0.11f, 0.38f, 0.78f, 1.00f)
+               : ImVec4(0.48f, 0.76f, 1.00f, 1.00f);
+}
+
+ImVec4 WarningTextColor() {
+    return g_isLightTheme
+               ? ImVec4(0.68f, 0.42f, 0.02f, 1.00f)
+               : ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
+}
+
+ImVec4 PanelBorderColor() {
+    return g_isLightTheme
+               ? ImVec4(0.72f, 0.78f, 0.87f, 0.95f)
+               : ImVec4(0.20f, 0.27f, 0.38f, 0.95f);
+}
+
+ImVec4 AccentBarColor() {
+    return g_isLightTheme
+               ? ImVec4(0.14f, 0.48f, 0.82f, 1.00f)
+               : ImVec4(0.36f, 0.74f, 0.96f, 1.00f);
+}
+
+ImVec4 CardHeaderTextColor() {
+    return g_isLightTheme
+               ? ImVec4(0.09f, 0.20f, 0.38f, 1.00f)
+               : ImVec4(0.80f, 0.90f, 1.00f, 1.00f);
+}
+
+void ApplyBaseLayoutStyle(ImGuiStyle& style, float scale) {
     style = ImGuiStyle();
 
     style.WindowPadding = ImVec2(14.0f, 12.0f);
@@ -321,7 +401,10 @@ void ApplyModernDarkTheme(float scale) {
     if (scale > 0.5f && scale != 1.0f) {
         style.ScaleAllSizes(scale);
     }
+}
 
+void ApplyModernDarkThemeColors(ImGuiStyle& style) {
+    ImGui::StyleColorsDark(&style);
     ImVec4* c = style.Colors;
     c[ImGuiCol_Text] = ImVec4(0.93f, 0.95f, 0.98f, 1.00f);
     c[ImGuiCol_TextDisabled] = ImVec4(0.56f, 0.62f, 0.72f, 1.00f);
@@ -361,13 +444,77 @@ void ApplyModernDarkTheme(float scale) {
     c[ImGuiCol_TabHovered] = ImVec4(0.22f, 0.46f, 0.85f, 0.88f);
     c[ImGuiCol_TabSelected] = ImVec4(0.19f, 0.43f, 0.82f, 1.00f);
 
-    c[ImGuiCol_TableHeaderBg] = ImVec4(0.118f, 0.141f, 0.192f, 1.00f);
-    c[ImGuiCol_TableBorderStrong] = ImVec4(0.180f, 0.220f, 0.298f, 1.00f);
+    c[ImGuiCol_TableHeaderBg] = ImVec4(0.125f, 0.155f, 0.215f, 1.00f);
+    c[ImGuiCol_TableBorderStrong] = ImVec4(0.23f, 0.31f, 0.45f, 1.00f);
     c[ImGuiCol_TableBorderLight] = ImVec4(0.133f, 0.165f, 0.224f, 0.85f);
     c[ImGuiCol_TableRowBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
     c[ImGuiCol_TableRowBgAlt] = ImVec4(1.0f, 1.0f, 1.0f, 0.026f);
 
     c[ImGuiCol_PlotHistogram] = ImVec4(0.27f, 0.56f, 0.96f, 1.00f);
+}
+
+void ApplyModernLightThemeColors(ImGuiStyle& style) {
+    ImGui::StyleColorsLight(&style);
+    ImVec4* c = style.Colors;
+    c[ImGuiCol_Text] = ImVec4(0.08f, 0.11f, 0.18f, 1.00f);
+    c[ImGuiCol_TextDisabled] = ImVec4(0.41f, 0.47f, 0.57f, 1.00f);
+    c[ImGuiCol_WindowBg] = ImVec4(0.941f, 0.953f, 0.973f, 1.00f);
+    c[ImGuiCol_ChildBg] = ImVec4(0.988f, 0.992f, 1.000f, 1.00f);
+    c[ImGuiCol_PopupBg] = ImVec4(0.992f, 0.996f, 1.000f, 0.99f);
+    c[ImGuiCol_Border] = ImVec4(0.75f, 0.80f, 0.87f, 1.00f);
+    c[ImGuiCol_BorderShadow] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    c[ImGuiCol_FrameBg] = ImVec4(0.92f, 0.94f, 0.97f, 1.00f);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(0.87f, 0.90f, 0.95f, 1.00f);
+    c[ImGuiCol_FrameBgActive] = ImVec4(0.82f, 0.87f, 0.94f, 1.00f);
+
+    c[ImGuiCol_TitleBg] = ImVec4(0.92f, 0.94f, 0.97f, 1.00f);
+    c[ImGuiCol_TitleBgActive] = ImVec4(0.96f, 0.97f, 0.99f, 1.00f);
+    c[ImGuiCol_MenuBarBg] = ImVec4(0.93f, 0.95f, 0.98f, 1.00f);
+
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0.93f, 0.95f, 0.98f, 0.70f);
+    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.72f, 0.77f, 0.85f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.58f, 0.65f, 0.76f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.44f, 0.53f, 0.68f, 1.00f);
+
+    c[ImGuiCol_CheckMark] = ImVec4(0.14f, 0.45f, 0.88f, 1.00f);
+    c[ImGuiCol_SliderGrab] = ImVec4(0.16f, 0.48f, 0.90f, 1.00f);
+    c[ImGuiCol_SliderGrabActive] = ImVec4(0.11f, 0.39f, 0.80f, 1.00f);
+
+    c[ImGuiCol_Button] = ImVec4(0.74f, 0.85f, 0.99f, 1.00f);
+    c[ImGuiCol_ButtonHovered] = ImVec4(0.65f, 0.80f, 0.98f, 1.00f);
+    c[ImGuiCol_ButtonActive] = ImVec4(0.57f, 0.74f, 0.96f, 1.00f);
+
+    c[ImGuiCol_Header] = ImVec4(0.18f, 0.48f, 0.88f, 0.16f);
+    c[ImGuiCol_HeaderHovered] = ImVec4(0.18f, 0.48f, 0.88f, 0.26f);
+    c[ImGuiCol_HeaderActive] = ImVec4(0.18f, 0.48f, 0.88f, 0.38f);
+
+    c[ImGuiCol_Separator] = ImVec4(0.76f, 0.81f, 0.88f, 0.95f);
+    c[ImGuiCol_Tab] = ImVec4(0.90f, 0.92f, 0.96f, 1.00f);
+    c[ImGuiCol_TabHovered] = ImVec4(0.80f, 0.88f, 0.98f, 1.00f);
+    c[ImGuiCol_TabSelected] = ImVec4(0.76f, 0.86f, 0.99f, 1.00f);
+
+    c[ImGuiCol_TableHeaderBg] = ImVec4(0.89f, 0.92f, 0.96f, 1.00f);
+    c[ImGuiCol_TableBorderStrong] = ImVec4(0.72f, 0.78f, 0.86f, 1.00f);
+    c[ImGuiCol_TableBorderLight] = ImVec4(0.83f, 0.87f, 0.92f, 0.95f);
+    c[ImGuiCol_TableRowBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
+    c[ImGuiCol_TableRowBgAlt] = ImVec4(0.0f, 0.15f, 0.35f, 0.035f);
+
+    c[ImGuiCol_PlotHistogram] = ImVec4(0.20f, 0.54f, 0.92f, 1.00f);
+}
+
+void ApplyAppTheme(HWND hwnd, float scale, bool lightTheme, bool initLayout = false) {
+    g_isLightTheme = lightTheme;
+    ImGuiStyle& style = ImGui::GetStyle();
+    if (initLayout) {
+        ApplyBaseLayoutStyle(style, scale);
+    }
+    if (lightTheme) {
+        ApplyModernLightThemeColors(style);
+    } else {
+        ApplyModernDarkThemeColors(style);
+    }
+    SetWindowTitleBarDark(hwnd, !lightTheme);
 }
 
 std::string EllipsizeUtf8(const std::string& text, float maxWidth) {
@@ -443,45 +590,241 @@ void RenderStatusBadge(const ImVec4& color, const char* text, bool alignToFrame 
     const ImVec2 pMax(pMin.x + pillW, pMin.y + badgeH);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImVec4 bgVec(color.x, color.y, color.z, 0.14f);
-    const ImVec4 borderVec(color.x, color.y, color.z, 0.42f);
+    const ImVec4 bgVec(color.x, color.y, color.z, g_isLightTheme ? 0.16f : 0.14f);
+    const ImVec4 borderVec =
+        g_isLightTheme
+            ? ImVec4(color.x * 0.72f, color.y * 0.72f, color.z * 0.72f, 0.50f)
+            : ImVec4(color.x, color.y, color.z, 0.42f);
+    const ImVec4 fgVec =
+        g_isLightTheme
+            ? ImVec4(color.x * 0.50f, color.y * 0.50f, color.z * 0.50f, 1.00f)
+            : color;
     const float rounding = badgeH * 0.5f;
     dl->AddRectFilled(pMin, pMax, ImGui::ColorConvertFloat4ToU32(bgVec), rounding);
     dl->AddRect(pMin, pMax, ImGui::ColorConvertFloat4ToU32(borderVec), rounding, 0, 1.0f);
 
     const ImVec2 dotCenter(pMin.x + padLeft + radius, pMin.y + badgeH * 0.5f);
-    dl->AddCircleFilled(dotCenter, radius, ImGui::ColorConvertFloat4ToU32(color));
+    dl->AddCircleFilled(dotCenter, radius, ImGui::ColorConvertFloat4ToU32(fgVec));
 
     const ImVec2 textPos(
         pMin.x + padLeft + radius * 2.0f + dotToText,
         pMin.y + (badgeH - textH) * 0.5f);
-    dl->AddText(textPos, ImGui::ColorConvertFloat4ToU32(color), shown.c_str());
+    dl->AddText(textPos, ImGui::ColorConvertFloat4ToU32(fgVec), shown.c_str());
 
     ImGui::Dummy(ImVec2(pillW, alignToFrame ? std::max(frameH, badgeH) : badgeH));
 }
 
 bool RenderPillButton(const char* label, bool active) {
-    if (active) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.19f, 0.44f, 0.84f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.52f, 0.94f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.16f, 0.37f, 0.72f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.38f, 0.65f, 1.00f, 0.85f));
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::round(10.0f * uiScale));
+    if (g_isLightTheme) {
+        if (active) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.82f, 0.89f, 0.98f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.75f, 0.84f, 0.97f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.69f, 0.80f, 0.95f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.50f, 0.82f, 0.88f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.08f, 0.18f, 0.36f, 1.00f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.94f, 0.95f, 0.98f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.88f, 0.91f, 0.96f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.83f, 0.87f, 0.94f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.77f, 0.82f, 0.88f, 0.90f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.32f, 0.38f, 0.48f, 1.00f));
+        }
     } else {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.118f, 0.141f, 0.192f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.165f, 0.196f, 0.267f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.102f, 0.125f, 0.173f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.21f, 0.25f, 0.34f, 0.90f));
+        if (active) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.21f, 0.33f, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.27f, 0.42f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.12f, 0.18f, 0.29f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.34f, 0.54f, 0.80f, 0.82f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.94f, 1.00f, 1.00f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.102f, 0.122f, 0.165f, 0.92f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.145f, 0.175f, 0.238f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.090f, 0.108f, 0.148f, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.19f, 0.23f, 0.31f, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.68f, 0.74f, 0.84f, 1.00f));
+        }
     }
     const bool clicked = ImGui::Button(label);
-    ImGui::PopStyleColor(4);
+    ImGui::PopStyleColor(5);
+    ImGui::PopStyleVar();
     return clicked;
 }
 
+float CalcSubSectionTabWidth(const char* label) {
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    PushFontSafe(g_fontSecondaryHeader);
+    const float w = ImGui::CalcTextSize(label).x + std::round(12.0f * uiScale) * 2.0f;
+    PopFontSafe(g_fontSecondaryHeader);
+    return w;
+}
+
+bool RenderSubSectionHeaderTab(const char* label, bool active) {
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    PushFontSafe(g_fontSecondaryHeader);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::round(5.0f * uiScale));
+    ImGui::PushStyleVar(
+        ImGuiStyleVar_FramePadding,
+        ImVec2(std::round(12.0f * uiScale), std::round(5.5f * uiScale)));
+    if (g_isLightTheme) {
+        if (active) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.83f, 0.93f, 0.97f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.76f, 0.89f, 0.95f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.70f, 0.85f, 0.93f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.16f, 0.56f, 0.74f, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.06f, 0.22f, 0.32f, 1.00f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.93f, 0.95f, 0.98f, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.87f, 0.91f, 0.96f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.82f, 0.87f, 0.93f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.76f, 0.81f, 0.88f, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.34f, 0.41f, 0.52f, 1.00f));
+        }
+    } else {
+        if (active) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.105f, 0.185f, 0.265f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.135f, 0.235f, 0.335f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.090f, 0.160f, 0.230f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.26f, 0.68f, 0.84f, 0.92f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.97f, 1.00f, 1.00f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.092f, 0.112f, 0.152f, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.125f, 0.160f, 0.220f, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.080f, 0.100f, 0.138f, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.17f, 0.21f, 0.28f, 0.75f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.64f, 0.72f, 0.84f, 1.00f));
+        }
+    }
+    const bool clicked = ImGui::Button(label);
+    if (active && ImGui::IsItemVisible()) {
+        const ImVec2 rMin = ImGui::GetItemRectMin();
+        const ImVec2 rMax = ImGui::GetItemRectMax();
+        const float lineH = std::max(2.0f, 2.5f * uiScale);
+        const float y = rMax.y - lineH * 0.5f;
+        const float pad = std::round(4.0f * uiScale);
+        const ImVec4 lineCol = g_isLightTheme
+                                   ? ImVec4(0.09f, 0.54f, 0.76f, 1.00f)
+                                   : ImVec4(0.32f, 0.78f, 0.94f, 1.00f);
+        ImGui::GetWindowDrawList()->AddLine(
+            ImVec2(rMin.x + pad, y),
+            ImVec2(rMax.x - pad, y),
+            ImGui::ColorConvertFloat4ToU32(lineCol),
+            lineH);
+    }
+    ImGui::PopStyleColor(5);
+    ImGui::PopStyleVar(2);
+    PopFontSafe(g_fontSecondaryHeader);
+    return clicked;
+}
+
+void RenderSecondaryCardHeader(const char* title, const char* rightMeta = nullptr) {
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    PushFontSafe(g_fontSecondaryHeader);
+    const float textH = ImGui::GetTextLineHeight();
+    const float padX = std::round(9.0f * uiScale);
+    const float padY = std::round(4.0f * uiScale);
+    const float bannerH = textH + padY * 2.0f;
+    const float availW = std::max(60.0f, ImGui::GetContentRegionAvail().x);
+
+    const ImVec2 pMin = ImGui::GetCursorScreenPos();
+    const ImVec2 pMax(pMin.x + availW, pMin.y + bannerH);
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+
+    const float rounding = std::round(4.0f * uiScale);
+    const ImVec4 fillCol = g_isLightTheme
+                               ? ImVec4(0.90f, 0.93f, 0.97f, 1.00f)
+                               : ImVec4(0.115f, 0.145f, 0.205f, 0.92f);
+    const ImVec4 borderCol = g_isLightTheme
+                                 ? ImVec4(0.72f, 0.79f, 0.88f, 0.95f)
+                                 : ImVec4(0.22f, 0.32f, 0.46f, 0.80f);
+    dl->AddRectFilled(pMin, pMax, ImGui::ColorConvertFloat4ToU32(fillCol), rounding);
+    dl->AddRect(pMin, pMax, ImGui::ColorConvertFloat4ToU32(borderCol), rounding, 0, 1.0f);
+
+    const float barW = std::max(2.5f, std::round(3.0f * uiScale));
+    const float barPadY = std::round(3.0f * uiScale);
+    dl->AddRectFilled(
+        ImVec2(pMin.x + 2.0f, pMin.y + barPadY),
+        ImVec2(pMin.x + 2.0f + barW, pMax.y - barPadY),
+        ImGui::ColorConvertFloat4ToU32(AccentBarColor()),
+        barW * 0.5f);
+
+    float rightReserve = 0.0f;
+    if (rightMeta != nullptr && rightMeta[0] != '\0') {
+        const ImVec2 metaSize = ImGui::CalcTextSize(rightMeta);
+        rightReserve = metaSize.x + padX * 1.5f;
+        const ImVec4 metaCol = g_isLightTheme
+                                   ? ImVec4(0.38f, 0.45f, 0.56f, 1.00f)
+                                   : ImVec4(0.56f, 0.64f, 0.76f, 1.00f);
+        dl->AddText(
+            ImVec2(pMax.x - padX - metaSize.x, pMin.y + padY),
+            ImGui::ColorConvertFloat4ToU32(metaCol),
+            rightMeta);
+    }
+
+    const float maxTitleW = std::max(24.0f, availW - (padX + barW + 4.0f + padX + rightReserve));
+    const std::string shownTitle = EllipsizeUtf8(title != nullptr ? title : "", maxTitleW);
+    dl->AddText(
+        ImVec2(pMin.x + 2.0f + barW + padX, pMin.y + padY),
+        ImGui::ColorConvertFloat4ToU32(CardHeaderTextColor()),
+        shownTitle.c_str());
+
+    ImGui::Dummy(ImVec2(availW, bannerH));
+    PopFontSafe(g_fontSecondaryHeader);
+}
+
+void RenderVerticalDivider(float padX = 4.0f) {
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    const float gap = std::round(padX * uiScale);
+    const float h = ImGui::GetFrameHeight();
+    ImGui::SameLine(0.0f, gap);
+    const ImVec2 p = ImGui::GetCursorScreenPos();
+    const float x = std::floor(p.x + 1.0f) + 0.5f;
+    const float yPad = std::round(3.0f * uiScale);
+    const ImVec4 divCol = g_isLightTheme
+                              ? ImVec4(0.73f, 0.78f, 0.86f, 0.95f)
+                              : ImVec4(0.24f, 0.31f, 0.44f, 0.90f);
+    ImGui::GetWindowDrawList()->AddLine(
+        ImVec2(x, p.y + yPad),
+        ImVec2(x, p.y + h - yPad),
+        ImGui::ColorConvertFloat4ToU32(divCol),
+        1.0f);
+    ImGui::Dummy(ImVec2(2.0f + gap, h));
+}
+
+void RenderSecondaryGroupLabel(const char* text) {
+    PushFontSafe(g_fontSecondaryHeader);
+    ImGui::AlignTextToFramePadding();
+    const ImVec4 lblCol = g_isLightTheme
+                              ? ImVec4(0.32f, 0.40f, 0.52f, 1.00f)
+                              : ImVec4(0.58f, 0.67f, 0.80f, 1.00f);
+    ImGui::TextColored(lblCol, "%s", text);
+    PopFontSafe(g_fontSecondaryHeader);
+}
+
+void RenderTableHeadersRow() {
+    PushFontSafe(g_fontSecondaryHeader);
+    const ImVec4 hdrCol = g_isLightTheme
+                              ? ImVec4(0.12f, 0.20f, 0.34f, 1.00f)
+                              : ImVec4(0.78f, 0.87f, 0.98f, 1.00f);
+    ImGui::PushStyleColor(ImGuiCol_Text, hdrCol);
+    ImGui::TableHeadersRow();
+    ImGui::PopStyleColor();
+    PopFontSafe(g_fontSecondaryHeader);
+}
+
 bool RenderSecondaryButton(const char* label, const ImVec2& size = ImVec2(0.0f, 0.0f)) {
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.125f, 0.149f, 0.204f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.173f, 0.208f, 0.278f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.106f, 0.129f, 0.180f, 1.00f));
-    ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.23f, 0.28f, 0.37f, 0.95f));
+    if (g_isLightTheme) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.93f, 0.95f, 0.98f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.87f, 0.91f, 0.96f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.81f, 0.86f, 0.94f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.70f, 0.76f, 0.85f, 0.95f));
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.125f, 0.149f, 0.204f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.173f, 0.208f, 0.278f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.106f, 0.129f, 0.180f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.23f, 0.28f, 0.37f, 0.95f));
+    }
     const bool clicked = ImGui::Button(label, size);
     ImGui::PopStyleColor(4);
     return clicked;
@@ -880,81 +1223,130 @@ public:
             false,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
-        if (ImGui::BeginTabBar("##MainTabs")) {
-            auto beginTabCard = [](const char* childId) {
-                ImGui::BeginChild(
-                    childId,
-                    ImVec2(0.0f, 0.0f),
-                    true,
-                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-            };
+        const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+        auto pushMainTabBarStyle = [uiScale]() {
+            PushFontSafe(g_fontMainTab);
+            ImGui::PushStyleVar(
+                ImGuiStyleVar_FramePadding,
+                ImVec2(std::round(14.0f * uiScale), std::round(7.0f * uiScale)));
+            ImGui::PushStyleVar(ImGuiStyleVar_TabBorderSize, 1.0f);
+            ImGui::PushStyleVar(ImGuiStyleVar_TabBarBorderSize, std::round(2.0f * uiScale));
+            ImGui::PushStyleVar(ImGuiStyleVar_TabBarOverlineSize, std::max(2.0f, 2.5f * uiScale));
+            if (g_isLightTheme) {
+                ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.90f, 0.92f, 0.96f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.80f, 0.88f, 0.98f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabSelected, ImVec4(0.76f, 0.86f, 0.99f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabSelectedOverline, ImVec4(0.14f, 0.45f, 0.88f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabDimmed, ImVec4(0.90f, 0.92f, 0.96f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabDimmedSelected, ImVec4(0.76f, 0.86f, 0.99f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabDimmedSelectedOverline, ImVec4(0.14f, 0.45f, 0.88f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.76f, 0.81f, 0.88f, 0.90f));
+            } else {
+                ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.086f, 0.106f, 0.149f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.22f, 0.46f, 0.85f, 0.90f));
+                ImGui::PushStyleColor(ImGuiCol_TabSelected, ImVec4(0.18f, 0.43f, 0.84f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabSelectedOverline, ImVec4(0.52f, 0.82f, 1.00f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabDimmed, ImVec4(0.086f, 0.106f, 0.149f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabDimmedSelected, ImVec4(0.18f, 0.43f, 0.84f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_TabDimmedSelectedOverline, ImVec4(0.52f, 0.82f, 1.00f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.18f, 0.23f, 0.32f, 0.85f));
+            }
+        };
+        auto popMainTabBarStyle = []() {
+            ImGui::PopStyleColor(8);
+            ImGui::PopStyleVar(4);
+            PopFontSafe(g_fontMainTab);
+        };
+
+        pushMainTabBarStyle();
+        if (ImGui::BeginTabBar("##MainTabs", ImGuiTabBarFlags_DrawSelectedOverline)) {
             auto tabFlag = [this](int idx) {
                 return (pendingInitialTab_ == idx)
                            ? ImGuiTabItemFlags_SetSelected
                            : ImGuiTabItemFlags_None;
             };
+            auto beginMainTab = [&](const char* label, int idx) -> bool {
+                const bool isSel =
+                    (pendingInitialTab_ >= 0) ? (pendingInitialTab_ == idx) : (activeTabIndex_ == idx);
+                const ImVec4 borderCol =
+                    g_isLightTheme
+                        ? (isSel ? ImVec4(0.22f, 0.50f, 0.88f, 0.95f) : ImVec4(0.76f, 0.81f, 0.88f, 0.90f))
+                        : (isSel ? ImVec4(0.46f, 0.76f, 1.00f, 0.95f) : ImVec4(0.18f, 0.23f, 0.32f, 0.85f));
+                const ImVec4 textCol =
+                    g_isLightTheme
+                        ? (isSel ? ImVec4(0.06f, 0.14f, 0.30f, 1.00f) : ImVec4(0.32f, 0.38f, 0.48f, 1.00f))
+                        : (isSel ? ImVec4(0.98f, 0.99f, 1.00f, 1.00f) : ImVec4(0.74f, 0.80f, 0.90f, 1.00f));
+                ImGui::PushStyleColor(ImGuiCol_Border, borderCol);
+                ImGui::PushStyleColor(ImGuiCol_Text, textCol);
+                const bool open = ImGui::BeginTabItem(label, nullptr, tabFlag(idx));
+                ImGui::PopStyleColor(2);
+                return open;
+            };
+            auto runTabCard = [&](const char* childId, auto&& drawFn) {
+                popMainTabBarStyle();
+                const ImVec4 cardBorder = g_isLightTheme
+                                              ? ImVec4(0.68f, 0.75f, 0.85f, 0.95f)
+                                              : ImVec4(0.22f, 0.31f, 0.44f, 0.95f);
+                ImGui::PushStyleColor(ImGuiCol_Border, cardBorder);
+                ImGui::BeginChild(
+                    childId,
+                    ImVec2(0.0f, 0.0f),
+                    true,
+                    ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+                ImGui::PopStyleColor();
+                drawFn();
+                ImGui::EndChild();
+                pushMainTabBarStyle();
+            };
 
-            if (ImGui::BeginTabItem(
+            if (beginMainTab(
                     hdm::Tr(
                         "  Устройства и мониторы  ###Tab0",
                         "  Пристрої та монітори  ###Tab0",
                         "  Devices & Monitors  ###Tab0"),
-                    nullptr,
-                    tabFlag(0))) {
+                    0)) {
                 activeTabIndex_ = 0;
-                beginTabCard("##TabCardDevices");
-                RenderDevicesTab();
-                ImGui::EndChild();
+                runTabCard("##TabCardDevices", [&]() { RenderDevicesTab(); });
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem(
+            if (beginMainTab(
                     hdm::Tr(
                         "  Компоненты и периферия  ###Tab1",
                         "  Компоненти та периферія  ###Tab1",
                         "  Components & Peripherals  ###Tab1"),
-                    nullptr,
-                    tabFlag(1))) {
+                    1)) {
                 activeTabIndex_ = 1;
-                beginTabCard("##TabCardComponents");
-                RenderComponentsTab();
-                ImGui::EndChild();
+                runTabCard("##TabCardComponents", [&]() { RenderComponentsTab(); });
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("  Windows Update  ###Tab2", nullptr, tabFlag(2))) {
+            if (beginMainTab("  Windows Update  ###Tab2", 2)) {
                 activeTabIndex_ = 2;
-                beginTabCard("##TabCardWu");
-                RenderWindowsUpdateTab();
-                ImGui::EndChild();
+                runTabCard("##TabCardWu", [&]() { RenderWindowsUpdateTab(); });
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem(
+            if (beginMainTab(
                     hdm::Tr(
                         "  Локальные (.inf)  ###Tab3",
                         "  Локальні (.inf)  ###Tab3",
                         "  Local (.inf)  ###Tab3"),
-                    nullptr,
-                    tabFlag(3))) {
+                    3)) {
                 activeTabIndex_ = 3;
-                beginTabCard("##TabCardLocal");
-                RenderLocalInstallerTab();
-                ImGui::EndChild();
+                runTabCard("##TabCardLocal", [&]() { RenderLocalInstallerTab(); });
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem(
+            if (beginMainTab(
                     hdm::Tr(
                         "  Система и диагностика  ###Tab4",
                         "  Система та діагностика  ###Tab4",
                         "  System & Diagnostics  ###Tab4"),
-                    nullptr,
-                    tabFlag(4))) {
+                    4)) {
                 activeTabIndex_ = 4;
-                beginTabCard("##TabCardDiag");
-                RenderDiagnosticsTab();
-                ImGui::EndChild();
+                runTabCard("##TabCardDiag", [&]() { RenderDiagnosticsTab(); });
                 ImGui::EndTabItem();
             }
             ImGui::EndTabBar();
         }
+        popMainTabBarStyle();
         pendingInitialTab_ = -1;
         HandleKeyboardShortcuts();
         ImGui::EndChild();
@@ -1075,22 +1467,42 @@ private:
     void RenderHeaderBar() {
         const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
         const ImGuiStyle& style = ImGui::GetStyle();
+        const bool isAppForeground = (GetForegroundWindow() == hwnd_);
         const float padY = std::round(9.0f * uiScale);
-        const float headerHeight = ImGui::GetFrameHeight() + padY * 2.0f;
+        const float baseFrameH = ImGui::GetFrameHeight();
+        const float headerHeight = baseFrameH + padY * 2.0f;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.WindowPadding.x, padY));
+        ImGui::PushStyleColor(
+            ImGuiCol_Border,
+            g_isLightTheme ? ImVec4(0.70f, 0.77f, 0.87f, 0.95f) : ImVec4(0.24f, 0.36f, 0.54f, 0.95f));
         ImGui::BeginChild(
             "##HeaderBar",
             ImVec2(0.0f, headerHeight),
             true,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleColor();
 
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "DriverLoom");
-        ImGui::SameLine(0.0f, 8.0f);
+        {
+            PushFontSafe(g_fontPrimaryHeader);
+            const ImVec2 titleSize = ImGui::CalcTextSize("DriverLoom");
+            const ImVec2 startScreen = ImGui::GetCursorScreenPos();
+            const float yOff = std::max(0.0f, (baseFrameH - titleSize.y) * 0.5f);
+            const ImVec4 titleCol = g_isLightTheme
+                                        ? ImVec4(0.08f, 0.34f, 0.74f, 1.00f)
+                                        : ImVec4(0.50f, 0.78f, 1.00f, 1.00f);
+            ImGui::GetWindowDrawList()->AddText(
+                ImVec2(startScreen.x, startScreen.y + yOff),
+                ImGui::ColorConvertFloat4ToU32(titleCol),
+                "DriverLoom");
+            ImGui::Dummy(ImVec2(titleSize.x, baseFrameH));
+            PopFontSafe(g_fontPrimaryHeader);
+        }
+        RenderVerticalDivider(6.0f);
+        ImGui::SameLine(0.0f, 2.0f * uiScale);
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("v1.0.0");
 
-        ImGui::SameLine(0.0f, 12.0f);
+        ImGui::SameLine(0.0f, 12.0f * uiScale);
         if (isElevated_) {
             RenderStatusBadge(
                 ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
@@ -1101,7 +1513,7 @@ private:
                 ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
                 hdm::Tr("Обычный режим", "Звичайний режим", "Standard mode"),
                 true);
-            ImGui::SameLine(0.0f, 10.0f);
+            ImGui::SameLine(0.0f, 10.0f * uiScale);
             if (RenderSecondaryButton(hdm::Tr(
                     "Перезапустить как администратор###ElevBtn",
                     "Перезапустити як адміністратор###ElevBtn",
@@ -1140,33 +1552,97 @@ private:
                                           "Точка відновлення",
                                           "Restore Point");
         const float btnWidth = CalcButtonWidth(srMeasure) + 6.0f * uiScale;
-        const float langRuW = CalcButtonWidth("RU");
-        const float langUaW = CalcButtonWidth("UA");
-        const float langEnW = CalcButtonWidth("EN");
-        const float langGroupGap = std::round(4.0f * uiScale);
-        const float langGroupW = langRuW + langUaW + langEnW + langGroupGap * 2.0f;
-        const float rightGroupW = langGroupW + std::round(10.0f * uiScale) + btnWidth;
-        const float rightX = ImGui::GetWindowContentRegionMax().x - rightGroupW;
-        if (rightX > ImGui::GetCursorPosX() + 12.0f) {
+
+        struct LangOption {
+            hdm::Lang lang;
+            const char* label;
+        };
+        static constexpr LangOption kLangOptions[] = {
+            {hdm::Lang::Ru, "RU — Русский"},
+            {hdm::Lang::Uk, "UA — Українська"},
+            {hdm::Lang::En, "EN — English"},
+        };
+        const hdm::Lang curLang = hdm::GetLang();
+        const char* curLangLabel = kLangOptions[0].label;
+        float maxLangLabelW = 0.0f;
+        for (const auto& opt : kLangOptions) {
+            maxLangLabelW = std::max(maxLangLabelW, ImGui::CalcTextSize(opt.label).x);
+            if (opt.lang == curLang) {
+                curLangLabel = opt.label;
+            }
+        }
+        const float langComboW =
+            maxLangLabelW + style.FramePadding.x * 2.0f + baseFrameH + 6.0f * uiScale;
+
+        const float fullThemeBtnW = std::max(
+            CalcButtonWidth(hdm::Tr("Тема: Светлая", "Тема: Світла", "Theme: Light")),
+            CalcButtonWidth(hdm::Tr("Тема: Тёмная", "Тема: Темна", "Theme: Dark")));
+        const float shortThemeBtnW = std::max(
+            CalcButtonWidth(hdm::Tr("Светлая", "Світла", "Light")),
+            CalcButtonWidth(hdm::Tr("Тёмная", "Темна", "Dark")));
+        const float hdrGap = std::round(8.0f * uiScale);
+        const float prevItemEndX = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+        const float winContentMaxX = ImGui::GetWindowContentRegionMax().x;
+        const float fullRightGroupW = fullThemeBtnW + hdrGap + langComboW + hdrGap + btnWidth;
+        const bool useShortThemeLbl = (winContentMaxX - prevItemEndX - 12.0f * uiScale) < fullRightGroupW;
+        const float themeBtnW = useShortThemeLbl ? shortThemeBtnW : fullThemeBtnW;
+        const char* themeBtnLbl =
+            useShortThemeLbl
+                ? (g_isLightTheme
+                       ? hdm::Tr("Светлая###ThemeBtn", "Світла###ThemeBtn", "Light###ThemeBtn")
+                       : hdm::Tr("Тёмная###ThemeBtn", "Темна###ThemeBtn", "Dark###ThemeBtn"))
+                : (g_isLightTheme
+                       ? hdm::Tr("Тема: Светлая###ThemeBtn", "Тема: Світла###ThemeBtn", "Theme: Light###ThemeBtn")
+                       : hdm::Tr("Тема: Тёмная###ThemeBtn", "Тема: Темна###ThemeBtn", "Theme: Dark###ThemeBtn"));
+
+        const float rightGroupW = themeBtnW + hdrGap + langComboW + hdrGap + btnWidth;
+        const float rightX = winContentMaxX - rightGroupW;
+        if (rightX > prevItemEndX + 12.0f * uiScale) {
             ImGui::SameLine(rightX);
         } else {
             ImGui::SameLine();
         }
 
-        const hdm::Lang curLang = hdm::GetLang();
-        if (RenderPillButton("RU", curLang == hdm::Lang::Ru)) {
-            hdm::SetLang(hdm::Lang::Ru);
+        if (RenderSecondaryButton(themeBtnLbl, ImVec2(themeBtnW, 0.0f))) {
+            ApplyAppTheme(hwnd_, g_dpiScale, !g_isLightTheme);
         }
-        ImGui::SameLine(0.0f, langGroupGap);
-        if (RenderPillButton("UA", curLang == hdm::Lang::Uk)) {
-            hdm::SetLang(hdm::Lang::Uk);
-        }
-        ImGui::SameLine(0.0f, langGroupGap);
-        if (RenderPillButton("EN", curLang == hdm::Lang::En)) {
-            hdm::SetLang(hdm::Lang::En);
+        if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip(
+                "%s",
+                hdm::Tr(
+                    "Переключить оформление: тёмная / светлая тема",
+                    "Перемкнути оформлення: темна / світла тема",
+                    "Switch appearance: Dark / Light theme"));
         }
 
-        ImGui::SameLine(0.0f, std::round(10.0f * uiScale));
+        ImGui::SameLine(0.0f, hdrGap);
+        ImGui::SetNextItemWidth(langComboW);
+        if (g_isLightTheme) {
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.68f, 0.75f, 0.86f, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.94f, 0.96f, 0.99f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.88f, 0.91f, 0.97f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.83f, 0.88f, 0.95f, 1.00f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.36f, 0.52f, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.106f, 0.133f, 0.184f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.145f, 0.184f, 0.255f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.169f, 0.216f, 0.298f, 1.00f));
+        }
+        if (ImGui::BeginCombo("##LangCombo", curLangLabel, ImGuiComboFlags_HeightSmall)) {
+            for (const auto& opt : kLangOptions) {
+                const bool isSelected = (opt.lang == curLang);
+                if (ImGui::Selectable(opt.label, isSelected)) {
+                    hdm::SetLang(opt.lang);
+                }
+                if (isSelected) {
+                    ImGui::SetItemDefaultFocus();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::PopStyleColor(4);
+
+        ImGui::SameLine(0.0f, hdrGap);
         ImGui::BeginDisabled(systemRestore_.IsBusy());
         if (RenderSecondaryButton(srLabel, ImVec2(btnWidth, 0.0f))) {
             systemRestore_.CreateRestorePointAsync(
@@ -1193,15 +1669,20 @@ private:
         const float padY = std::round(7.0f * uiScale);
         const float bannerHeight = ImGui::GetFrameHeight() + padY * 2.0f;
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.WindowPadding.x, padY));
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.24f, 0.16f, 0.05f, 0.95f));
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.96f, 0.68f, 0.16f, 0.90f));
+        ImGui::PushStyleColor(
+            ImGuiCol_ChildBg,
+            g_isLightTheme ? ImVec4(1.00f, 0.96f, 0.84f, 0.98f) : ImVec4(0.24f, 0.16f, 0.05f, 0.95f));
+        ImGui::PushStyleColor(
+            ImGuiCol_Border,
+            g_isLightTheme ? ImVec4(0.86f, 0.58f, 0.10f, 0.95f) : ImVec4(0.96f, 0.68f, 0.16f, 0.90f));
         ImGui::BeginChild(
             "##RebootBanner",
             ImVec2(0.0f, bannerHeight),
             true,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleColor(2);
         RenderStatusBadge(
-            ImVec4(1.00f, 0.87f, 0.45f, 1.00f),
+            ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
             hdm::Tr(
                 "Требуется перезагрузка Windows для завершения установки драйверов.",
                 "Потрібне перезавантаження Windows для завершення встановлення драйверів.",
@@ -1215,7 +1696,6 @@ private:
             rebootRequired_.store(false);
         }
         ImGui::EndChild();
-        ImGui::PopStyleColor(2);
         ImGui::PopStyleVar();
     }
 
@@ -1463,7 +1943,22 @@ private:
         const char* fPerTxt = hdm::Tr("Периферия", "Периферія", "Peripherals");
         const char* fGpuTxt = hdm::Tr("Видео и чипсет", "Відео та чипсет", "GPU & Chipset");
 
-        SameLineWrapIfNeeded(CalcButtonWidth(fAllTxt));
+        const char* filterLbl = hdm::Tr("Фильтр:", "Фільтр:", "Filter:");
+        float filterLblW = 0.0f;
+        {
+            PushFontSafe(g_fontSecondaryHeader);
+            filterLblW = ImGui::CalcTextSize(filterLbl).x;
+            PopFontSafe(g_fontSecondaryHeader);
+        }
+        const float divCheckW = 14.0f * uiScale + filterLblW + 6.0f * uiScale + CalcButtonWidth(fAllTxt);
+        const float lastX = ImGui::GetItemRectMax().x;
+        const float winRightLim = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
+        if (lastX + ImGui::GetStyle().ItemSpacing.x + divCheckW <= winRightLim) {
+            RenderVerticalDivider(3.0f);
+            ImGui::SameLine(0.0f, 3.0f * uiScale);
+        }
+        RenderSecondaryGroupLabel(filterLbl);
+        ImGui::SameLine(0.0f, 6.0f * uiScale);
         if (RenderPillButton(hdm::Tr("Все###DfAll", "Усі###DfAll", "All###DfAll"),
                              deviceFilterMode_ == DeviceFilterMode::All)) {
             deviceFilterMode_ = DeviceFilterMode::All;
@@ -1628,7 +2123,7 @@ private:
                 0.60f,
                 5);
             ImGui::TableSetupColumn("Hardware ID", ImGuiTableColumnFlags_WidthStretch, 1.28f, 6);
-            ImGui::TableHeadersRow();
+            RenderTableHeadersRow();
 
             ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs();
             if (sortSpecs != nullptr && sortSpecs->SpecsDirty) {
@@ -1829,7 +2324,7 @@ private:
                     if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                         ImGui::BeginTooltip();
                         ImGui::PushTextWrapPos(460.0f * uiScale);
-                        ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s", devNameShown.c_str());
+                        ImGui::TextColored(AccentTextColor(), "%s", devNameShown.c_str());
                         ImGui::TextDisabled(
                             hdm::Tr(
                                 "Производитель: %s  |  Класс: %s",
@@ -1890,16 +2385,32 @@ private:
 
         if (const hdm::DeviceInfo* selectedDev = FindSelectedDevice()) {
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(devStyle.WindowPadding.x, cardPadY));
+            ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
             ImGui::BeginChild(
                 "##DeviceDetailsCard",
                 ImVec2(0.0f, detailsH),
                 true,
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            ImGui::PopStyleColor();
 
-            ImGui::TextColored(
-                ImVec4(0.45f, 0.73f, 1.00f, 1.00f),
-                "%s",
-                EllipsizeUtf8(selectedDev->name, 420.0f * uiScale).c_str());
+            {
+                PushFontSafe(g_fontSecondaryHeader);
+                const float lineH = ImGui::GetTextLineHeight();
+                const float barW = std::max(2.5f, std::round(3.0f * uiScale));
+                const ImVec2 barMin = ImGui::GetCursorScreenPos();
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    ImVec2(barMin.x, barMin.y + 1.0f),
+                    ImVec2(barMin.x + barW, barMin.y + lineH - 1.0f),
+                    ImGui::ColorConvertFloat4ToU32(AccentBarColor()),
+                    barW * 0.5f);
+                ImGui::Dummy(ImVec2(barW + std::round(5.0f * uiScale), lineH));
+                ImGui::SameLine(0.0f, 0.0f);
+                ImGui::TextColored(
+                    CardHeaderTextColor(),
+                    "%s",
+                    EllipsizeUtf8(selectedDev->name, 420.0f * uiScale).c_str());
+                PopFontSafe(g_fontSecondaryHeader);
+            }
             ImGui::SameLine(0.0f, 12.0f);
             const std::string metaLine =
                 std::string(hdm::Tr("Статус: ", "Статус: ", "Status: ")) + hdm::TrDyn(selectedDev->statusText) +
@@ -2101,9 +2612,13 @@ private:
             componentsScanner_.IsInstalling();
 
         std::vector<hdm::SystemComponentItem> batchTargets;
+        std::vector<hdm::SystemComponentItem> selectedTargets;
         for (const auto& comp : componentsCache_) {
             if ((!comp.installed || comp.updateAvailable) && !comp.directInstallerUrl.empty()) {
                 batchTargets.push_back(comp);
+            }
+            if (!comp.directInstallerUrl.empty() && selectedComponentIds_.count(comp.id) > 0) {
+                selectedTargets.push_back(comp);
             }
         }
 
@@ -2149,9 +2664,65 @@ private:
             "Оновити всі доступні (99)",
             "Update All Available (99)")));
         ImGui::BeginDisabled(busy || batchTargets.empty());
-        if (ImGui::Button(batchLbl)) {
+        if (RenderActionButton(batchLbl, ImVec2(0.0f, 0.0f), selectedTargets.empty())) {
             componentsScanner_.DownloadAndInstallBatchAsync(
                 std::move(batchTargets), devicesCache_, MakeLogger());
+        }
+        ImGui::EndDisabled();
+
+        char selBatchLbl[128];
+        if (!selectedTargets.empty()) {
+            std::snprintf(
+                selBatchLbl,
+                sizeof(selBatchLbl),
+                hdm::Tr(
+                    "Обновить выбранные (%zu)###BatchSelCompBtn",
+                    "Оновити вибрані (%zu)###BatchSelCompBtn",
+                    "Update Selected (%zu)###BatchSelCompBtn"),
+                selectedTargets.size());
+        } else {
+            std::snprintf(
+                selBatchLbl,
+                sizeof(selBatchLbl),
+                "%s",
+                hdm::Tr(
+                    "Обновить выбранные (0)###BatchSelCompBtn",
+                    "Оновити вибрані (0)###BatchSelCompBtn",
+                    "Update Selected (0)###BatchSelCompBtn"));
+        }
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr(
+            "Обновить выбранные (99)",
+            "Оновити вибрані (99)",
+            "Update Selected (99)")));
+        ImGui::BeginDisabled(busy || selectedTargets.empty());
+        if (RenderActionButton(selBatchLbl, ImVec2(0.0f, 0.0f), !selectedTargets.empty())) {
+            componentsScanner_.DownloadAndInstallBatchAsync(
+                std::move(selectedTargets), devicesCache_, MakeLogger());
+        }
+        ImGui::EndDisabled();
+
+        const char* selAvailTxt =
+            hdm::Tr("Выбрать доступные", "Вибрати доступні", "Select Available");
+        SameLineWrapIfNeeded(CalcButtonWidth(selAvailTxt));
+        ImGui::BeginDisabled(busy || batchTargets.empty());
+        if (RenderSecondaryButton(hdm::Tr(
+                "Выбрать доступные###CompSelAvail",
+                "Вибрати доступні###CompSelAvail",
+                "Select Available###CompSelAvail"))) {
+            for (const auto& comp : batchTargets) {
+                selectedComponentIds_.insert(comp.id);
+            }
+        }
+        ImGui::EndDisabled();
+
+        const char* clrSelTxt = hdm::Tr("Снять все", "Зняти всі", "Clear Selection");
+        SameLineWrapIfNeeded(CalcButtonWidth(clrSelTxt));
+        ImGui::BeginDisabled(busy || selectedComponentIds_.empty());
+        if (RenderSecondaryButton(hdm::Tr(
+                "Снять все###CompClrSel",
+                "Зняти всі###CompClrSel",
+                "Clear Selection###CompClrSel"))) {
+            selectedComponentIds_.clear();
         }
         ImGui::EndDisabled();
 
@@ -2182,6 +2753,8 @@ private:
         }
 
         // Row 2: Filter pills
+        RenderSecondaryGroupLabel(hdm::Tr("Фильтр:", "Фільтр:", "Filter:"));
+        ImGui::SameLine(0.0f, 8.0f * uiScale);
         if (RenderPillButton(hdm::Tr("Все###CfAll", "Усі###CfAll", "All###CfAll"),
                              compFilterMode_ == ComponentFilterMode::All)) {
             compFilterMode_ = ComponentFilterMode::All;
@@ -2201,9 +2774,9 @@ private:
             compFilterMode_ = ComponentFilterMode::Peripherals;
             compViewDirty_ = true;
         }
-        const char* cfMonTxt = hdm::Tr("Мониторы и GPU", "Монітори та GPU", "Monitors & GPU");
+        const char* cfMonTxt = hdm::Tr("Мониторы, GPU и плата", "Монітори, GPU та плата", "Monitors, GPU & Board");
         SameLineWrapIfNeeded(CalcButtonWidth(cfMonTxt));
-        if (RenderPillButton(hdm::Tr("Мониторы и GPU###CfMon", "Монітори та GPU###CfMon", "Monitors & GPU###CfMon"),
+        if (RenderPillButton(hdm::Tr("Мониторы, GPU и плата###CfMon", "Монітори, GPU та плата###CfMon", "Monitors, GPU & Board###CfMon"),
                              compFilterMode_ == ComponentFilterMode::MonitorsAndGpu)) {
             compFilterMode_ = ComponentFilterMode::MonitorsAndGpu;
             compViewDirty_ = true;
@@ -2226,7 +2799,9 @@ private:
         const float primaryW = CalcButtonWidth(hdm::Tr("Установить", "Встановити", "Download")) + 8.0f * uiScale;
         const float siteW = CalcButtonWidth(hdm::Tr("Сайт", "Сайт", "Site")) + 6.0f * uiScale;
         const float fullActionW = primaryW + compStyle.ItemSpacing.x + siteW;
-        const float actionColW = fullActionW + compStyle.CellPadding.x * 2.0f + 4.0f;
+        const float checkW = ImGui::GetFrameHeight();
+        const float actionColW =
+            fullActionW + compStyle.ItemSpacing.x + checkW + compStyle.CellPadding.x * 2.0f + 4.0f;
 
         if (ImGui::BeginTable("##ComponentsTable", 6, kTableFlags, ImGui::GetContentRegionAvail())) {
             ImGui::TableSetupScrollFreeze(0, 1);
@@ -2260,7 +2835,7 @@ private:
                 ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed,
                 actionColW,
                 5);
-            ImGui::TableHeadersRow();
+            RenderTableHeadersRow();
 
             ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs();
             if (sortSpecs != nullptr && sortSpecs->SpecsDirty) {
@@ -2276,8 +2851,17 @@ private:
             for (size_t viewIdx = 0; viewIdx < visibleComponentIndices_.size(); ++viewIdx) {
                 const size_t origIdx = visibleComponentIndices_[viewIdx];
                 const auto& item = componentsCache_[origIdx];
+                const bool canSelectItem = !item.directInstallerUrl.empty();
+                bool isSelected = canSelectItem && selectedComponentIds_.count(item.id) > 0;
 
                 ImGui::TableNextRow();
+                if (isSelected) {
+                    const ImU32 selRowBg = ImGui::ColorConvertFloat4ToU32(
+                        g_isLightTheme
+                            ? ImVec4(0.16f, 0.48f, 0.90f, 0.12f)
+                            : ImVec4(0.22f, 0.50f, 0.90f, 0.18f));
+                    ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, selRowBg);
+                }
                 ImGui::PushID(static_cast<int>(origIdx));
 
                 ImGui::TableSetColumnIndex(0);
@@ -2296,7 +2880,7 @@ private:
                 if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                     ImGui::BeginTooltip();
                     ImGui::PushTextWrapPos(440.0f * uiScale);
-                    ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s", hdm::TrDyn(item.name).c_str());
+                    ImGui::TextColored(AccentTextColor(), "%s", hdm::TrDyn(item.name).c_str());
                     ImGui::TextDisabled(
                         hdm::Tr("Издатель: %s", "Видавець: %s", "Publisher: %s"),
                         item.vendor.c_str());
@@ -2359,12 +2943,43 @@ private:
                             ImVec2(siteW, 0.0f))) {
                         OpenUrlInBrowser(item.officialPageUrl);
                     }
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(busy);
+                    if (ImGui::Checkbox("##compSel", &isSelected)) {
+                        if (isSelected) {
+                            selectedComponentIds_.insert(item.id);
+                        } else {
+                            selectedComponentIds_.erase(item.id);
+                        }
+                    }
+                    ImGui::EndDisabled();
+                    if (isAppForeground &&
+                        ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+                        ImGui::SetTooltip(
+                            "%s",
+                            hdm::Tr(
+                                "Выбрать компонент для пакетной установки / обновления",
+                                "Вибрати компонент для пакетного встановлення / оновлення",
+                                "Select component for batch install / update"));
+                    }
                 } else if (!item.officialPageUrl.empty()) {
                     if (RenderSecondaryButton(
                             hdm::Tr("Открыть сайт###COpenSite", "Відкрити сайт###COpenSite", "Open Website###COpenSite"),
                             ImVec2(fullActionW, 0.0f))) {
                         OpenUrlInBrowser(item.officialPageUrl);
                     }
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(true);
+                    bool noDirectSel = false;
+                    ImGui::Checkbox("##compSel", &noDirectSel);
+                    ImGui::EndDisabled();
+                } else {
+                    ImGui::Dummy(ImVec2(fullActionW, 0.0f));
+                    ImGui::SameLine();
+                    ImGui::BeginDisabled(true);
+                    bool noDirectSel = false;
+                    ImGui::Checkbox("##compSel", &noDirectSel);
+                    ImGui::EndDisabled();
                 }
 
                 ImGui::PopID();
@@ -2669,7 +3284,7 @@ private:
                 ImGuiTableColumnFlags_WidthStretch,
                 0.98f,
                 4);
-            ImGui::TableHeadersRow();
+            RenderTableHeadersRow();
 
             if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs()) {
                 if ((sortSpecs->SpecsDirty || wuSortDirty_) && sortSpecs->SpecsCount > 0) {
@@ -3092,6 +3707,8 @@ private:
             hdm::Tr("Активные (%zu)###DsAct", "Активні (%zu)###DsAct", "Active (%zu)###DsAct"),
             driverStoreCache_.activeCount);
 
+        RenderSecondaryGroupLabel(hdm::Tr("Фильтр:", "Фільтр:", "Filter:"));
+        ImGui::SameLine(0.0f, 8.0f * uiScale);
         if (RenderPillButton(allLbl, storeFilterMode_ == DriverStoreFilterMode::All)) {
             storeFilterMode_ = DriverStoreFilterMode::All;
             storeViewDirty_ = true;
@@ -3166,7 +3783,7 @@ private:
             ImGui::TableSetupColumn(hdm::Tr("Версия / Дата", "Версія / Дата", "Version / Date"), ImGuiTableColumnFlags_WidthStretch, 1.14f, 5);
             ImGui::TableSetupColumn(hdm::Tr("Размер", "Розмір", "Size"), ImGuiTableColumnFlags_WidthStretch, 0.60f, 6);
             ImGui::TableSetupColumn(hdm::Tr("Действие", "Дія", "Action"), ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, actionColW, 7);
-            ImGui::TableHeadersRow();
+            RenderTableHeadersRow();
 
             ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs();
             if (sortSpecs != nullptr && sortSpecs->SpecsDirty) {
@@ -3224,7 +3841,7 @@ private:
                 if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                     ImGui::BeginTooltip();
                     ImGui::PushTextWrapPos(460.0f * uiScale);
-                    ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s (%s)", pkg.originalInfName.c_str(), pkg.oemInfName.c_str());
+                    ImGui::TextColored(AccentTextColor(), "%s (%s)", pkg.originalInfName.c_str(), pkg.oemInfName.c_str());
                     if (!pkg.activeDeviceName.empty()) {
                         ImGui::Text(
                             hdm::Tr("Устройство: %s", "Пристрій: %s", "Device: %s"),
@@ -3297,7 +3914,7 @@ private:
         const ImGuiStyle& style = ImGui::GetStyle();
         const bool isAppForeground = (GetForegroundWindow() == hwnd_);
 
-        if (RenderPillButton(
+        if (RenderSubSectionHeaderTab(
                 hdm::Tr(
                     "Установка из папки (.inf)###LocSec0",
                     "Встановлення з папки (.inf)###LocSec0",
@@ -3326,11 +3943,11 @@ private:
                     "DriverStore Backup & Cleanup (%zu)###StorePill"),
                 driverStoreCache_.packages.size());
         }
-        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr(
+        SameLineWrapIfNeeded(CalcSubSectionTabWidth(hdm::Tr(
             "Бэкап и хранилище DriverStore (999 | 99 дубл.)",
             "Бекап і сховище DriverStore (999 | 99 дубл.)",
             "DriverStore Backup & Cleanup (999 | 99 dup.)")));
-        if (RenderPillButton(storePill, localSectionIndex_ == 1)) {
+        if (RenderSubSectionHeaderTab(storePill, localSectionIndex_ == 1)) {
             localSectionIndex_ = 1;
         }
 
@@ -3482,7 +4099,7 @@ private:
             ImGui::TableSetupColumn(hdm::Tr("Имя файла", "Ім'я файлу", "File Name"), ImGuiTableColumnFlags_WidthStretch, 1.00f, 0);
             ImGui::TableSetupColumn(hdm::Tr("Относительный путь", "Відносний шлях", "Relative Path"), ImGuiTableColumnFlags_WidthStretch, 2.00f, 1);
             ImGui::TableSetupColumn(hdm::Tr("Размер", "Розмір", "Size"), ImGuiTableColumnFlags_WidthStretch, 0.50f, 2);
-            ImGui::TableHeadersRow();
+            RenderTableHeadersRow();
 
             if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs()) {
                 if (sortSpecs->SpecsCount > 0) {
@@ -3624,7 +4241,7 @@ private:
             if (!phase.empty()) {
                 ImGui::SameLine(0.0f, 12.0f);
                 ImGui::AlignTextToFramePadding();
-                ImGui::TextColored(ImVec4(0.98f, 0.75f, 0.14f, 1.00f), "%s", phase.c_str());
+                ImGui::TextColored(WarningTextColor(), "%s", phase.c_str());
             }
         } else if (compInstalling) {
             SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Отмена", "Скасувати", "Cancel")));
@@ -3635,7 +4252,7 @@ private:
             if (!phase.empty()) {
                 ImGui::SameLine(0.0f, 12.0f);
                 ImGui::AlignTextToFramePadding();
-                ImGui::TextColored(ImVec4(0.98f, 0.75f, 0.14f, 1.00f), "%s", phase.c_str());
+                ImGui::TextColored(WarningTextColor(), "%s", phase.c_str());
             }
         } else if (diagCache_.valid) {
             ImGui::SameLine(0.0f, 12.0f);
@@ -3686,27 +4303,29 @@ private:
         const float cardPadY = std::round(9.0f * uiScale);
         const float cardSpacingY = std::round(5.0f * uiScale);
         const float badgeH = ImGui::GetTextLineHeight() + std::round(6.0f * uiScale);
+        const float headerFontH =
+            (g_fontSecondaryHeader != nullptr) ? g_fontSecondaryHeader->LegacySize : ImGui::GetTextLineHeight();
+        const float headerBannerH = headerFontH + std::round(8.0f * uiScale);
         const float cardH = std::max(
-            126.0f * uiScale,
-            ImGui::GetTextLineHeight() + cardSpacingY * 2.0f + 4.0f +
+            134.0f * uiScale,
+            headerBannerH + cardSpacingY * 2.0f +
                 (badgeH + cardSpacingY) * 3.0f + cardPadY * 2.0f);
         const float cardGap = style.ItemSpacing.x;
         const float cardW = std::max(260.0f, (ImGui::GetContentRegionAvail().x - cardGap) * 0.5f);
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.WindowPadding.x, cardPadY));
+        ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
         ImGui::BeginChild(
             "##MoboDiagCard",
             ImVec2(cardW, cardH),
             true,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleColor();
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x, cardSpacingY));
         {
             const auto& mb = diagCache_.motherboard;
-            ImGui::TextColored(
-                ImVec4(0.45f, 0.73f, 1.00f, 1.00f),
-                "%s",
+            RenderSecondaryCardHeader(
                 hdm::Tr("Материнская плата и BIOS", "Материнська плата та BIOS", "Motherboard & BIOS"));
-            ImGui::Separator();
 
             std::string boardTitle;
             if (!mb.manufacturer.empty() && mb.manufacturer != "—") {
@@ -3786,22 +4405,21 @@ private:
         ImGui::SameLine(0.0f, cardGap);
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.WindowPadding.x, cardPadY));
+        ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
         ImGui::BeginChild(
             "##ReadinessDiagCard",
             ImVec2(cardW, cardH),
             true,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleColor();
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x, cardSpacingY));
         {
             const auto& rd = diagCache_.readiness;
-            ImGui::TextColored(
-                ImVec4(0.45f, 0.73f, 1.00f, 1.00f),
-                "%s",
+            RenderSecondaryCardHeader(
                 hdm::Tr(
                     "Готовность Windows и защита",
                     "Готовність Windows та захист",
                     "Windows Readiness & Protection"));
-            ImGui::Separator();
 
             if (rd.cbsRebootPending || rd.wuRebootRequired) {
                 RenderStatusBadge(
@@ -3873,7 +4491,7 @@ private:
         ImGui::EndChild();
         ImGui::PopStyleVar();
 
-        // Section switcher pills: Controllers vs Windows Services vs Restore Points vs Storage & Power
+        // Section switcher headers: Controllers vs Windows Services vs Restore Points vs Storage & Power
         char ctrlPill[96];
         std::snprintf(
             ctrlPill,
@@ -3883,7 +4501,7 @@ private:
                 "Ключові контролери плати (%zu)###CtrlPill",
                 "Board Controllers (%zu)###CtrlPill"),
             diagCache_.controllers.size());
-        if (RenderPillButton(ctrlPill, diagSectionIndex_ == 0)) {
+        if (RenderSubSectionHeaderTab(ctrlPill, diagSectionIndex_ == 0)) {
             diagSectionIndex_ = 0;
         }
 
@@ -3908,11 +4526,11 @@ private:
                     "Windows & Update Services (%zu)###SvcPill"),
                 diagCache_.services.size());
         }
-        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr(
+        SameLineWrapIfNeeded(CalcSubSectionTabWidth(hdm::Tr(
             "Службы Windows и обновления (99 | 9 откл.!)",
             "Служби Windows та оновлення (99 | 9 вимкн.!)",
             "Windows & Update Services (99 | 9 off!)")));
-        if (RenderPillButton(svcPill, diagSectionIndex_ == 1)) {
+        if (RenderSubSectionHeaderTab(svcPill, diagSectionIndex_ == 1)) {
             diagSectionIndex_ = 1;
         }
 
@@ -3925,11 +4543,11 @@ private:
                 "Точки відновлення (%zu)###RpPill",
                 "Restore Points (%zu)###RpPill"),
             diagCache_.restorePoints.size());
-        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr(
+        SameLineWrapIfNeeded(CalcSubSectionTabWidth(hdm::Tr(
             "Точки восстановления (99)",
             "Точки відновлення (99)",
             "Restore Points (99)")));
-        if (RenderPillButton(rpPill, diagSectionIndex_ == 2)) {
+        if (RenderSubSectionHeaderTab(rpPill, diagSectionIndex_ == 2)) {
             diagSectionIndex_ = 2;
         }
 
@@ -3942,13 +4560,15 @@ private:
                 "Накопичувачі та живлення (%zu)###StorPill",
                 "Storage & Power (%zu)###StorPill"),
             diagCache_.storageItems.size());
-        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr(
+        SameLineWrapIfNeeded(CalcSubSectionTabWidth(hdm::Tr(
             "Накопители и питание (99)",
             "Накопичувачі та живлення (99)",
             "Storage & Power (99)")));
-        if (RenderPillButton(storPill, diagSectionIndex_ == 3)) {
+        if (RenderSubSectionHeaderTab(storPill, diagSectionIndex_ == 3)) {
             diagSectionIndex_ = 3;
         }
+
+        ImGui::Separator();
 
         const float footerPadY = std::round(7.0f * uiScale);
         const float footerH = ImGui::GetFrameHeight() + footerPadY * 2.0f;
@@ -3969,7 +4589,7 @@ private:
                 ImGui::TableSetupColumn(hdm::Tr("Устройство", "Пристрій", "Device"), ImGuiTableColumnFlags_WidthStretch, 1.20f);
                 ImGui::TableSetupColumn(hdm::Tr("Драйвер / Дата", "Драйвер / Дата", "Driver / Date"), ImGuiTableColumnFlags_WidthStretch, 0.94f);
                 ImGui::TableSetupColumn(hdm::Tr("Действие", "Дія", "Action"), ImGuiTableColumnFlags_WidthFixed, actionColW);
-                ImGui::TableHeadersRow();
+                RenderTableHeadersRow();
 
                 for (size_t i = 0; i < diagCache_.controllers.size(); ++i) {
                     const auto& item = diagCache_.controllers[i];
@@ -3994,7 +4614,7 @@ private:
                     if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                         ImGui::BeginTooltip();
                         ImGui::PushTextWrapPos(440.0f * uiScale);
-                        ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s", item.deviceName.c_str());
+                        ImGui::TextColored(AccentTextColor(), "%s", item.deviceName.c_str());
                         ImGui::TextDisabled(
                             hdm::Tr(
                                 "Поставщик: %s | INF: %s",
@@ -4076,7 +4696,7 @@ private:
                 ImGui::TableSetupColumn(hdm::Tr("Назначение", "Призначення", "Purpose"), ImGuiTableColumnFlags_WidthStretch, 1.15f);
                 ImGui::TableSetupColumn(hdm::Tr("Тип запуска", "Тип запуску", "Startup"), ImGuiTableColumnFlags_WidthStretch, 0.62f);
                 ImGui::TableSetupColumn(hdm::Tr("Действие", "Дія", "Action"), ImGuiTableColumnFlags_WidthFixed, svcActionW);
-                ImGui::TableHeadersRow();
+                RenderTableHeadersRow();
 
                 for (size_t i = 0; i < diagCache_.services.size(); ++i) {
                     const auto& svc = diagCache_.services[i];
@@ -4145,7 +4765,7 @@ private:
                 ImGui::TableSetupColumn(hdm::Tr("Дата и время", "Дата і час", "Date & Time"), ImGuiTableColumnFlags_WidthStretch, 0.72f);
                 ImGui::TableSetupColumn(hdm::Tr("Описание точки восстановления", "Опис точки відновлення", "Restore Point Description"), ImGuiTableColumnFlags_WidthStretch, 1.85f);
                 ImGui::TableSetupColumn(hdm::Tr("Источник", "Джерело", "Source"), ImGuiTableColumnFlags_WidthStretch, 0.88f);
-                ImGui::TableHeadersRow();
+                RenderTableHeadersRow();
 
                 for (size_t i = 0; i < diagCache_.restorePoints.size(); ++i) {
                     const auto& rp = diagCache_.restorePoints[i];
@@ -4190,7 +4810,7 @@ private:
                 ImGui::TableSetupColumn(hdm::Tr("Устройство / Накопитель", "Пристрій / Накопичувач", "Device / Storage Drive"), ImGuiTableColumnFlags_WidthStretch, 1.30f);
                 ImGui::TableSetupColumn(hdm::Tr("Драйвер / INF", "Драйвер / INF", "Driver / INF"), ImGuiTableColumnFlags_WidthStretch, 0.94f);
                 ImGui::TableSetupColumn(hdm::Tr("Действие", "Дія", "Action"), ImGuiTableColumnFlags_WidthFixed, actionColW);
-                ImGui::TableHeadersRow();
+                RenderTableHeadersRow();
 
                 for (size_t i = 0; i < diagCache_.storageItems.size(); ++i) {
                     const auto& st = diagCache_.storageItems[i];
@@ -4215,7 +4835,7 @@ private:
                     if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                         ImGui::BeginTooltip();
                         ImGui::PushTextWrapPos(440.0f * uiScale);
-                        ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s", st.deviceName.c_str());
+                        ImGui::TextColored(AccentTextColor(), "%s", st.deviceName.c_str());
                         ImGui::TextDisabled(
                             hdm::Tr(
                                 "Поставщик: %s | INF: %s",
@@ -4459,17 +5079,36 @@ private:
         bool wasDirty = false;
         const auto entries = logBuffer_.Snapshot(&wasDirty);
 
+        ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
         ImGui::BeginChild(
             "##LogPanel",
             ImVec2(0.0f, 0.0f),
             true,
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleColor();
 
-        ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(
-            ImVec4(0.62f, 0.74f, 0.90f, 1.00f),
-            "%s",
-            hdm::Tr("Журнал событий", "Журнал подій", "Event Log"));
+        const float frameH = ImGui::GetFrameHeight();
+        {
+            const float barW = std::max(2.5f, std::round(3.0f * uiScale));
+            const float barPadY = std::round(4.0f * uiScale);
+            const ImVec2 pMin = ImGui::GetCursorScreenPos();
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImVec2(pMin.x, pMin.y + barPadY),
+                ImVec2(pMin.x + barW, pMin.y + frameH - barPadY),
+                ImGui::ColorConvertFloat4ToU32(AccentBarColor()),
+                barW * 0.5f);
+            ImGui::Dummy(ImVec2(barW + std::round(6.0f * uiScale), frameH));
+        }
+        ImGui::SameLine(0.0f, 0.0f);
+        {
+            PushFontSafe(g_fontSecondaryHeader);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(
+                CardHeaderTextColor(),
+                "%s",
+                hdm::Tr("Журнал событий", "Журнал подій", "Event Log"));
+            PopFontSafe(g_fontSecondaryHeader);
+        }
         ImGui::SameLine(0.0f, 8.0f);
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("(%zu)", entries.size());
@@ -4517,15 +5156,26 @@ private:
         while (clipper.Step()) {
             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
                 const auto& entry = entries[static_cast<size_t>(i)];
-                ImVec4 col(0.84f, 0.88f, 0.94f, 1.00f);
+                ImVec4 col = g_isLightTheme
+                                 ? ImVec4(0.14f, 0.18f, 0.26f, 1.00f)
+                                 : ImVec4(0.84f, 0.88f, 0.94f, 1.00f);
                 if (entry.level == hdm::LogLevel::Success) {
-                    col = ImVec4(0.20f, 0.83f, 0.60f, 1.00f);
+                    col = g_isLightTheme
+                              ? ImVec4(0.05f, 0.48f, 0.30f, 1.00f)
+                              : ImVec4(0.20f, 0.83f, 0.60f, 1.00f);
                 } else if (entry.level == hdm::LogLevel::Warning) {
-                    col = ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
+                    col = g_isLightTheme
+                              ? ImVec4(0.68f, 0.42f, 0.02f, 1.00f)
+                              : ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
                 } else if (entry.level == hdm::LogLevel::Error) {
-                    col = ImVec4(0.97f, 0.44f, 0.44f, 1.00f);
+                    col = g_isLightTheme
+                              ? ImVec4(0.75f, 0.14f, 0.16f, 1.00f)
+                              : ImVec4(0.97f, 0.44f, 0.44f, 1.00f);
                 }
-                ImGui::TextColored(ImVec4(0.49f, 0.56f, 0.67f, 1.00f), "[%s]", entry.timestamp.c_str());
+                const ImVec4 tsCol = g_isLightTheme
+                                         ? ImVec4(0.44f, 0.50f, 0.60f, 1.00f)
+                                         : ImVec4(0.49f, 0.56f, 0.67f, 1.00f);
+                ImGui::TextColored(tsCol, "[%s]", entry.timestamp.c_str());
                 ImGui::SameLine();
                 ImGui::PushStyleColor(ImGuiCol_Text, col);
                 ImGui::TextUnformatted(hdm::TrDyn(entry.message).c_str());
@@ -4580,6 +5230,7 @@ private:
     // Components & Peripherals UI state
     std::vector<hdm::SystemComponentItem> componentsCache_;
     std::vector<size_t> visibleComponentIndices_;
+    std::unordered_set<std::string> selectedComponentIds_;
     uint64_t lastComponentsGen_{0};
     ComponentFilterMode compFilterMode_{ComponentFilterMode::All};
     bool compViewDirty_{true};
@@ -4612,6 +5263,61 @@ private:
     // Log UI state
     bool logAutoScroll_{true};
 };
+
+void RenderSingleFrame(
+    const std::wstring* screenshotPath,
+    bool* screenshotTaken,
+    bool* outCaptureDone) {
+    if (g_isRenderingFrame || g_appInstance == nullptr ||
+        g_pd3dDevice == nullptr || g_pd3dDeviceContext == nullptr || g_pSwapChain == nullptr) {
+        return;
+    }
+    g_isRenderingFrame = true;
+
+    if (g_resizeWidth != 0 && g_resizeHeight != 0) {
+        CleanupRenderTarget();
+        g_pSwapChain->ResizeBuffers(0, g_resizeWidth, g_resizeHeight, DXGI_FORMAT_UNKNOWN, 0);
+        g_resizeWidth = 0;
+        g_resizeHeight = 0;
+        CreateRenderTarget();
+    }
+    if (g_mainRenderTargetView == nullptr) {
+        g_isRenderingFrame = false;
+        return;
+    }
+
+    ImGui_ImplDX11_NewFrame();
+    ImGui_ImplWin32_NewFrame();
+    ImGui::NewFrame();
+
+    g_appInstance->RenderFrame();
+
+    ImGui::Render();
+    const ImVec4 clearColor = g_isLightTheme
+                                  ? ImVec4(0.941f, 0.953f, 0.973f, 1.00f)
+                                  : ImVec4(0.059f, 0.071f, 0.098f, 1.00f);
+    const float clearColorWithAlpha[4] = {
+        clearColor.x, clearColor.y, clearColor.z, clearColor.w};
+    g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
+    g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clearColorWithAlpha);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+
+    if (screenshotPath != nullptr && !screenshotPath->empty() &&
+        screenshotTaken != nullptr && !(*screenshotTaken)) {
+        const double elapsed = ImGui::GetTime();
+        if ((elapsed >= 1.8 && g_appInstance->IsInitialScanSettled()) || elapsed >= 4.0) {
+            SaveBackBufferToBmp(*screenshotPath);
+            *screenshotTaken = true;
+            if (outCaptureDone != nullptr) {
+                *outCaptureDone = true;
+            }
+        }
+    }
+
+    const HRESULT hr = g_pSwapChain->Present(1, 0);
+    g_swapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
+    g_isRenderingFrame = false;
+}
 
 } // namespace
 
@@ -4666,7 +5372,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         return 1;
     }
 
-    EnableDarkTitleBar(hwnd);
+    SetWindowTitleBarDark(hwnd, true);
 
     if (!CreateDeviceD3D(hwnd)) {
         CleanupDeviceD3D();
@@ -4685,17 +5391,46 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
-    const float dpiScale = ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd);
-    ApplyModernDarkTheme(dpiScale);
+    g_dpiScale = ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd);
+    ApplyAppTheme(hwnd, g_dpiScale, false, true);
 
-    const float fontSize = 16.5f * (dpiScale > 0.5f ? dpiScale : 1.0f);
-    ImFont* loadedFont = io.Fonts->AddFontFromFileTTF(
-        "C:\\Windows\\Fonts\\segoeui.ttf",
-        fontSize,
-        nullptr,
-        io.Fonts->GetGlyphRangesCyrillic());
-    if (loadedFont == nullptr) {
-        io.Fonts->AddFontDefault();
+    const float fontScale = (g_dpiScale > 0.5f ? g_dpiScale : 1.0f);
+    auto tryLoadCyrillicFont = [&](const char* path, float sizePx) -> ImFont* {
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) {
+            return nullptr;
+        }
+        ImFontConfig cfg{};
+        cfg.Flags |= ImFontFlags_NoLoadError;
+        return io.Fonts->AddFontFromFileTTF(
+            path, sizePx, &cfg, io.Fonts->GetGlyphRangesCyrillic());
+    };
+
+    g_fontRegular = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeui.ttf", 16.0f * fontScale);
+    if (g_fontRegular == nullptr) {
+        g_fontRegular = io.Fonts->AddFontDefault();
+    }
+    io.FontDefault = g_fontRegular;
+
+    g_fontSecondaryHeader =
+        tryLoadCyrillicFont("C:\\Windows\\Fonts\\seguisb.ttf", 16.5f * fontScale);
+    if (g_fontSecondaryHeader == nullptr) {
+        g_fontSecondaryHeader =
+            tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 16.5f * fontScale);
+    }
+    if (g_fontSecondaryHeader == nullptr) {
+        g_fontSecondaryHeader = g_fontRegular;
+    }
+
+    g_fontMainTab = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 17.5f * fontScale);
+    if (g_fontMainTab == nullptr) {
+        g_fontMainTab = g_fontSecondaryHeader;
+    }
+
+    g_fontPrimaryHeader =
+        tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 19.5f * fontScale);
+    if (g_fontPrimaryHeader == nullptr) {
+        g_fontPrimaryHeader = g_fontMainTab;
     }
 
     ImGui_ImplWin32_Init(hwnd);
@@ -4742,7 +5477,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         app.SetInitialDiagSection(initialDiagSection);
         app.SetInitialLocalSection(initialLocalSection);
         app.SetInitialSelectedDeviceRow(initialSelectedDeviceRow);
-        const ImVec4 clearColor(0.059f, 0.071f, 0.098f, 1.00f);
+
+        struct AppInstanceGuard {
+            explicit AppInstanceGuard(DriverLoomApp* ptr) { g_appInstance = ptr; }
+            ~AppInstanceGuard() { g_appInstance = nullptr; }
+        } appGuard(&app);
 
         bool done = false;
         bool screenshotTaken = false;
@@ -4766,38 +5505,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             }
             g_swapChainOccluded = false;
 
-            if (g_resizeWidth != 0 && g_resizeHeight != 0) {
-                CleanupRenderTarget();
-                g_pSwapChain->ResizeBuffers(0, g_resizeWidth, g_resizeHeight, DXGI_FORMAT_UNKNOWN, 0);
-                g_resizeWidth = 0;
-                g_resizeHeight = 0;
-                CreateRenderTarget();
-            }
-
-            ImGui_ImplDX11_NewFrame();
-            ImGui_ImplWin32_NewFrame();
-            ImGui::NewFrame();
-
-            app.RenderFrame();
-
-            ImGui::Render();
-            const float clearColorWithAlpha[4] = {
-                clearColor.x, clearColor.y, clearColor.z, clearColor.w};
-            g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
-            g_pd3dDeviceContext->ClearRenderTargetView(g_mainRenderTargetView, clearColorWithAlpha);
-            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-
-            if (!screenshotPath.empty() && !screenshotTaken) {
-                const double elapsed = ImGui::GetTime();
-                if ((elapsed >= 1.8 && app.IsInitialScanSettled()) || elapsed >= 4.0) {
-                    SaveBackBufferToBmp(screenshotPath);
-                    screenshotTaken = true;
-                    done = true;
-                }
-            }
-
-            const HRESULT hr = g_pSwapChain->Present(1, 0);
-            g_swapChainOccluded = (hr == DXGI_STATUS_OCCLUDED);
+            RenderSingleFrame(&screenshotPath, &screenshotTaken, &done);
         }
     }
 
