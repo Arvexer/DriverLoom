@@ -837,86 +837,116 @@ bool RenderActionButton(const char* label, const ImVec2& size, bool primary) {
     return RenderSecondaryButton(label, size);
 }
 
-float CalcMetricChipWidth(const char* label, const char* valueStr) {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
-    const float padX = std::round(6.0f * uiScale);
-    const float gap = std::round(3.0f * uiScale);
-    const float labelW =
-        (label != nullptr && label[0] != '\0') ? ImGui::CalcTextSize(label).x : 0.0f;
-    float valueW = 0.0f;
-    if (valueStr != nullptr && valueStr[0] != '\0') {
-        PushFontSafe(g_fontSecondaryHeader);
-        valueW = ImGui::CalcTextSize(valueStr).x;
-        PopFontSafe(g_fontSecondaryHeader);
+struct SummaryBadgeSegment {
+    const char* label = nullptr;
+    const char* value = nullptr;
+    ImVec4 accentColor = ImVec4(0.46f, 0.74f, 0.98f, 1.00f);
+    bool tintLabel = false;
+};
+
+float CalcSummaryInfoBadgeWidth(const SummaryBadgeSegment* segments, size_t count) {
+    if (segments == nullptr || count == 0) {
+        return 0.0f;
     }
-    return padX * 2.0f + labelW + (labelW > 0.0f && valueW > 0.0f ? gap : 0.0f) + valueW;
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    const float padX = std::round(7.0f * uiScale);
+    const float gap = std::round(3.0f * uiScale);
+    const float sepPad = std::round(5.0f * uiScale);
+    const float sepTotal = sepPad * 2.0f + 1.0f;
+
+    float total = padX * 2.0f;
+    for (size_t i = 0; i < count; ++i) {
+        if (i > 0) {
+            total += sepTotal;
+        }
+        const SummaryBadgeSegment& seg = segments[i];
+        const float labelW =
+            (seg.label != nullptr && seg.label[0] != '\0') ? ImGui::CalcTextSize(seg.label).x : 0.0f;
+        float valueW = 0.0f;
+        if (seg.value != nullptr && seg.value[0] != '\0') {
+            PushFontSafe(g_fontSecondaryHeader);
+            valueW = ImGui::CalcTextSize(seg.value).x;
+            PopFontSafe(g_fontSecondaryHeader);
+        }
+        total += labelW + (labelW > 0.0f && valueW > 0.0f ? gap : 0.0f) + valueW;
+    }
+    return total;
 }
 
-bool RenderMetricChip(
-    const char* id,
-    const char* label,
-    const char* valueStr,
-    const ImVec4& accentColor,
-    bool active = false,
-    bool clickable = true) {
+void RenderSummaryInfoBadge(const SummaryBadgeSegment* segments, size_t count) {
+    if (segments == nullptr || count == 0) {
+        return;
+    }
     const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
-    const float padX = std::round(6.0f * uiScale);
+    const float padX = std::round(7.0f * uiScale);
     const float gap = std::round(3.0f * uiScale);
+    const float sepPad = std::round(5.0f * uiScale);
     const float frameH = ImGui::GetFrameHeight();
-    const float chipW = CalcMetricChipWidth(label, valueStr);
+    const float badgeW = CalcSummaryInfoBadgeWidth(segments, count);
 
     const ImVec2 pMin = ImGui::GetCursorScreenPos();
-    const ImVec2 pMax(pMin.x + chipW, pMin.y + frameH);
-    bool clicked = false;
-    bool hovered = false;
-    if (clickable) {
-        clicked = ImGui::InvisibleButton(id, ImVec2(chipW, frameH));
-        hovered = ImGui::IsItemHovered();
-    } else {
-        ImGui::Dummy(ImVec2(chipW, frameH));
-    }
+    const ImVec2 pMax(pMin.x + badgeW, pMin.y + frameH);
+    ImGui::Dummy(ImVec2(badgeW, frameH));
 
-    const float bgAlpha = active ? (g_isLightTheme ? 0.18f : 0.22f)
-                                 : (hovered ? (g_isLightTheme ? 0.15f : 0.18f)
-                                            : (g_isLightTheme ? 0.10f : 0.12f));
-    const float borderAlpha = active ? 0.72f : (hovered ? 0.56f : 0.38f);
-    const ImVec4 bgCol(accentColor.x, accentColor.y, accentColor.z, bgAlpha);
+    const ImVec4 bgCol =
+        g_isLightTheme ? ImVec4(0.92f, 0.95f, 0.99f, 1.00f) : ImVec4(0.09f, 0.14f, 0.23f, 0.96f);
     const ImVec4 borderCol =
-        g_isLightTheme
-            ? ImVec4(accentColor.x * 0.72f, accentColor.y * 0.72f, accentColor.z * 0.72f, borderAlpha)
-            : ImVec4(accentColor.x, accentColor.y, accentColor.z, borderAlpha);
-    const ImVec4 labelCol =
-        g_isLightTheme ? ImVec4(0.30f, 0.36f, 0.46f, 1.00f) : ImVec4(0.70f, 0.77f, 0.88f, 1.00f);
-    const ImVec4 valueCol =
-        g_isLightTheme
-            ? ImVec4(accentColor.x * 0.52f, accentColor.y * 0.52f, accentColor.z * 0.52f, 1.00f)
-            : accentColor;
+        g_isLightTheme ? ImVec4(0.62f, 0.72f, 0.86f, 0.90f) : ImVec4(0.24f, 0.37f, 0.56f, 0.78f);
+    const ImU32 sepCol =
+        g_isLightTheme ? IM_COL32(150, 170, 198, 170) : IM_COL32(72, 98, 134, 150);
+    const ImVec4 defaultLabelCol =
+        g_isLightTheme ? ImVec4(0.32f, 0.38f, 0.48f, 1.00f) : ImVec4(0.71f, 0.78f, 0.89f, 1.00f);
+    const ImVec4 tintedLabelCol =
+        g_isLightTheme ? ImVec4(0.55f, 0.34f, 0.02f, 1.00f) : ImVec4(0.96f, 0.82f, 0.50f, 1.00f);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
     const float rounding = std::round(6.0f * uiScale);
     dl->AddRectFilled(pMin, pMax, ImGui::ColorConvertFloat4ToU32(bgCol), rounding);
     dl->AddRect(pMin, pMax, ImGui::ColorConvertFloat4ToU32(borderCol), rounding, 0, 1.0f);
 
+    const float sepMarginY = std::round(5.0f * uiScale);
     float curX = pMin.x + padX;
-    if (label != nullptr && label[0] != '\0') {
-        const ImVec2 lblSize = ImGui::CalcTextSize(label);
-        dl->AddText(
-            ImVec2(curX, pMin.y + (frameH - lblSize.y) * 0.5f),
-            ImGui::ColorConvertFloat4ToU32(labelCol),
-            label);
-        curX += lblSize.x + gap;
-    }
-    if (valueStr != nullptr && valueStr[0] != '\0') {
-        PushFontSafe(g_fontSecondaryHeader);
-        const ImVec2 valSize = ImGui::CalcTextSize(valueStr);
-        dl->AddText(
-            ImVec2(curX, pMin.y + (frameH - valSize.y) * 0.5f),
-            ImGui::ColorConvertFloat4ToU32(valueCol),
-            valueStr);
-        PopFontSafe(g_fontSecondaryHeader);
-    }
+    for (size_t i = 0; i < count; ++i) {
+        if (i > 0) {
+            curX += sepPad;
+            dl->AddLine(
+                ImVec2(curX, pMin.y + sepMarginY),
+                ImVec2(curX, pMax.y - sepMarginY),
+                sepCol,
+                1.0f);
+            curX += 1.0f + sepPad;
+        }
 
-    return clicked;
+        const SummaryBadgeSegment& seg = segments[i];
+        const bool hasLabel = (seg.label != nullptr && seg.label[0] != '\0');
+        const bool hasValue = (seg.value != nullptr && seg.value[0] != '\0');
+        if (hasLabel) {
+            const ImVec2 lblSize = ImGui::CalcTextSize(seg.label);
+            const ImVec4& lblCol = seg.tintLabel ? tintedLabelCol : defaultLabelCol;
+            dl->AddText(
+                ImVec2(curX, pMin.y + (frameH - lblSize.y) * 0.5f),
+                ImGui::ColorConvertFloat4ToU32(lblCol),
+                seg.label);
+            curX += lblSize.x;
+            if (hasValue) {
+                curX += gap;
+            }
+        }
+        if (hasValue) {
+            const ImVec4 valCol =
+                g_isLightTheme
+                    ? ImVec4(seg.accentColor.x * 0.50f, seg.accentColor.y * 0.50f, seg.accentColor.z * 0.50f, 1.00f)
+                    : seg.accentColor;
+            PushFontSafe(g_fontSecondaryHeader);
+            const ImVec2 valSize = ImGui::CalcTextSize(seg.value);
+            dl->AddText(
+                ImVec2(curX, pMin.y + (frameH - valSize.y) * 0.5f),
+                ImGui::ColorConvertFloat4ToU32(valCol),
+                seg.value);
+            PopFontSafe(g_fontSecondaryHeader);
+            curX += valSize.x;
+        }
+    }
 }
 
 int CompareVersionOrString(const std::string& a, const std::string& b) {
@@ -2077,55 +2107,25 @@ private:
             std::snprintf(monStr, sizeof(monStr), "%zu", monitorDevicesCount_);
             std::snprintf(probStr, sizeof(probStr), "%zu", problemDevicesCount_);
 
-            const char* totLbl = hdm::Tr("Всего:", "Усього:", "Total:");
-            const char* monLbl = hdm::Tr("Мониторы:", "Монітори:", "Monitors:");
-            const char* probLbl = hdm::Tr("Проблемные:", "Проблемні:", "Issues:");
-
-            const float chipGap = std::round(4.0f * uiScale);
-            const float totW = CalcMetricChipWidth(totLbl, totStr);
-            const float monW = CalcMetricChipWidth(monLbl, monStr);
-            const float probW = CalcMetricChipWidth(probLbl, probStr);
-            const float summaryW = totW + monW + probW + chipGap * 2.0f;
-
-            const float lastItemEndLocalX = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
-            const float winRightX = ImGui::GetWindowContentRegionMax().x;
-            if (winRightX - summaryW > lastItemEndLocalX + 8.0f * uiScale) {
-                ImGui::SameLine(winRightX - summaryW);
-            }
-
-            if (RenderMetricChip(
-                    "##DevTotChip",
-                    totLbl,
-                    totStr,
-                    ImVec4(0.46f, 0.74f, 0.98f, 1.00f),
-                    deviceFilterMode_ == DeviceFilterMode::All)) {
-                deviceFilterMode_ = DeviceFilterMode::All;
-                deviceViewDirty_ = true;
-            }
-            ImGui::SameLine(0.0f, chipGap);
-            if (RenderMetricChip(
-                    "##DevMonChip",
-                    monLbl,
-                    monStr,
-                    ImVec4(0.26f, 0.82f, 0.92f, 1.00f),
-                    deviceFilterMode_ == DeviceFilterMode::Monitors)) {
-                deviceFilterMode_ = DeviceFilterMode::Monitors;
-                deviceViewDirty_ = true;
-            }
-            ImGui::SameLine(0.0f, chipGap);
             const ImVec4 probAccent =
                 (problemDevicesCount_ > 0)
                     ? ImVec4(0.98f, 0.72f, 0.16f, 1.00f)
                     : ImVec4(0.20f, 0.83f, 0.60f, 1.00f);
-            if (RenderMetricChip(
-                    "##DevProbChip",
-                    probLbl,
-                    probStr,
-                    probAccent,
-                    deviceFilterMode_ == DeviceFilterMode::ProblemOnly)) {
-                deviceFilterMode_ = DeviceFilterMode::ProblemOnly;
-                deviceViewDirty_ = true;
+            const SummaryBadgeSegment segments[3] = {
+                {hdm::Tr("Всего:", "Усього:", "Total:"), totStr, ImVec4(0.46f, 0.74f, 0.98f, 1.00f), false},
+                {hdm::Tr("Мониторы:", "Монітори:", "Monitors:"), monStr, ImVec4(0.26f, 0.82f, 0.92f, 1.00f), false},
+                {hdm::Tr("Проблемные:", "Проблемні:", "Issues:"), probStr, probAccent, problemDevicesCount_ > 0},
+            };
+
+            const float summaryW = CalcSummaryInfoBadgeWidth(segments, 3);
+            const float lastItemEndLocalX = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+            const float winRightX = ImGui::GetWindowContentRegionMax().x;
+            if (winRightX - summaryW > lastItemEndLocalX + 10.0f * uiScale) {
+                ImGui::SameLine(winRightX - summaryW);
+            } else {
+                ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), winRightX - summaryW));
             }
+            RenderSummaryInfoBadge(segments, 3);
         }
 
         // Row 2: Responsive full-width search bar
@@ -3788,53 +3788,25 @@ private:
             std::snprintf(actStr, sizeof(actStr), "%zu", driverStoreCache_.activeCount);
             std::snprintf(dupStr, sizeof(dupStr), "%zu", driverStoreCache_.duplicateCount);
 
-            const char* totLbl = hdm::Tr("Всего:", "Усього:", "Total:");
-            const char* actLblChip = hdm::Tr("Активных:", "Активних:", "Active:");
-            const char* dupLblChip = hdm::Tr("Дубликатов:", "Дублікатів:", "Duplicates:");
-
-            const float chipGap = std::round(5.0f * uiScale);
-            const float sumW = CalcMetricChipWidth(totLbl, totalSizeStr.c_str()) +
-                               CalcMetricChipWidth(actLblChip, actStr) +
-                               CalcMetricChipWidth(dupLblChip, dupStr) + chipGap * 2.0f;
-            const float winRight = ImGui::GetWindowContentRegionMax().x;
-            const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
-            if (winRight - sumW > lastEnd + 12.0f * uiScale) {
-                ImGui::SameLine(winRight - sumW);
-            }
-
-            if (RenderMetricChip(
-                    "##DsTotChip",
-                    totLbl,
-                    totalSizeStr.c_str(),
-                    ImVec4(0.46f, 0.74f, 0.98f, 1.00f),
-                    storeFilterMode_ == DriverStoreFilterMode::All)) {
-                storeFilterMode_ = DriverStoreFilterMode::All;
-                storeViewDirty_ = true;
-            }
-            ImGui::SameLine(0.0f, chipGap);
-            if (RenderMetricChip(
-                    "##DsActChip",
-                    actLblChip,
-                    actStr,
-                    ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
-                    storeFilterMode_ == DriverStoreFilterMode::ActiveOnly)) {
-                storeFilterMode_ = DriverStoreFilterMode::ActiveOnly;
-                storeViewDirty_ = true;
-            }
-            ImGui::SameLine(0.0f, chipGap);
             const ImVec4 dupAccent =
                 (driverStoreCache_.duplicateCount > 0)
                     ? ImVec4(0.98f, 0.72f, 0.16f, 1.00f)
                     : ImVec4(0.20f, 0.83f, 0.60f, 1.00f);
-            if (RenderMetricChip(
-                    "##DsDupChip",
-                    dupLblChip,
-                    dupStr,
-                    dupAccent,
-                    storeFilterMode_ == DriverStoreFilterMode::OldDuplicates)) {
-                storeFilterMode_ = DriverStoreFilterMode::OldDuplicates;
-                storeViewDirty_ = true;
+            const SummaryBadgeSegment segments[3] = {
+                {hdm::Tr("Всего:", "Усього:", "Total:"), totalSizeStr.c_str(), ImVec4(0.46f, 0.74f, 0.98f, 1.00f), false},
+                {hdm::Tr("Активных:", "Активних:", "Active:"), actStr, ImVec4(0.20f, 0.83f, 0.60f, 1.00f), false},
+                {hdm::Tr("Дубликатов:", "Дублікатів:", "Duplicates:"), dupStr, dupAccent, driverStoreCache_.duplicateCount > 0},
+            };
+
+            const float sumW = CalcSummaryInfoBadgeWidth(segments, 3);
+            const float winRight = ImGui::GetWindowContentRegionMax().x;
+            const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+            if (winRight - sumW > lastEnd + 10.0f * uiScale) {
+                ImGui::SameLine(winRight - sumW);
+            } else {
+                ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), winRight - sumW));
             }
+            RenderSummaryInfoBadge(segments, 3);
         }
 
         // Row 2: Filter pills + checkboxes
@@ -4215,18 +4187,25 @@ private:
         {
             char infValStr[32];
             std::snprintf(infValStr, sizeof(infValStr), "%zu", infFiles.size());
-            const char* infLbl = hdm::Tr("Найдено .inf:", "Знайдено .inf:", "Found .inf:");
-            const float countW = CalcMetricChipWidth(infLbl, infValStr);
-            const float winRight = ImGui::GetWindowContentRegionMax().x;
-            const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
-            if (winRight - countW > lastEnd + 12.0f * uiScale) {
-                ImGui::SameLine(winRight - countW);
-            }
             const ImVec4 infAccent =
                 infFiles.empty()
                     ? ImVec4(0.58f, 0.68f, 0.86f, 1.00f)
                     : ImVec4(0.46f, 0.74f, 0.98f, 1.00f);
-            RenderMetricChip("##InfCntChip", infLbl, infValStr, infAccent, false, false);
+            const SummaryBadgeSegment segment = {
+                hdm::Tr("Найдено .inf:", "Знайдено .inf:", "Found .inf:"),
+                infValStr,
+                infAccent,
+                false,
+            };
+            const float countW = CalcSummaryInfoBadgeWidth(&segment, 1);
+            const float winRight = ImGui::GetWindowContentRegionMax().x;
+            const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+            if (winRight - countW > lastEnd + 10.0f * uiScale) {
+                ImGui::SameLine(winRight - countW);
+            } else {
+                ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), winRight - countW));
+            }
+            RenderSummaryInfoBadge(&segment, 1);
         }
 
         if (localInstaller_.IsInstalling()) {
