@@ -1822,6 +1822,7 @@ private:
                 }
                 wuShowHidden_ = false;
                 wuRestoreBefore_ = true;
+                compRestoreBefore_ = true;
             }
             SaveUserPreferences();
             logBuffer_.Push(
@@ -2041,6 +2042,22 @@ private:
             }
         }
         return nullptr;
+    }
+
+    static bool IsOemInfName(const std::string& infName) {
+        return hdm::ContainsCaseInsensitive(infName, "oem") &&
+               hdm::ContainsCaseInsensitive(infName, ".inf");
+    }
+
+    void JumpToDriverStorePackage(const std::string& infName) {
+        if (infName.empty()) {
+            return;
+        }
+        pendingInitialTab_ = 3;
+        localSectionIndex_ = 1;
+        storeFilterMode_ = DriverStoreFilterMode::All;
+        std::snprintf(storeFilterBuf_, sizeof(storeFilterBuf_), "%s", infName.c_str());
+        storeViewDirty_ = true;
     }
 
     void HandleKeyboardShortcuts() {
@@ -2539,6 +2556,16 @@ private:
                                         "Open Windows Device Manager"))) {
                                 ShellExecuteW(nullptr, L"open", L"devmgmt.msc", nullptr, nullptr, SW_SHOWNORMAL);
                             }
+                            if (ImGui::MenuItem(
+                                    hdm::Tr(
+                                        "Показать пакет в DriverStore (oem*.inf)",
+                                        "Показати пакет у DriverStore (oem*.inf)",
+                                        "Show package in DriverStore (oem*.inf)"),
+                                    nullptr,
+                                    false,
+                                    IsOemInfName(dev.infName))) {
+                                JumpToDriverStorePackage(dev.infName);
+                            }
                             ImGui::Separator();
 
                             if (ImGui::MenuItem(
@@ -2837,6 +2864,24 @@ private:
                             selectedDev->instanceId);
                 }
                 ImGui::EndDisabled();
+
+                if (IsOemInfName(selectedDev->infName)) {
+                    ImGui::SameLine();
+                    if (RenderSecondaryButton(hdm::Tr(
+                            "В DriverStore###DevGoStore",
+                            "У DriverStore###DevGoStore",
+                            "In DriverStore###DevGoStore"))) {
+                        JumpToDriverStorePackage(selectedDev->infName);
+                    }
+                    if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                        ImGui::SetTooltip(
+                            hdm::Tr(
+                                "Перейти к пакету %s во вкладке DriverStore для бэкапа или удаления",
+                                "Перейти до пакета %s у вкладці DriverStore для бекапу або видалення",
+                                "Jump to package %s in DriverStore tab for backup or removal"),
+                            selectedDev->infName.c_str());
+                    }
+                }
             } else {
                 ImGui::SameLine();
                 if (RenderSecondaryButton(hdm::Tr(
@@ -2950,6 +2995,9 @@ private:
     void RenderComponentsTab() {
         const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
         const ImGuiStyle& compStyle = ImGui::GetStyle();
+        if (!g_isAdvancedMode) {
+            compRestoreBefore_ = true;
+        }
         const bool busy =
             componentsScanner_.IsScanning() ||
             componentsScanner_.IsCheckingOnline() ||
@@ -3010,7 +3058,7 @@ private:
         ImGui::BeginDisabled(busy || batchTargets.empty());
         if (RenderActionButton(batchLbl, ImVec2(0.0f, 0.0f), selectedTargets.empty())) {
             componentsScanner_.DownloadAndInstallBatchAsync(
-                std::move(batchTargets), devicesCache_, MakeLogger());
+                std::move(batchTargets), devicesCache_, MakeLogger(), compRestoreBefore_);
         }
         ImGui::EndDisabled();
 
@@ -3041,7 +3089,7 @@ private:
         ImGui::BeginDisabled(busy || selectedTargets.empty());
         if (RenderActionButton(selBatchLbl, ImVec2(0.0f, 0.0f), !selectedTargets.empty())) {
             componentsScanner_.DownloadAndInstallBatchAsync(
-                std::move(selectedTargets), devicesCache_, MakeLogger());
+                std::move(selectedTargets), devicesCache_, MakeLogger(), compRestoreBefore_);
         }
         ImGui::EndDisabled();
 
@@ -3124,6 +3172,34 @@ private:
                              compFilterMode_ == ComponentFilterMode::MonitorsAndGpu)) {
             compFilterMode_ = ComponentFilterMode::MonitorsAndGpu;
             compViewDirty_ = true;
+        }
+        SameLineWrapIfNeeded(
+            CalcButtonWidth(hdm::Tr(
+                "Точка восстановления перед обновлением",
+                "Точка відновлення перед оновленням",
+                "Restore point before update")) +
+            32.0f * uiScale);
+        ImGui::BeginDisabled(!g_isAdvancedMode);
+        ImGui::Checkbox(
+            hdm::Tr(
+                "Точка восстановления перед обновлением###CompRpCb",
+                "Точка відновлення перед оновленням###CompRpCb",
+                "Restore point before update###CompRpCb"),
+            &compRestoreBefore_);
+        ImGui::EndDisabled();
+        if (GetForegroundWindow() == hwnd_ &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "%s",
+                g_isAdvancedMode
+                    ? hdm::Tr(
+                          "Автоматически создать точку восстановления Windows перед пакетным обновлением компонентов.",
+                          "Автоматично створити точку відновлення Windows перед пакетним оновленням компонентів.",
+                          "Automatically create a Windows restore point before batch updating components.")
+                    : hdm::Tr(
+                          "В обычном режиме точка восстановления перед пакетным обновлением всегда создаётся автоматически.",
+                          "У звичайному режимі точка відновлення перед пакетним оновленням завжди створюється автоматично.",
+                          "In Standard mode, a restore point is always created automatically before batch updates."));
         }
 
         if (componentsScanner_.IsInstalling()) {
@@ -3858,6 +3934,18 @@ private:
             if (storeFilterMode_ == DriverStoreFilterMode::UnusedOnly && pkg.inUse) {
                 continue;
             }
+            if (storeFilterBuf_[0] != '\0') {
+                const bool matched =
+                    hdm::ContainsCaseInsensitive(pkg.oemInfName, storeFilterBuf_) ||
+                    hdm::ContainsCaseInsensitive(pkg.originalInfName, storeFilterBuf_) ||
+                    hdm::ContainsCaseInsensitive(pkg.activeDeviceName, storeFilterBuf_) ||
+                    hdm::ContainsCaseInsensitive(pkg.provider, storeFilterBuf_) ||
+                    hdm::ContainsCaseInsensitive(pkg.className, storeFilterBuf_) ||
+                    hdm::ContainsCaseInsensitive(pkg.driverVersion, storeFilterBuf_);
+                if (!matched) {
+                    continue;
+                }
+            }
             visibleStoreIndices_.push_back(i);
         }
 
@@ -4121,6 +4209,35 @@ private:
         }
         SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Точка восстановления", "Точка відновлення", "Restore point")) + 32.0f * uiScale);
         ImGui::Checkbox(hdm::Tr("Точка восстановления###DsRp", "Точка відновлення###DsRp", "Restore point###DsRp"), &storeRestoreBefore_);
+
+        {
+            const bool hasStoreFilter = (storeFilterBuf_[0] != '\0');
+            const char* clrTxt = hdm::Tr("Сброс", "Скинути", "Clear");
+            const float clrW = hasStoreFilter ? (CalcButtonWidth(clrTxt) + 8.0f * uiScale) : 0.0f;
+            const float searchW = std::max(
+                180.0f,
+                ImGui::GetContentRegionAvail().x - (hasStoreFilter ? (clrW + style.ItemSpacing.x) : 0.0f));
+            ImGui::SetNextItemWidth(searchW);
+            if (ImGui::InputTextWithHint(
+                    "##DriverStoreSearch",
+                    hdm::Tr(
+                        "Поиск по oem*.inf, оригинальному .inf, устройству, поставщику, классу или версии...",
+                        "Пошук за oem*.inf, оригінальним .inf, пристроєм, виробником, класом або версією...",
+                        "Search by oem*.inf, original .inf, device, vendor, class, or version..."),
+                    storeFilterBuf_,
+                    sizeof(storeFilterBuf_))) {
+                storeViewDirty_ = true;
+            }
+            if (hasStoreFilter) {
+                ImGui::SameLine();
+                if (RenderSecondaryButton(
+                        hdm::Tr("Сброс###DsClrSearch", "Скинути###DsClrSearch", "Clear###DsClrSearch"),
+                        ImVec2(clrW, 0.0f))) {
+                    storeFilterBuf_[0] = '\0';
+                    storeViewDirty_ = true;
+                }
+            }
+        }
 
         if (localInstaller_.IsExportingBackup() || localInstaller_.IsRemovingStorePackages()) {
             const float prog = localInstaller_.Progress();
@@ -5675,6 +5792,7 @@ private:
     std::unordered_set<std::string> selectedComponentIds_;
     uint64_t lastComponentsGen_{0};
     ComponentFilterMode compFilterMode_{ComponentFilterMode::All};
+    bool compRestoreBefore_{true};
     bool compViewDirty_{true};
 
     // WU UI state
@@ -5693,6 +5811,7 @@ private:
     bool localRestoreBefore_{true};
     bool backupSkipDuplicates_{true};
     bool storeRestoreBefore_{true};
+    char storeFilterBuf_[256]{};
     hdm::DriverStoreSnapshot driverStoreCache_;
     std::vector<size_t> visibleStoreIndices_;
     uint64_t lastDriverStoreGen_{0};

@@ -75,7 +75,8 @@ public:
     void DownloadAndInstallBatchAsync(
         std::vector<SystemComponentItem> itemsToInstall,
         std::vector<DeviceInfo> devicesSnapshot,
-        LogCallback onLog);
+        LogCallback onLog,
+        bool createRestorePointBefore = true);
 
     // Queries Microsoft Update Catalog by hardware search key (VEN_xxxx&DEV_xxxx / VID_xxxx&PID_xxxx),
     // downloads the latest WHQL .cab package, verifies Authenticode signature via WinVerifyTrust,

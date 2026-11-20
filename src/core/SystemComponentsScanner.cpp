@@ -1,5 +1,6 @@
 #include "core/SystemComponentsScanner.hpp"
 #include "core/LocalDriverInstaller.hpp"
+#include "core/SystemRestore.hpp"
 
 #include <oleauto.h>
 #include <setupapi.h>
@@ -2409,7 +2410,8 @@ void SystemComponentsScanner::DownloadAndInstallAsync(
 void SystemComponentsScanner::DownloadAndInstallBatchAsync(
     std::vector<SystemComponentItem> itemsToInstall,
     std::vector<DeviceInfo> devicesSnapshot,
-    LogCallback onLog) {
+    LogCallback onLog,
+    bool createRestorePointBefore) {
     if (installing_.exchange(true)) {
         if (onLog) {
             onLog(LogLevel::Warning, "Установка компонентов уже выполняется.");
@@ -2431,7 +2433,8 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
     installThread_ = std::thread([this,
                                   list = std::move(itemsToInstall),
                                   devs = std::move(devicesSnapshot),
-                                  log = std::move(onLog)]() {
+                                  log = std::move(onLog),
+                                  createRestorePointBefore]() {
         const size_t total = list.size();
         size_t okCount = 0;
 
@@ -2441,7 +2444,39 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
                     std::to_string(total) + " шт.)...");
         }
 
-        const float span = 1.0f / static_cast<float>(total);
+        if (createRestorePointBefore && !cancelInstallRequested_.load()) {
+            SetPhaseMessage("Создание точки восстановления...");
+            progress_.store(0.03f);
+            constexpr const char* kRpDesc =
+                "DriverLoom (перед пакетным обновлением компонентов)";
+            if (IsProcessElevated()) {
+                SystemRestore::CreateRestorePointSync(kRpDesc, log);
+            } else {
+                if (log) {
+                    log(LogLevel::Info,
+                        "Запрос прав администратора (UAC) для создания точки восстановления...");
+                }
+                const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_sr_comp");
+                const std::wstring args =
+                    L"--cli-restore-point \"" + Utf8ToWide(kRpDesc) +
+                    L"\" --log \"" + tempLog.wstring() + L"\"";
+                const ElevatedRunResult run = ExecuteElevatedSelf(args, true, &tempLog, log);
+                std::error_code ec;
+                std::filesystem::remove(tempLog, ec);
+                if (!run.launched && log) {
+                    log(LogLevel::Warning,
+                        run.launchError == ERROR_CANCELLED
+                            ? "Пользователь отменил UAC при создании точки восстановления — продолжается обновление компонентов."
+                            : ("Не удалось создать точку восстановления: " +
+                               FormatWin32Error(run.launchError)));
+                }
+            }
+            SetPhaseMessage("Пакетное обновление компонентов...");
+        }
+
+        const float baseProg = createRestorePointBefore ? 0.08f : 0.0f;
+        progress_.store(baseProg);
+        const float span = (1.0f - baseProg) / static_cast<float>(total);
         for (size_t i = 0; i < total; ++i) {
             if (cancelInstallRequested_.load()) {
                 if (log) {
@@ -2454,7 +2489,8 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
                     "[" + std::to_string(i + 1) + "/" + std::to_string(total) +
                         "] Пакетная установка: " + list[i].name);
             }
-            if (InstallSingleComponentSync(list[i], static_cast<float>(i) * span, span, devs, log)) {
+            if (InstallSingleComponentSync(
+                    list[i], baseProg + static_cast<float>(i) * span, span, devs, log)) {
                 ++okCount;
             }
         }
