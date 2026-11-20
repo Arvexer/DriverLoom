@@ -25,6 +25,8 @@
 #include <utility>
 #include <vector>
 
+#include "common/Localization.hpp"
+
 namespace hdm {
 
 inline std::wstring Utf8ToWide(std::string_view utf8) {
@@ -125,14 +127,19 @@ inline std::string FormatBytes(uint64_t bytes) {
     constexpr double kKB = 1024.0;
     constexpr double kMB = 1024.0 * 1024.0;
     constexpr double kGB = 1024.0 * 1024.0 * 1024.0;
+    const bool en = (GetLang() == Lang::En);
     if (bytes >= static_cast<uint64_t>(kGB)) {
-        std::snprintf(buf, sizeof(buf), "%.2f ГБ", static_cast<double>(bytes) / kGB);
+        std::snprintf(buf, sizeof(buf), en ? "%.2f GB" : "%.2f ГБ", static_cast<double>(bytes) / kGB);
     } else if (bytes >= static_cast<uint64_t>(kMB)) {
-        std::snprintf(buf, sizeof(buf), "%.1f МБ", static_cast<double>(bytes) / kMB);
+        std::snprintf(buf, sizeof(buf), en ? "%.1f MB" : "%.1f МБ", static_cast<double>(bytes) / kMB);
     } else if (bytes >= static_cast<uint64_t>(kKB)) {
-        std::snprintf(buf, sizeof(buf), "%.0f КБ", static_cast<double>(bytes) / kKB);
+        std::snprintf(buf, sizeof(buf), en ? "%.0f KB" : "%.0f КБ", static_cast<double>(bytes) / kKB);
     } else {
-        std::snprintf(buf, sizeof(buf), "%llu Б", static_cast<unsigned long long>(bytes));
+        std::snprintf(
+            buf,
+            sizeof(buf),
+            en ? "%llu B" : "%llu Б",
+            static_cast<unsigned long long>(bytes));
     }
     return buf;
 }

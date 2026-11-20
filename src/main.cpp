@@ -840,8 +840,13 @@ public:
           pendingInitialTab_(initialTab) {
         logBuffer_.Push(
             hdm::LogLevel::Info,
-            std::string("DriverLoom запущен. Режим прав: ") +
-                (isElevated_ ? "Администратор" : "Обычный (UAC по запросу)"));
+            std::string(hdm::Tr(
+                "DriverLoom запущен. Режим прав: ",
+                "DriverLoom запущено. Режим прав: ",
+                "DriverLoom started. Privilege mode: ")) +
+                (isElevated_
+                     ? hdm::Tr("Администратор", "Адміністратор", "Administrator")
+                     : hdm::Tr("Обычный (UAC по запросу)", "Звичайний (UAC за запитом)", "Standard (UAC on demand)")));
         scanner_.StartScanAsync(MakeLogger());
     }
 
@@ -889,35 +894,59 @@ public:
                            : ImGuiTabItemFlags_None;
             };
 
-            if (ImGui::BeginTabItem("  Устройства и мониторы  ", nullptr, tabFlag(0))) {
+            if (ImGui::BeginTabItem(
+                    hdm::Tr(
+                        "  Устройства и мониторы  ###Tab0",
+                        "  Пристрої та монітори  ###Tab0",
+                        "  Devices & Monitors  ###Tab0"),
+                    nullptr,
+                    tabFlag(0))) {
                 activeTabIndex_ = 0;
                 beginTabCard("##TabCardDevices");
                 RenderDevicesTab();
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("  Компоненты и периферия  ", nullptr, tabFlag(1))) {
+            if (ImGui::BeginTabItem(
+                    hdm::Tr(
+                        "  Компоненты и периферия  ###Tab1",
+                        "  Компоненти та периферія  ###Tab1",
+                        "  Components & Peripherals  ###Tab1"),
+                    nullptr,
+                    tabFlag(1))) {
                 activeTabIndex_ = 1;
                 beginTabCard("##TabCardComponents");
                 RenderComponentsTab();
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("  Windows Update  ", nullptr, tabFlag(2))) {
+            if (ImGui::BeginTabItem("  Windows Update  ###Tab2", nullptr, tabFlag(2))) {
                 activeTabIndex_ = 2;
                 beginTabCard("##TabCardWu");
                 RenderWindowsUpdateTab();
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("  Локальные (.inf)  ", nullptr, tabFlag(3))) {
+            if (ImGui::BeginTabItem(
+                    hdm::Tr(
+                        "  Локальные (.inf)  ###Tab3",
+                        "  Локальні (.inf)  ###Tab3",
+                        "  Local (.inf)  ###Tab3"),
+                    nullptr,
+                    tabFlag(3))) {
                 activeTabIndex_ = 3;
                 beginTabCard("##TabCardLocal");
                 RenderLocalInstallerTab();
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("  Система и диагностика  ", nullptr, tabFlag(4))) {
+            if (ImGui::BeginTabItem(
+                    hdm::Tr(
+                        "  Система и диагностика  ###Tab4",
+                        "  Система та діагностика  ###Tab4",
+                        "  System & Diagnostics  ###Tab4"),
+                    nullptr,
+                    tabFlag(4))) {
                 activeTabIndex_ = 4;
                 beginTabCard("##TabCardDiag");
                 RenderDiagnosticsTab();
@@ -1065,41 +1094,86 @@ private:
         if (isElevated_) {
             RenderStatusBadge(
                 ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
-                "Администратор",
+                hdm::Tr("Администратор", "Адміністратор", "Administrator"),
                 true);
         } else {
             RenderStatusBadge(
                 ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
-                "Обычный режим",
+                hdm::Tr("Обычный режим", "Звичайний режим", "Standard mode"),
                 true);
             ImGui::SameLine(0.0f, 10.0f);
-            if (RenderSecondaryButton("Перезапустить как администратор")) {
+            if (RenderSecondaryButton(hdm::Tr(
+                    "Перезапустить как администратор###ElevBtn",
+                    "Перезапустити як адміністратор###ElevBtn",
+                    "Restart as Administrator###ElevBtn"))) {
                 const hdm::ElevatedRunResult run = hdm::ExecuteElevatedSelf(L"", false);
                 if (run.launched) {
                     exitRequested_ = true;
                 } else if (run.launchError != ERROR_CANCELLED) {
                     logBuffer_.Push(
                         hdm::LogLevel::Error,
-                        "Не удалось повысить права: " + hdm::FormatWin32Error(run.launchError));
+                        std::string(hdm::Tr(
+                            "Не удалось повысить права: ",
+                            "Не вдалося підвищити права: ",
+                            "Failed to elevate privileges: ")) +
+                            hdm::FormatWin32Error(run.launchError));
                 }
             }
         }
 
         const char* srLabel = systemRestore_.IsBusy()
-                                  ? "Создание точки восстановления..."
-                                  : "Точка восстановления";
-        const float btnWidth = CalcButtonWidth(srLabel) + 6.0f * uiScale;
-        const float rightX = ImGui::GetWindowContentRegionMax().x - btnWidth;
+                                  ? hdm::Tr(
+                                        "Создание точки восстановления...###SrBtn",
+                                        "Створення точки відновлення...###SrBtn",
+                                        "Creating restore point...###SrBtn")
+                                  : hdm::Tr(
+                                        "Точка восстановления###SrBtn",
+                                        "Точка відновлення###SrBtn",
+                                        "Restore Point###SrBtn");
+        const char* srMeasure = systemRestore_.IsBusy()
+                                    ? hdm::Tr(
+                                          "Создание точки восстановления...",
+                                          "Створення точки відновлення...",
+                                          "Creating restore point...")
+                                    : hdm::Tr(
+                                          "Точка восстановления",
+                                          "Точка відновлення",
+                                          "Restore Point");
+        const float btnWidth = CalcButtonWidth(srMeasure) + 6.0f * uiScale;
+        const float langRuW = CalcButtonWidth("RU");
+        const float langUaW = CalcButtonWidth("UA");
+        const float langEnW = CalcButtonWidth("EN");
+        const float langGroupGap = std::round(4.0f * uiScale);
+        const float langGroupW = langRuW + langUaW + langEnW + langGroupGap * 2.0f;
+        const float rightGroupW = langGroupW + std::round(10.0f * uiScale) + btnWidth;
+        const float rightX = ImGui::GetWindowContentRegionMax().x - rightGroupW;
         if (rightX > ImGui::GetCursorPosX() + 12.0f) {
             ImGui::SameLine(rightX);
         } else {
             ImGui::SameLine();
         }
 
+        const hdm::Lang curLang = hdm::GetLang();
+        if (RenderPillButton("RU", curLang == hdm::Lang::Ru)) {
+            hdm::SetLang(hdm::Lang::Ru);
+        }
+        ImGui::SameLine(0.0f, langGroupGap);
+        if (RenderPillButton("UA", curLang == hdm::Lang::Uk)) {
+            hdm::SetLang(hdm::Lang::Uk);
+        }
+        ImGui::SameLine(0.0f, langGroupGap);
+        if (RenderPillButton("EN", curLang == hdm::Lang::En)) {
+            hdm::SetLang(hdm::Lang::En);
+        }
+
+        ImGui::SameLine(0.0f, std::round(10.0f * uiScale));
         ImGui::BeginDisabled(systemRestore_.IsBusy());
         if (RenderSecondaryButton(srLabel, ImVec2(btnWidth, 0.0f))) {
             systemRestore_.CreateRestorePointAsync(
-                "DriverLoom (ручная точка восстановления)",
+                hdm::Tr(
+                    "DriverLoom (ручная точка восстановления)",
+                    "DriverLoom (ручна точка відновлення)",
+                    "DriverLoom (manual restore point)"),
                 MakeLogger(),
                 [this](bool ok, const std::string&) {
                     if (ok && !diagnostics_.IsBusy()) {
@@ -1128,10 +1202,13 @@ private:
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         RenderStatusBadge(
             ImVec4(1.00f, 0.87f, 0.45f, 1.00f),
-            "Требуется перезагрузка Windows для завершения установки драйверов.",
+            hdm::Tr(
+                "Требуется перезагрузка Windows для завершения установки драйверов.",
+                "Потрібне перезавантаження Windows для завершення встановлення драйверів.",
+                "Windows restart is required to finish driver installation."),
             true);
-        const char* hideLabel = "Скрыть";
-        const float hideW = CalcButtonWidth(hideLabel);
+        const char* hideLabel = hdm::Tr("Скрыть###RebHide", "Приховати###RebHide", "Dismiss###RebHide");
+        const float hideW = CalcButtonWidth(hdm::Tr("Скрыть", "Приховати", "Dismiss"));
         ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 12.0f,
                                  ImGui::GetWindowContentRegionMax().x - hideW));
         if (RenderSecondaryButton(hideLabel, ImVec2(hideW, 0.0f))) {
@@ -1297,7 +1374,11 @@ private:
                         ImGui::SetClipboardText(sel->hardwareId.c_str());
                         logBuffer_.Push(
                             hdm::LogLevel::Info,
-                            "Скопирован Hardware ID (Ctrl+C): " + sel->hardwareId);
+                            std::string(hdm::Tr(
+                                "Скопирован Hardware ID (Ctrl+C): ",
+                                "Скопійовано Hardware ID (Ctrl+C): ",
+                                "Copied Hardware ID (Ctrl+C): ")) +
+                                sel->hardwareId);
                     }
                 }
             } else if (activeTabIndex_ == 2) {
@@ -1308,7 +1389,11 @@ private:
                         ImGui::SetClipboardText(wu.title.c_str());
                         logBuffer_.Push(
                             hdm::LogLevel::Info,
-                            "Скопировано название обновления (Ctrl+C): " + wu.title);
+                            std::string(hdm::Tr(
+                                "Скопировано название обновления (Ctrl+C): ",
+                                "Скопійовано назву оновлення (Ctrl+C): ",
+                                "Copied update title (Ctrl+C): ")) +
+                                wu.title);
                     }
                 }
             }
@@ -1332,19 +1417,28 @@ private:
         const bool catalogBusy = componentsScanner_.IsInstalling();
         const bool devBusy = scanner_.IsBusy() || catalogBusy;
         ImGui::BeginDisabled(devBusy);
-        if (ImGui::Button(scanning ? "Сканирование..."
-                                   : (devBusy ? "Выполнение..." : "Сканировать"))) {
+        const char* devScanLbl =
+            scanning
+                ? hdm::Tr("Сканирование...###DevScan", "Сканування...###DevScan", "Scanning...###DevScan")
+                : (devBusy
+                       ? hdm::Tr("Выполнение...###DevScan", "Виконання...###DevScan", "Working...###DevScan")
+                       : hdm::Tr("Сканировать###DevScan", "Сканувати###DevScan", "Scan###DevScan"));
+        if (ImGui::Button(devScanLbl)) {
             scanner_.StartScanAsync(MakeLogger());
         }
         ImGui::EndDisabled();
 
-        SameLineWrapIfNeeded(CalcButtonWidth("Обновить PnP"));
+        const char* pnpTxt = hdm::Tr("Обновить PnP", "Оновити PnP", "Rescan PnP");
+        SameLineWrapIfNeeded(CalcButtonWidth(pnpTxt));
         ImGui::BeginDisabled(devBusy);
-        if (RenderSecondaryButton("Обновить PnP")) {
+        if (RenderSecondaryButton(hdm::Tr(
+                "Обновить PnP###DevPnp",
+                "Оновити PnP###DevPnp",
+                "Rescan PnP###DevPnp"))) {
             scanner_.RunDeviceActionAsync(
                 hdm::DeviceAction::Reenumerate,
                 {},
-                "Шина PnP",
+                hdm::Tr("Шина PnP", "Шина PnP", "PnP Bus"),
                 MakeLogger(),
                 [this](bool, bool rebootReq) {
                     if (rebootReq) {
@@ -1355,32 +1449,47 @@ private:
         if (isAppForeground &&
             ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(
-                "Повторный опрос шины PnP (CM_Reenumerate_DevNode) для поиска подключённых или удалённых устройств.");
+                "%s",
+                hdm::Tr(
+                    "Повторный опрос шины PnP (CM_Reenumerate_DevNode) для поиска подключённых или удалённых устройств.",
+                    "Повторне опитування шини PnP (CM_Reenumerate_DevNode) для пошуку підключених або видалених пристроїв.",
+                    "Rescan the PnP bus (CM_Reenumerate_DevNode) to detect connected or removed hardware."));
         }
         ImGui::EndDisabled();
 
-        SameLineWrapIfNeeded(CalcButtonWidth("Все"));
-        if (RenderPillButton("Все", deviceFilterMode_ == DeviceFilterMode::All)) {
+        const char* fAllTxt = hdm::Tr("Все", "Усі", "All");
+        const char* fProbTxt = hdm::Tr("Проблемные", "Проблемні", "Issues");
+        const char* fMonTxt = hdm::Tr("Мониторы", "Монітори", "Monitors");
+        const char* fPerTxt = hdm::Tr("Периферия", "Периферія", "Peripherals");
+        const char* fGpuTxt = hdm::Tr("Видео и чипсет", "Відео та чипсет", "GPU & Chipset");
+
+        SameLineWrapIfNeeded(CalcButtonWidth(fAllTxt));
+        if (RenderPillButton(hdm::Tr("Все###DfAll", "Усі###DfAll", "All###DfAll"),
+                             deviceFilterMode_ == DeviceFilterMode::All)) {
             deviceFilterMode_ = DeviceFilterMode::All;
             deviceViewDirty_ = true;
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Проблемные"));
-        if (RenderPillButton("Проблемные", deviceFilterMode_ == DeviceFilterMode::ProblemOnly)) {
+        SameLineWrapIfNeeded(CalcButtonWidth(fProbTxt));
+        if (RenderPillButton(hdm::Tr("Проблемные###DfProb", "Проблемні###DfProb", "Issues###DfProb"),
+                             deviceFilterMode_ == DeviceFilterMode::ProblemOnly)) {
             deviceFilterMode_ = DeviceFilterMode::ProblemOnly;
             deviceViewDirty_ = true;
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Мониторы"));
-        if (RenderPillButton("Мониторы", deviceFilterMode_ == DeviceFilterMode::Monitors)) {
+        SameLineWrapIfNeeded(CalcButtonWidth(fMonTxt));
+        if (RenderPillButton(hdm::Tr("Мониторы###DfMon", "Монітори###DfMon", "Monitors###DfMon"),
+                             deviceFilterMode_ == DeviceFilterMode::Monitors)) {
             deviceFilterMode_ = DeviceFilterMode::Monitors;
             deviceViewDirty_ = true;
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Периферия"));
-        if (RenderPillButton("Периферия", deviceFilterMode_ == DeviceFilterMode::Peripherals)) {
+        SameLineWrapIfNeeded(CalcButtonWidth(fPerTxt));
+        if (RenderPillButton(hdm::Tr("Периферия###DfPer", "Периферія###DfPer", "Peripherals###DfPer"),
+                             deviceFilterMode_ == DeviceFilterMode::Peripherals)) {
             deviceFilterMode_ = DeviceFilterMode::Peripherals;
             deviceViewDirty_ = true;
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Видео и чипсет"));
-        if (RenderPillButton("Видео и чипсет", deviceFilterMode_ == DeviceFilterMode::DisplayAndChipset)) {
+        SameLineWrapIfNeeded(CalcButtonWidth(fGpuTxt));
+        if (RenderPillButton(hdm::Tr("Видео и чипсет###DfGpu", "Відео та чипсет###DfGpu", "GPU & Chipset###DfGpu"),
+                             deviceFilterMode_ == DeviceFilterMode::DisplayAndChipset)) {
             deviceFilterMode_ = DeviceFilterMode::DisplayAndChipset;
             deviceViewDirty_ = true;
         }
@@ -1389,7 +1498,10 @@ private:
         std::snprintf(
             summaryBuf,
             sizeof(summaryBuf),
-            "Всего: %zu | Мониторы: %zu | Проблемные: %zu",
+            hdm::Tr(
+                "Всего: %zu | Мониторы: %zu | Проблемные: %zu",
+                "Усього: %zu | Монітори: %zu | Проблемні: %zu",
+                "Total: %zu | Monitors: %zu | Issues: %zu"),
             totalDevicesCount_,
             monitorDevicesCount_,
             problemDevicesCount_);
@@ -1412,7 +1524,10 @@ private:
         }
         if (ImGui::InputTextWithHint(
                 "##DeviceSearch",
-                "Поиск по названию, модели монитора (EDID), бренду, версии или Hardware ID... (Ctrl+F)",
+                hdm::Tr(
+                    "Поиск по названию, модели монитора (EDID), бренду, версии или Hardware ID... (Ctrl+F)",
+                    "Пошук за назвою, моделлю монітора (EDID), брендом, версією або Hardware ID... (Ctrl+F)",
+                    "Search by name, monitor model (EDID), brand, version, or Hardware ID... (Ctrl+F)"),
                 deviceFilterBuf_,
                 sizeof(deviceFilterBuf_))) {
             deviceViewDirty_ = true;
@@ -1420,22 +1535,29 @@ private:
 
         if (catalogBusy) {
             const float prog = componentsScanner_.Progress();
-            const std::string phase = componentsScanner_.PhaseMessage();
+            const std::string phase = hdm::TrDyn(componentsScanner_.PhaseMessage());
             char overlay[256];
             std::snprintf(
                 overlay,
                 sizeof(overlay),
                 "%s (%.0f%%)",
-                phase.empty() ? "Установка драйвера из Microsoft Update Catalog..." : phase.c_str(),
+                phase.empty()
+                    ? hdm::Tr(
+                          "Установка драйвера из Microsoft Update Catalog...",
+                          "Встановлення драйвера з Microsoft Update Catalog...",
+                          "Installing driver from Microsoft Update Catalog...")
+                    : phase.c_str(),
                 prog * 100.0f);
-            const float cancelW = CalcButtonWidth("Отмена") + 8.0f * uiScale;
+            const char* cancelTxt = hdm::Tr("Отмена", "Скасувати", "Cancel");
+            const float cancelW = CalcButtonWidth(cancelTxt) + 8.0f * uiScale;
             ImGui::ProgressBar(
                 prog,
                 ImVec2(std::max(120.0f, ImGui::GetContentRegionAvail().x - cancelW - ImGui::GetStyle().ItemSpacing.x),
                        ImGui::GetFrameHeight()),
                 overlay);
             ImGui::SameLine();
-            if (RenderSecondaryButton("Отмена", ImVec2(cancelW, 0.0f))) {
+            if (RenderSecondaryButton(hdm::Tr("Отмена###CatCancel", "Скасувати###CatCancel", "Cancel###CatCancel"),
+                                      ImVec2(cancelW, 0.0f))) {
                 componentsScanner_.RequestCancelInstall();
             }
         }
@@ -1476,15 +1598,35 @@ private:
         if (ImGui::BeginTable("##DevicesTable", 7, kTableFlags, ImVec2(0.0f, tableH))) {
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableSetupColumn(
-                "Статус",
+                hdm::Tr("Статус", "Статус", "Status"),
                 ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch,
                 1.28f,
                 0);
-            ImGui::TableSetupColumn("Устройство / Модель", ImGuiTableColumnFlags_WidthStretch, 1.45f, 1);
-            ImGui::TableSetupColumn("Производитель", ImGuiTableColumnFlags_WidthStretch, 0.90f, 2);
-            ImGui::TableSetupColumn("Класс", ImGuiTableColumnFlags_WidthStretch, 0.60f, 3);
-            ImGui::TableSetupColumn("Версия", ImGuiTableColumnFlags_WidthStretch, 0.76f, 4);
-            ImGui::TableSetupColumn("Дата", ImGuiTableColumnFlags_WidthStretch, 0.60f, 5);
+            ImGui::TableSetupColumn(
+                hdm::Tr("Устройство / Модель", "Пристрій / Модель", "Device / Model"),
+                ImGuiTableColumnFlags_WidthStretch,
+                1.45f,
+                1);
+            ImGui::TableSetupColumn(
+                hdm::Tr("Производитель", "Виробник", "Manufacturer"),
+                ImGuiTableColumnFlags_WidthStretch,
+                0.90f,
+                2);
+            ImGui::TableSetupColumn(
+                hdm::Tr("Класс", "Клас", "Class"),
+                ImGuiTableColumnFlags_WidthStretch,
+                0.60f,
+                3);
+            ImGui::TableSetupColumn(
+                hdm::Tr("Версия", "Версія", "Version"),
+                ImGuiTableColumnFlags_WidthStretch,
+                0.76f,
+                4);
+            ImGui::TableSetupColumn(
+                hdm::Tr("Дата", "Дата", "Date"),
+                ImGuiTableColumnFlags_WidthStretch,
+                0.60f,
+                5);
             ImGui::TableSetupColumn("Hardware ID", ImGuiTableColumnFlags_WidthStretch, 1.28f, 6);
             ImGui::TableHeadersRow();
 
@@ -1533,7 +1675,10 @@ private:
 
                         const bool hasHwKey = !dev.searchHardwareKey.empty() || !dev.hardwareId.empty();
                         if (ImGui::MenuItem(
-                                "Скачать и установить драйвер (Catalog WHQL)",
+                                hdm::Tr(
+                                    "Скачать и установить драйвер (Catalog WHQL)",
+                                    "Завантажити та встановити драйвер (Catalog WHQL)",
+                                    "Download & Install Driver (Catalog WHQL)"),
                                 nullptr,
                                 false,
                                 !devBusy && hasHwKey)) {
@@ -1569,45 +1714,79 @@ private:
                                 });
                         };
 
-                        if (ImGui::MenuItem("Перезапустить устройство", nullptr, false, canControl)) {
+                        if (ImGui::MenuItem(
+                                hdm::Tr("Перезапустить устройство", "Перезапустити пристрій", "Restart device"),
+                                nullptr,
+                                false,
+                                canControl)) {
                             triggerAction(hdm::DeviceAction::Restart);
                         }
                         if (dev.problemCode == CM_PROB_DISABLED) {
-                            if (ImGui::MenuItem("Включить устройство", nullptr, false, canControl)) {
+                            if (ImGui::MenuItem(
+                                    hdm::Tr("Включить устройство", "Увімкнути пристрій", "Enable device"),
+                                    nullptr,
+                                    false,
+                                    canControl)) {
                                 triggerAction(hdm::DeviceAction::Enable);
                             }
                         } else {
-                            if (ImGui::MenuItem("Отключить устройство", nullptr, false, canControl)) {
+                            if (ImGui::MenuItem(
+                                    hdm::Tr("Отключить устройство", "Вимкнути пристрій", "Disable device"),
+                                    nullptr,
+                                    false,
+                                    canControl)) {
                                 triggerAction(hdm::DeviceAction::Disable);
                             }
                         }
                         if (ImGui::MenuItem(
-                                "Откатить драйвер (предыдущая версия)",
+                                hdm::Tr(
+                                    "Откатить драйвер (предыдущая версия)",
+                                    "Відкотити драйвер (попередня версія)",
+                                    "Roll back driver (previous version)"),
                                 nullptr,
                                 false,
                                 canControl && dev.hasDriver)) {
                             triggerAction(hdm::DeviceAction::RollbackDriver);
                         }
                         if (ImGui::MenuItem(
-                                "Удалить устройство (переустановка PnP)",
+                                hdm::Tr(
+                                    "Удалить устройство (переустановка PnP)",
+                                    "Видалити пристрій (перевстановлення PnP)",
+                                    "Uninstall device (PnP reinstall)"),
                                 nullptr,
                                 false,
                                 canControl)) {
                             triggerAction(hdm::DeviceAction::UninstallDevice);
                         }
-                        if (ImGui::MenuItem("Открыть Диспетчер устройств Windows")) {
+                        if (ImGui::MenuItem(
+                                hdm::Tr(
+                                    "Открыть Диспетчер устройств Windows",
+                                    "Відкрити Диспетчер пристроїв Windows",
+                                    "Open Windows Device Manager"))) {
                             ShellExecuteW(nullptr, L"open", L"devmgmt.msc", nullptr, nullptr, SW_SHOWNORMAL);
                         }
                         ImGui::Separator();
 
-                        if (ImGui::MenuItem("Копировать Hardware ID", nullptr, false, !dev.hardwareId.empty())) {
+                        if (ImGui::MenuItem(
+                                hdm::Tr("Копировать Hardware ID", "Копіювати Hardware ID", "Copy Hardware ID"),
+                                nullptr,
+                                false,
+                                !dev.hardwareId.empty())) {
                             ImGui::SetClipboardText(dev.hardwareId.c_str());
-                            logBuffer_.Push(hdm::LogLevel::Info, "Скопирован Hardware ID: " + dev.hardwareId);
+                            logBuffer_.Push(
+                                hdm::LogLevel::Info,
+                                std::string(hdm::Tr("Скопирован Hardware ID: ", "Скопійовано Hardware ID: ", "Copied Hardware ID: ")) +
+                                    dev.hardwareId);
                         }
-                        if (ImGui::MenuItem("Копировать короткий ID (VEN/DEV)", nullptr, false, !dev.searchHardwareKey.empty())) {
+                        if (ImGui::MenuItem(
+                                hdm::Tr("Копировать короткий ID (VEN/DEV)", "Копіювати короткий ID (VEN/DEV)", "Copy Short ID (VEN/DEV)"),
+                                nullptr,
+                                false,
+                                !dev.searchHardwareKey.empty())) {
                             ImGui::SetClipboardText(dev.searchHardwareKey.c_str());
                         }
-                        if (ImGui::MenuItem("Копировать название устройства")) {
+                        if (ImGui::MenuItem(
+                                hdm::Tr("Копировать название устройства", "Копіювати назву пристрою", "Copy Device Name"))) {
                             ImGui::SetClipboardText(dev.name.c_str());
                         }
                         ImGui::Separator();
@@ -1617,10 +1796,15 @@ private:
                                 : (!dev.searchHardwareKey.empty()
                                        ? (dev.searchHardwareKey + " Windows driver")
                                        : (dev.name + " Windows driver"));
-                        if (ImGui::MenuItem("Найти драйвер в браузере (Google)")) {
+                        if (ImGui::MenuItem(
+                                hdm::Tr("Найти драйвер в браузере (Google)", "Знайти драйвер у браузері (Google)", "Search driver in browser (Google)"))) {
                             OpenUrlInBrowser("https://www.google.com/search?q=" + UrlEncode(queryId));
                         }
-                        if (ImGui::MenuItem("Найти в каталоге Microsoft Update", nullptr, false, !dev.searchHardwareKey.empty())) {
+                        if (ImGui::MenuItem(
+                                hdm::Tr("Найти в каталоге Microsoft Update", "Знайти в каталозі Microsoft Update", "Search in Microsoft Update Catalog"),
+                                nullptr,
+                                false,
+                                !dev.searchHardwareKey.empty())) {
                             OpenUrlInBrowser(
                                 "https://www.catalog.update.microsoft.com/Search.aspx?q=" +
                                 UrlEncode(dev.searchHardwareKey));
@@ -1635,28 +1819,38 @@ private:
                     } else if (dev.health == hdm::DeviceHealth::Warning || dev.isGenericMonitorDriver) {
                         statusColor = ImVec4(0.98f, 0.75f, 0.14f, 1.00f); // Amber
                     }
-                    RenderStatusBadge(statusColor, dev.statusText.c_str(), false);
+                    const std::string devStatusShown = hdm::TrDyn(dev.statusText);
+                    RenderStatusBadge(statusColor, devStatusShown.c_str(), false);
 
                     // Col 1: Device Name
                     ImGui::TableSetColumnIndex(1);
-                    RenderCellText(dev.name);
+                    const std::string devNameShown = hdm::TrDyn(dev.name);
+                    RenderCellText(devNameShown);
                     if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                         ImGui::BeginTooltip();
                         ImGui::PushTextWrapPos(460.0f * uiScale);
-                        ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s", dev.name.c_str());
+                        ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s", devNameShown.c_str());
                         ImGui::TextDisabled(
-                            "Производитель: %s  |  Класс: %s",
+                            hdm::Tr(
+                                "Производитель: %s  |  Класс: %s",
+                                "Виробник: %s  |  Клас: %s",
+                                "Manufacturer: %s  |  Class: %s"),
                             dev.manufacturer.empty() ? "—" : dev.manufacturer.c_str(),
                             dev.deviceClass.empty() ? "—" : dev.deviceClass.c_str());
                         ImGui::TextDisabled(
-                            "INF: %s  |  Статус: %s",
+                            hdm::Tr(
+                                "INF: %s  |  Статус: %s",
+                                "INF: %s  |  Статус: %s",
+                                "INF: %s  |  Status: %s"),
                             dev.infName.empty() ? "—" : dev.infName.c_str(),
-                            dev.statusText.c_str());
+                            devStatusShown.c_str());
                         if (!dev.hardwareId.empty()) {
                             ImGui::TextWrapped("Hardware ID: %s", dev.hardwareId.c_str());
                         }
                         if (!dev.edidModel.empty()) {
-                            ImGui::Text("Модель (EDID): %s", dev.edidModel.c_str());
+                            ImGui::Text(
+                                hdm::Tr("Модель (EDID): %s", "Модель (EDID): %s", "Model (EDID): %s"),
+                                dev.edidModel.c_str());
                         }
                         ImGui::PopTextWrapPos();
                         ImGui::EndTooltip();
@@ -1708,8 +1902,9 @@ private:
                 EllipsizeUtf8(selectedDev->name, 420.0f * uiScale).c_str());
             ImGui::SameLine(0.0f, 12.0f);
             const std::string metaLine =
-                "Статус: " + selectedDev->statusText +
-                "  |  Класс: " + (selectedDev->deviceClass.empty() ? "—" : selectedDev->deviceClass) +
+                std::string(hdm::Tr("Статус: ", "Статус: ", "Status: ")) + hdm::TrDyn(selectedDev->statusText) +
+                hdm::Tr("  |  Класс: ", "  |  Клас: ", "  |  Class: ") +
+                (selectedDev->deviceClass.empty() ? "—" : selectedDev->deviceClass) +
                 "  |  INF: " + (selectedDev->infName.empty() ? "—" : selectedDev->infName);
             RenderCellText(metaLine, true);
 
@@ -1729,7 +1924,13 @@ private:
                 (selectedDev->health != hdm::DeviceHealth::Ok || selectedDev->isGenericMonitorDriver);
 
             ImGui::BeginDisabled(devBusy || !hasHwKey);
-            if (RenderActionButton("Установить из Catalog (WHQL)", ImVec2(0.0f, 0.0f), highlightCatalog)) {
+            if (RenderActionButton(
+                    hdm::Tr(
+                        "Установить из Catalog (WHQL)###DevCatBtn",
+                        "Встановити з Catalog (WHQL)###DevCatBtn",
+                        "Install from Catalog (WHQL)###DevCatBtn"),
+                    ImVec2(0.0f, 0.0f),
+                    highlightCatalog)) {
                 componentsScanner_.SearchAndInstallFromCatalogAsync(
                     selectedDev->name,
                     selectedDev->searchHardwareKey,
@@ -1746,7 +1947,8 @@ private:
 
             ImGui::SameLine();
             ImGui::BeginDisabled(!canControl);
-            if (RenderSecondaryButton("Перезапустить")) {
+            if (RenderSecondaryButton(
+                    hdm::Tr("Перезапустить###DevRst", "Перезапустити###DevRst", "Restart###DevRst"))) {
                 scanner_.RunDeviceActionAsync(
                     hdm::DeviceAction::Restart,
                     selectedDev->instanceId,
@@ -1758,7 +1960,8 @@ private:
             }
             ImGui::SameLine();
             ImGui::BeginDisabled(!selectedDev->hasDriver);
-            if (RenderSecondaryButton("Откатить драйвер")) {
+            if (RenderSecondaryButton(
+                    hdm::Tr("Откатить драйвер###DevRb", "Відкотити драйвер###DevRb", "Roll Back###DevRb"))) {
                 scanner_.RunDeviceActionAsync(
                     hdm::DeviceAction::RollbackDriver,
                     selectedDev->instanceId,
@@ -1773,25 +1976,30 @@ private:
 
             ImGui::SameLine();
             ImGui::BeginDisabled(selectedDev->hardwareId.empty());
-            if (RenderSecondaryButton("Копировать HWID (Ctrl+C)")) {
+            if (RenderSecondaryButton(
+                    hdm::Tr("Копировать HWID (Ctrl+C)###DevCpHw", "Копіювати HWID (Ctrl+C)###DevCpHw", "Copy HWID (Ctrl+C)###DevCpHw"))) {
                 ImGui::SetClipboardText(selectedDev->hardwareId.c_str());
                 logBuffer_.Push(
                     hdm::LogLevel::Info,
-                    "Скопирован Hardware ID: " + selectedDev->hardwareId);
+                    std::string(hdm::Tr("Скопирован Hardware ID: ", "Скопійовано Hardware ID: ", "Copied Hardware ID: ")) +
+                        selectedDev->hardwareId);
             }
             ImGui::EndDisabled();
 
             ImGui::SameLine();
             ImGui::BeginDisabled(selectedDev->instanceId.empty());
-            if (RenderSecondaryButton("Копировать Instance ID")) {
+            if (RenderSecondaryButton(
+                    hdm::Tr("Копировать Instance ID###DevCpInst", "Копіювати Instance ID###DevCpInst", "Copy Instance ID###DevCpInst"))) {
                 ImGui::SetClipboardText(selectedDev->instanceId.c_str());
                 logBuffer_.Push(
                     hdm::LogLevel::Info,
-                    "Скопирован Instance ID: " + selectedDev->instanceId);
+                    std::string(hdm::Tr("Скопирован Instance ID: ", "Скопійовано Instance ID: ", "Copied Instance ID: ")) +
+                        selectedDev->instanceId);
             }
             ImGui::EndDisabled();
 
-            const float closeW = CalcButtonWidth("Закрыть (Esc)");
+            const char* closeTxt = hdm::Tr("Закрыть (Esc)", "Закрити (Esc)", "Close (Esc)");
+            const float closeW = CalcButtonWidth(closeTxt);
             const float winRight = ImGui::GetWindowContentRegionMax().x;
             const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
             if (winRight - closeW > lastEnd + devStyle.ItemSpacing.x) {
@@ -1799,7 +2007,9 @@ private:
             } else {
                 ImGui::SameLine();
             }
-            if (RenderSecondaryButton("Закрыть (Esc)", ImVec2(closeW, 0.0f))) {
+            if (RenderSecondaryButton(
+                    hdm::Tr("Закрыть (Esc)###DevClose", "Закрити (Esc)###DevClose", "Close (Esc)###DevClose"),
+                    ImVec2(closeW, 0.0f))) {
                 selectedDeviceInstanceId_.clear();
             }
 
@@ -1898,26 +2108,46 @@ private:
         }
 
         ImGui::BeginDisabled(busy);
-        if (RenderSecondaryButton("Обновить проверку")) {
+        if (RenderSecondaryButton(hdm::Tr(
+                "Обновить проверку###CompScan",
+                "Оновити перевірку###CompScan",
+                "Rescan###CompScan"))) {
             componentsScanner_.StartLocalScanAsync(devicesCache_, MakeLogger());
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Проверить онлайн"));
-        if (RenderSecondaryButton("Проверить онлайн")) {
+        const char* chkOnlineTxt = hdm::Tr("Проверить онлайн", "Перевірити онлайн", "Check Online");
+        SameLineWrapIfNeeded(CalcButtonWidth(chkOnlineTxt));
+        if (RenderSecondaryButton(hdm::Tr(
+                "Проверить онлайн###CompOnline",
+                "Перевірити онлайн###CompOnline",
+                "Check Online###CompOnline"))) {
             componentsScanner_.StartOnlineVersionCheckAsync(MakeLogger());
         }
         ImGui::EndDisabled();
 
-        char batchLbl[96];
+        char batchLbl[128];
         if (!batchTargets.empty()) {
             std::snprintf(
                 batchLbl,
                 sizeof(batchLbl),
-                "Обновить все доступные (%zu)###BatchCompBtn",
+                hdm::Tr(
+                    "Обновить все доступные (%zu)###BatchCompBtn",
+                    "Оновити всі доступні (%zu)###BatchCompBtn",
+                    "Update All Available (%zu)###BatchCompBtn"),
                 batchTargets.size());
         } else {
-            std::snprintf(batchLbl, sizeof(batchLbl), "Обновить все доступные (0)###BatchCompBtn");
+            std::snprintf(
+                batchLbl,
+                sizeof(batchLbl),
+                "%s",
+                hdm::Tr(
+                    "Обновить все доступные (0)###BatchCompBtn",
+                    "Оновити всі доступні (0)###BatchCompBtn",
+                    "Update All Available (0)###BatchCompBtn"));
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Обновить все доступные (99)"));
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr(
+            "Обновить все доступные (99)",
+            "Оновити всі доступні (99)",
+            "Update All Available (99)")));
         ImGui::BeginDisabled(busy || batchTargets.empty());
         if (ImGui::Button(batchLbl)) {
             componentsScanner_.DownloadAndInstallBatchAsync(
@@ -1926,13 +2156,13 @@ private:
         ImGui::EndDisabled();
 
         if (componentsScanner_.IsInstalling()) {
-            SameLineWrapIfNeeded(CalcButtonWidth("Отмена"));
-            if (RenderSecondaryButton("Отмена")) {
+            SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Отмена", "Скасувати", "Cancel")));
+            if (RenderSecondaryButton(hdm::Tr("Отмена###CompCancel", "Скасувати###CompCancel", "Cancel###CompCancel"))) {
                 componentsScanner_.RequestCancelInstall();
             }
         }
 
-        const std::string phase = componentsScanner_.PhaseMessage();
+        const std::string phase = hdm::TrDyn(componentsScanner_.PhaseMessage());
         if (busy || !phase.empty()) {
             const float winRight = ImGui::GetWindowContentRegionMax().x;
             const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
@@ -1952,22 +2182,29 @@ private:
         }
 
         // Row 2: Filter pills
-        if (RenderPillButton("Все", compFilterMode_ == ComponentFilterMode::All)) {
+        if (RenderPillButton(hdm::Tr("Все###CfAll", "Усі###CfAll", "All###CfAll"),
+                             compFilterMode_ == ComponentFilterMode::All)) {
             compFilterMode_ = ComponentFilterMode::All;
             compViewDirty_ = true;
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Игры и библиотеки"));
-        if (RenderPillButton("Игры и библиотеки", compFilterMode_ == ComponentFilterMode::GamingRuntimes)) {
+        const char* cfGameTxt = hdm::Tr("Игры и библиотеки", "Ігри та бібліотеки", "Games & Runtimes");
+        SameLineWrapIfNeeded(CalcButtonWidth(cfGameTxt));
+        if (RenderPillButton(hdm::Tr("Игры и библиотеки###CfGame", "Ігри та бібліотеки###CfGame", "Games & Runtimes###CfGame"),
+                             compFilterMode_ == ComponentFilterMode::GamingRuntimes)) {
             compFilterMode_ = ComponentFilterMode::GamingRuntimes;
             compViewDirty_ = true;
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Клавиатуры / Мыши / Аудио"));
-        if (RenderPillButton("Клавиатуры / Мыши / Аудио", compFilterMode_ == ComponentFilterMode::Peripherals)) {
+        const char* cfPerTxt = hdm::Tr("Клавиатуры / Мыши / Аудио", "Клавіатури / Миші / Аудіо", "Keyboards / Mice / Audio");
+        SameLineWrapIfNeeded(CalcButtonWidth(cfPerTxt));
+        if (RenderPillButton(hdm::Tr("Клавиатуры / Мыши / Аудио###CfPer", "Клавіатури / Миші / Аудіо###CfPer", "Keyboards / Mice / Audio###CfPer"),
+                             compFilterMode_ == ComponentFilterMode::Peripherals)) {
             compFilterMode_ = ComponentFilterMode::Peripherals;
             compViewDirty_ = true;
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Мониторы и GPU"));
-        if (RenderPillButton("Мониторы и GPU", compFilterMode_ == ComponentFilterMode::MonitorsAndGpu)) {
+        const char* cfMonTxt = hdm::Tr("Мониторы и GPU", "Монітори та GPU", "Monitors & GPU");
+        SameLineWrapIfNeeded(CalcButtonWidth(cfMonTxt));
+        if (RenderPillButton(hdm::Tr("Мониторы и GPU###CfMon", "Монітори та GPU###CfMon", "Monitors & GPU###CfMon"),
+                             compFilterMode_ == ComponentFilterMode::MonitorsAndGpu)) {
             compFilterMode_ = ComponentFilterMode::MonitorsAndGpu;
             compViewDirty_ = true;
         }
@@ -1986,28 +2223,40 @@ private:
             ImGuiTableFlags_Sortable | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
             ImGuiTableFlags_BordersOuter | ImGuiTableFlags_ScrollY;
 
-        const float primaryW = CalcButtonWidth("Установить") + 6.0f * uiScale;
-        const float siteW = CalcButtonWidth("Сайт") + 6.0f * uiScale;
+        const float primaryW = CalcButtonWidth(hdm::Tr("Установить", "Встановити", "Download")) + 8.0f * uiScale;
+        const float siteW = CalcButtonWidth(hdm::Tr("Сайт", "Сайт", "Site")) + 6.0f * uiScale;
         const float fullActionW = primaryW + compStyle.ItemSpacing.x + siteW;
         const float actionColW = fullActionW + compStyle.CellPadding.x * 2.0f + 4.0f;
 
         if (ImGui::BeginTable("##ComponentsTable", 6, kTableFlags, ImGui::GetContentRegionAvail())) {
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableSetupColumn(
-                "Статус",
+                hdm::Tr("Статус", "Статус", "Status"),
                 ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch,
                 1.46f,
                 0);
             ImGui::TableSetupColumn(
-                "Компонент / Официальное ПО", ImGuiTableColumnFlags_WidthStretch, 1.36f, 1);
+                hdm::Tr("Компонент / Официальное ПО", "Компонент / Офіційне ПЗ", "Component / Official Software"),
+                ImGuiTableColumnFlags_WidthStretch,
+                1.36f,
+                1);
             ImGui::TableSetupColumn(
-                "Устройство / Назначение", ImGuiTableColumnFlags_WidthStretch, 1.10f, 2);
+                hdm::Tr("Устройство / Назначение", "Пристрій / Призначення", "Hardware / Purpose"),
+                ImGuiTableColumnFlags_WidthStretch,
+                1.10f,
+                2);
             ImGui::TableSetupColumn(
-                "Установлено", ImGuiTableColumnFlags_WidthStretch, 0.70f, 3);
+                hdm::Tr("Установлено", "Встановлено", "Installed"),
+                ImGuiTableColumnFlags_WidthStretch,
+                0.70f,
+                3);
             ImGui::TableSetupColumn(
-                "Актуальная", ImGuiTableColumnFlags_WidthStretch, 0.76f, 4);
+                hdm::Tr("Актуальная", "Актуальна", "Latest"),
+                ImGuiTableColumnFlags_WidthStretch,
+                0.76f,
+                4);
             ImGui::TableSetupColumn(
-                "Действие",
+                hdm::Tr("Действие", "Дія", "Action"),
                 ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed,
                 actionColW,
                 5);
@@ -2036,58 +2285,68 @@ private:
                 if (!item.installed || item.updateAvailable) {
                     statusCol = ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
                 }
-                RenderStatusBadge(statusCol, item.statusText.c_str(), true);
+                const std::string compStatusShown = hdm::TrDyn(item.statusText);
+                RenderStatusBadge(statusCol, compStatusShown.c_str(), true);
                 if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                    ImGui::SetTooltip("%s", item.statusText.c_str());
+                    ImGui::SetTooltip("%s", compStatusShown.c_str());
                 }
 
                 ImGui::TableSetColumnIndex(1);
-                RenderCellText(item.name, false, true);
+                RenderCellText(hdm::TrDyn(item.name), false, true);
                 if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                     ImGui::BeginTooltip();
                     ImGui::PushTextWrapPos(440.0f * uiScale);
-                    ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s", item.name.c_str());
-                    ImGui::TextDisabled("Издатель: %s", item.vendor.c_str());
+                    ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s", hdm::TrDyn(item.name).c_str());
+                    ImGui::TextDisabled(
+                        hdm::Tr("Издатель: %s", "Видавець: %s", "Publisher: %s"),
+                        item.vendor.c_str());
                     if (!item.purposeDescription.empty()) {
                         ImGui::Separator();
-                        ImGui::TextUnformatted("За что отвечает:");
-                        ImGui::TextWrapped("%s", item.purposeDescription.c_str());
+                        ImGui::TextUnformatted(hdm::Tr("За что отвечает:", "За що відповідає:", "Purpose:"));
+                        ImGui::TextWrapped("%s", hdm::TrDyn(item.purposeDescription).c_str());
                     }
                     if (!item.detectedHardware.empty()) {
                         ImGui::Separator();
-                        ImGui::TextWrapped("Оборудование: %s", item.detectedHardware.c_str());
+                        ImGui::TextWrapped(
+                            hdm::Tr("Оборудование: %s", "Обладнання: %s", "Hardware: %s"),
+                            hdm::TrDyn(item.detectedHardware).c_str());
                     }
                     ImGui::PopTextWrapPos();
                     ImGui::EndTooltip();
                 }
 
                 ImGui::TableSetColumnIndex(2);
-                const std::string targetHw =
+                const std::string targetHw = hdm::TrDyn(
                     item.detectedHardware.empty() ? "Игры и системные библиотеки Windows"
-                                                  : item.detectedHardware;
+                                                  : item.detectedHardware);
                 if (RenderCellText(targetHw, false, true) && isAppForeground &&
                     ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                     ImGui::SetTooltip("%s", targetHw.c_str());
                 }
 
                 ImGui::TableSetColumnIndex(3);
-                if (RenderCellText(item.installedVersion, item.installedVersion.empty(), true) &&
+                const std::string instShown = hdm::TrDyn(item.installedVersion);
+                if (RenderCellText(instShown, item.installedVersion.empty(), true) &&
                     isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                    ImGui::SetTooltip("%s", item.installedVersion.c_str());
+                    ImGui::SetTooltip("%s", instShown.c_str());
                 }
 
                 ImGui::TableSetColumnIndex(4);
-                if (RenderCellText(item.latestVersion, item.latestVersion.empty(), true) &&
+                const std::string latestShown = hdm::TrDyn(item.latestVersion);
+                if (RenderCellText(latestShown, item.latestVersion.empty(), true) &&
                     isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                    ImGui::SetTooltip("%s", item.latestVersion.c_str());
+                    ImGui::SetTooltip("%s", latestShown.c_str());
                 }
 
                 ImGui::TableSetColumnIndex(5);
                 if (!item.directInstallerUrl.empty()) {
                     const bool needAction = !item.installed || item.updateAvailable;
-                    const char* btnLbl = !item.installed
-                                             ? "Установить"
-                                             : (item.updateAvailable ? "Обновить" : "Скачать");
+                    const char* btnLbl =
+                        !item.installed
+                            ? hdm::Tr("Установить###CAct", "Встановити###CAct", "Install###CAct")
+                            : (item.updateAvailable
+                                   ? hdm::Tr("Обновить###CAct", "Оновити###CAct", "Update###CAct")
+                                   : hdm::Tr("Скачать###CAct", "Завантажити###CAct", "Download###CAct"));
                     ImGui::BeginDisabled(busy);
                     if (RenderActionButton(btnLbl, ImVec2(primaryW, 0.0f), needAction)) {
                         componentsScanner_.DownloadAndInstallAsync(
@@ -2095,11 +2354,15 @@ private:
                     }
                     ImGui::EndDisabled();
                     ImGui::SameLine();
-                    if (RenderSecondaryButton("Сайт", ImVec2(siteW, 0.0f))) {
+                    if (RenderSecondaryButton(
+                            hdm::Tr("Сайт###CSite", "Сайт###CSite", "Site###CSite"),
+                            ImVec2(siteW, 0.0f))) {
                         OpenUrlInBrowser(item.officialPageUrl);
                     }
                 } else if (!item.officialPageUrl.empty()) {
-                    if (RenderSecondaryButton("Открыть сайт", ImVec2(fullActionW, 0.0f))) {
+                    if (RenderSecondaryButton(
+                            hdm::Tr("Открыть сайт###COpenSite", "Відкрити сайт###COpenSite", "Open Website###COpenSite"),
+                            ImVec2(fullActionW, 0.0f))) {
                         OpenUrlInBrowser(item.officialPageUrl);
                     }
                 }
@@ -2135,12 +2398,18 @@ private:
 
         const bool busy = wuManager_.IsBusy();
         ImGui::BeginDisabled(busy);
-        if (ImGui::Button("Найти обновления")) {
+        if (ImGui::Button(hdm::Tr(
+                "Найти обновления###WuFindBtn",
+                "Знайти оновлення###WuFindBtn",
+                "Check for Updates###WuFindBtn"))) {
             selectedWuIndex_ = -1;
             wuManager_.StartSearchAsync(MakeLogger(), !wuIncludeSystemUpdates_);
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Выбрать все"));
-        if (RenderSecondaryButton("Выбрать все")) {
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Выбрать все", "Вибрати всі", "Select All")));
+        if (RenderSecondaryButton(hdm::Tr(
+                "Выбрать все###WuSelAll",
+                "Вибрати всі###WuSelAll",
+                "Select All###WuSelAll"))) {
             wuManager_.SelectAll(true, wuShowHidden_);
             for (auto& u : wuCache_) {
                 if (!u.installedOk && (wuShowHidden_ || !u.isHidden)) {
@@ -2148,8 +2417,11 @@ private:
                 }
             }
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Снять все"));
-        if (RenderSecondaryButton("Снять все")) {
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Снять все", "Зняти всі", "Clear Selection")));
+        if (RenderSecondaryButton(hdm::Tr(
+                "Снять все###WuClearAll",
+                "Зняти всі###WuClearAll",
+                "Clear Selection###WuClearAll"))) {
             wuManager_.SelectAll(false, true);
             for (auto& u : wuCache_) u.selected = false;
         }
@@ -2175,18 +2447,30 @@ private:
             }
         }
 
-        char installLbl[96];
+        char installLbl[128];
         if (!selectedIds.empty()) {
             std::snprintf(
                 installLbl,
                 sizeof(installLbl),
-                "Установить выбранные (%zu)###WuInstallBtn",
+                hdm::Tr(
+                    "Установить выбранные (%zu)###WuInstallBtn",
+                    "Встановити вибрані (%zu)###WuInstallBtn",
+                    "Install Selected (%zu)###WuInstallBtn"),
                 selectedIds.size());
         } else {
-            std::snprintf(installLbl, sizeof(installLbl), "Установить выбранные###WuInstallBtn");
+            std::snprintf(
+                installLbl,
+                sizeof(installLbl),
+                "%s",
+                hdm::Tr(
+                    "Установить выбранные###WuInstallBtn",
+                    "Встановити вибрані###WuInstallBtn",
+                    "Install Selected###WuInstallBtn"));
         }
         const float installBtnW = CalcButtonWidth(
-            selectedIds.empty() ? "Установить выбранные" : "Установить выбранные (99)");
+            selectedIds.empty()
+                ? hdm::Tr("Установить выбранные", "Встановити вибрані", "Install Selected")
+                : hdm::Tr("Установить выбранные (99)", "Встановити вибрані (99)", "Install Selected (99)"));
         SameLineWrapIfNeeded(installBtnW);
         ImGui::BeginDisabled(busy || selectedIds.empty());
         if (ImGui::Button(installLbl)) {
@@ -2206,13 +2490,24 @@ private:
         }
         ImGui::EndDisabled();
 
-        char hideLbl[64];
+        char hideLbl[96];
         if (!selectedToHide.empty()) {
-            std::snprintf(hideLbl, sizeof(hideLbl), "Скрыть (%zu)###WuHideBtn", selectedToHide.size());
+            std::snprintf(
+                hideLbl,
+                sizeof(hideLbl),
+                hdm::Tr("Скрыть (%zu)###WuHideBtn", "Приховати (%zu)###WuHideBtn", "Hide (%zu)###WuHideBtn"),
+                selectedToHide.size());
         } else {
-            std::snprintf(hideLbl, sizeof(hideLbl), "Скрыть###WuHideBtn");
+            std::snprintf(
+                hideLbl,
+                sizeof(hideLbl),
+                "%s",
+                hdm::Tr("Скрыть###WuHideBtn", "Приховати###WuHideBtn", "Hide###WuHideBtn"));
         }
-        const float hideBtnW = CalcButtonWidth(selectedToHide.empty() ? "Скрыть" : "Скрыть (99)");
+        const float hideBtnW = CalcButtonWidth(
+            selectedToHide.empty()
+                ? hdm::Tr("Скрыть", "Приховати", "Hide")
+                : hdm::Tr("Скрыть (99)", "Приховати (99)", "Hide (99)"));
         SameLineWrapIfNeeded(hideBtnW);
         ImGui::BeginDisabled(busy || selectedToHide.empty());
         if (RenderSecondaryButton(hideLbl)) {
@@ -2223,14 +2518,24 @@ private:
         if (isAppForeground &&
             ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(
-                "Запретить Windows Update предлагать и автоматически устанавливать выбранные обновления (IUpdate::put_IsHidden).");
+                "%s",
+                hdm::Tr(
+                    "Запретить Windows Update предлагать и автоматически устанавливать выбранные обновления (IUpdate::put_IsHidden).",
+                    "Заборонити Windows Update пропонувати й автоматично встановлювати вибрані оновлення (IUpdate::put_IsHidden).",
+                    "Prevent Windows Update from offering and auto-installing selected updates (IUpdate::put_IsHidden)."));
         }
 
         if (wuShowHidden_ && !selectedToUnhide.empty()) {
-            char unhideLbl[64];
+            char unhideLbl[96];
             std::snprintf(
-                unhideLbl, sizeof(unhideLbl), "Вернуть (%zu)###WuUnhideBtn", selectedToUnhide.size());
-            SameLineWrapIfNeeded(CalcButtonWidth("Вернуть (99)"));
+                unhideLbl,
+                sizeof(unhideLbl),
+                hdm::Tr(
+                    "Вернуть (%zu)###WuUnhideBtn",
+                    "Повернути (%zu)###WuUnhideBtn",
+                    "Unhide (%zu)###WuUnhideBtn"),
+                selectedToUnhide.size());
+            SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Вернуть (99)", "Повернути (99)", "Unhide (99)")));
             ImGui::BeginDisabled(busy);
             if (RenderSecondaryButton(unhideLbl)) {
                 wuManager_.SetUpdatesHiddenAsync(
@@ -2240,13 +2545,13 @@ private:
         }
 
         if (busy) {
-            SameLineWrapIfNeeded(CalcButtonWidth("Отмена"));
-            if (RenderSecondaryButton("Отмена")) {
+            SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Отмена", "Скасувати", "Cancel")));
+            if (RenderSecondaryButton(hdm::Tr("Отмена###WuCancel", "Скасувати###WuCancel", "Cancel###WuCancel"))) {
                 wuManager_.RequestCancel();
             }
         }
 
-        const std::string phase = wuManager_.PhaseMessage();
+        const std::string phase = hdm::TrDyn(wuManager_.PhaseMessage());
         if (busy || !phase.empty()) {
             const float winRight = ImGui::GetWindowContentRegionMax().x;
             const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
@@ -2263,24 +2568,58 @@ private:
             }
         }
 
-        ImGui::Checkbox("Включать системные обновления и библиотеки (не только драйверы)", &wuIncludeSystemUpdates_);
-        SameLineWrapIfNeeded(CalcButtonWidth("Точка восстановления перед установкой") + 32.0f * uiScale);
-        ImGui::Checkbox("Точка восстановления перед установкой", &wuRestoreBefore_);
+        ImGui::Checkbox(
+            hdm::Tr(
+                "Включать системные обновления и библиотеки (не только драйверы)###WuSysCb",
+                "Включати системні оновлення та бібліотеки (не лише драйвери)###WuSysCb",
+                "Include system updates & runtimes (not only drivers)###WuSysCb"),
+            &wuIncludeSystemUpdates_);
+        SameLineWrapIfNeeded(
+            CalcButtonWidth(hdm::Tr(
+                "Точка восстановления перед установкой",
+                "Точка відновлення перед встановленням",
+                "Create restore point before installing")) +
+            32.0f * uiScale);
+        ImGui::Checkbox(
+            hdm::Tr(
+                "Точка восстановления перед установкой###WuRpCb",
+                "Точка відновлення перед встановленням###WuRpCb",
+                "Create restore point before installing###WuRpCb"),
+            &wuRestoreBefore_);
         {
-            char showHidLbl[80];
+            char showHidLbl[96];
             std::snprintf(
-                showHidLbl, sizeof(showHidLbl), "Показывать скрытые (%zu)###WuShowHiddenCb", hiddenCount);
-            SameLineWrapIfNeeded(CalcButtonWidth("Показывать скрытые (99)") + 32.0f * uiScale);
+                showHidLbl,
+                sizeof(showHidLbl),
+                hdm::Tr(
+                    "Показывать скрытые (%zu)###WuShowHiddenCb",
+                    "Показувати приховані (%zu)###WuShowHiddenCb",
+                    "Show hidden (%zu)###WuShowHiddenCb"),
+                hiddenCount);
+            SameLineWrapIfNeeded(
+                CalcButtonWidth(hdm::Tr("Показывать скрытые (99)", "Показувати приховані (99)", "Show hidden (99)")) +
+                32.0f * uiScale);
             ImGui::Checkbox(showHidLbl, &wuShowHidden_);
             if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                ImGui::SetTooltip("Показать скрытые через IUpdate::IsHidden обновления, чтобы вернуть их в список.");
+                ImGui::SetTooltip(
+                    "%s",
+                    hdm::Tr(
+                        "Показать скрытые через IUpdate::IsHidden обновления, чтобы вернуть их в список.",
+                        "Показати приховані через IUpdate::IsHidden оновлення, щоб повернути їх до списку.",
+                        "Show updates hidden via IUpdate::IsHidden so you can restore them."));
             }
         }
 
         if (wuManager_.IsInstalling() || wuManager_.IsSearching()) {
             if (wuManager_.IsSearching()) {
                 const float anim = 0.5f + 0.5f * std::sin(static_cast<float>(ImGui::GetTime()) * 3.0f);
-                ImGui::ProgressBar(anim, ImVec2(-1.0f, 18.0f * uiScale), "Поиск в Windows Update...");
+                ImGui::ProgressBar(
+                    anim,
+                    ImVec2(-1.0f, 18.0f * uiScale),
+                    hdm::Tr(
+                        "Поиск в Windows Update...",
+                        "Пошук у Windows Update...",
+                        "Searching Windows Update..."));
             } else {
                 const float prog = wuManager_.Progress();
                 char overlay[64];
@@ -2306,17 +2645,30 @@ private:
         if (ImGui::BeginTable("##WuTable", 5, kTableFlags, ImVec2(0.0f, tableH))) {
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableSetupColumn(
-                "Выбор",
+                hdm::Tr("Выбор", "Вибір", "Select"),
                 ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed,
                 58.0f * uiScale,
                 0);
-            ImGui::TableSetupColumn("Обновление", ImGuiTableColumnFlags_WidthStretch, 1.80f, 1);
             ImGui::TableSetupColumn(
-                "Производитель / Модель", ImGuiTableColumnFlags_WidthStretch, 1.05f, 2);
+                hdm::Tr("Обновление", "Оновлення", "Update"),
+                ImGuiTableColumnFlags_WidthStretch,
+                1.80f,
+                1);
             ImGui::TableSetupColumn(
-                "Размер", ImGuiTableColumnFlags_WidthStretch, 0.50f, 3);
+                hdm::Tr("Производитель / Модель", "Виробник / Модель", "Vendor / Model"),
+                ImGuiTableColumnFlags_WidthStretch,
+                1.05f,
+                2);
             ImGui::TableSetupColumn(
-                "Статус", ImGuiTableColumnFlags_WidthStretch, 0.98f, 4);
+                hdm::Tr("Размер", "Розмір", "Size"),
+                ImGuiTableColumnFlags_WidthStretch,
+                0.50f,
+                3);
+            ImGui::TableSetupColumn(
+                hdm::Tr("Статус", "Статус", "Status"),
+                ImGuiTableColumnFlags_WidthStretch,
+                0.98f,
+                4);
             ImGui::TableHeadersRow();
 
             if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs()) {
@@ -2404,7 +2756,10 @@ private:
                     ImGui::Separator();
                     if (!item.isHidden) {
                         if (ImGui::MenuItem(
-                                "Скрыть обновление (запретить автоустановку)",
+                                hdm::Tr(
+                                    "Скрыть обновление (запретить автоустановку)",
+                                    "Приховати оновлення (заборонити автовстановлення)",
+                                    "Hide update (block automatic install)"),
                                 nullptr,
                                 false,
                                 !busy && !item.installedOk)) {
@@ -2413,7 +2768,10 @@ private:
                         }
                     } else {
                         if (ImGui::MenuItem(
-                                "Вернуть обновление (разрешить установку)",
+                                hdm::Tr(
+                                    "Вернуть обновление (разрешить установку)",
+                                    "Повернути оновлення (дозволити встановлення)",
+                                    "Unhide update (allow installation)"),
                                 nullptr,
                                 false,
                                 !busy)) {
@@ -2422,10 +2780,21 @@ private:
                         }
                     }
                     ImGui::Separator();
-                    if (ImGui::MenuItem("Копировать название обновления", nullptr, false, !item.title.empty())) {
+                    if (ImGui::MenuItem(
+                            hdm::Tr(
+                                "Копировать название обновления",
+                                "Копіювати назву оновлення",
+                                "Copy update title"),
+                            nullptr,
+                            false,
+                            !item.title.empty())) {
                         ImGui::SetClipboardText(item.title.c_str());
                     }
-                    if (ImGui::MenuItem("Копировать Update ID", nullptr, false, !item.updateId.empty())) {
+                    if (ImGui::MenuItem(
+                            hdm::Tr("Копировать Update ID", "Копіювати Update ID", "Copy Update ID"),
+                            nullptr,
+                            false,
+                            !item.updateId.empty())) {
                         ImGui::SetClipboardText(item.updateId.c_str());
                     }
                     ImGui::EndPopup();
@@ -2447,7 +2816,7 @@ private:
                 }
 
                 ImGui::TableSetColumnIndex(3);
-                RenderCellText(item.sizeFormatted, true, true);
+                RenderCellText(hdm::TrDyn(item.sizeFormatted), true, true);
 
                 ImGui::TableSetColumnIndex(4);
                 ImVec4 col(0.60f, 0.72f, 0.90f, 1.00f);
@@ -2456,7 +2825,8 @@ private:
                 } else if (item.isHidden) {
                     col = ImVec4(0.58f, 0.68f, 0.86f, 1.00f);
                 }
-                RenderStatusBadge(col, item.statusText.c_str(), true);
+                const std::string wuStatusShown = hdm::TrDyn(item.statusText);
+                RenderStatusBadge(col, wuStatusShown.c_str(), true);
 
                 ImGui::PopID();
             }
@@ -2472,7 +2842,10 @@ private:
                 ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
             ImGui::TextWrapped("%s", sel.description.empty() ? sel.title.c_str() : sel.description.c_str());
             ImGui::TextDisabled(
-                "Hardware ID: %s   |   Дата: %s   |   Update ID: %s",
+                hdm::Tr(
+                    "Hardware ID: %s   |   Дата: %s   |   Update ID: %s",
+                    "Hardware ID: %s   |   Дата: %s   |   Update ID: %s",
+                    "Hardware ID: %s   |   Date: %s   |   Update ID: %s"),
                 sel.driverHardwareId.empty() ? "—" : sel.driverHardwareId.c_str(),
                 sel.driverVerDate.empty() ? "—" : sel.driverVerDate.c_str(),
                 sel.updateId.c_str());
@@ -2544,7 +2917,10 @@ private:
                           localInstaller_.IsInstalling();
 
         ImGui::BeginDisabled(busy);
-        if (ImGui::Button("Экспорт бэкапа в папку...")) {
+        if (ImGui::Button(hdm::Tr(
+                "Экспорт бэкапа в папку...###DsExp",
+                "Експорт бекапу в папку...###DsExp",
+                "Export Backup Folder...###DsExp"))) {
             localInstaller_.PickFolderAsync(
                 hwnd_,
                 MakeLogger(),
@@ -2571,8 +2947,14 @@ private:
         if (isAppForeground &&
             ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(
-                "Копирует установленные сторонние пакеты драйверов (FileRepository) в выбранную папку.\n"
-                "После переустановки Windows выберите эту папку во вкладке «Установка из папки (.inf)».");
+                "%s",
+                hdm::Tr(
+                    "Копирует установленные сторонние пакеты драйверов (FileRepository) в выбранную папку.\n"
+                    "После переустановки Windows выберите эту папку во вкладке «Установка из папки (.inf)».",
+                    "Копіює встановлені сторонні пакети драйверів (FileRepository) до вибраної папки.\n"
+                    "Після перевстановлення Windows виберіть цю папку у вкладці «Встановлення з папки (.inf)».",
+                    "Copies installed third-party driver packages (FileRepository) to the chosen folder.\n"
+                    "After reinstalling Windows, select this folder in the 'Install from Folder (.inf)' tab."));
         }
         ImGui::EndDisabled();
 
@@ -2585,18 +2967,33 @@ private:
             }
         }
 
-        char rmSelLbl[96];
+        char rmSelLbl[128];
         if (selectedCount > 0) {
             std::snprintf(
                 rmSelLbl,
                 sizeof(rmSelLbl),
-                "Удалить выбранные (%zu / %s)###RmDupBtn",
+                hdm::Tr(
+                    "Удалить выбранные (%zu / %s)###RmDupBtn",
+                    "Видалити вибрані (%zu / %s)###RmDupBtn",
+                    "Remove Selected (%zu / %s)###RmDupBtn"),
                 selectedCount,
                 hdm::FormatBytes(selectedBytes).c_str());
         } else {
-            std::snprintf(rmSelLbl, sizeof(rmSelLbl), "Удалить выбранные (0)###RmDupBtn");
+            std::snprintf(
+                rmSelLbl,
+                sizeof(rmSelLbl),
+                "%s",
+                hdm::Tr(
+                    "Удалить выбранные (0)###RmDupBtn",
+                    "Видалити вибрані (0)###RmDupBtn",
+                    "Remove Selected (0)###RmDupBtn"));
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Удалить выбранные (99 / 999.9 МБ)") + 6.0f);
+        SameLineWrapIfNeeded(
+            CalcButtonWidth(hdm::Tr(
+                "Удалить выбранные (99 / 999.9 МБ)",
+                "Видалити вибрані (99 / 999.9 МБ)",
+                "Remove Selected (99 / 999.9 MB)")) +
+            6.0f);
         ImGui::BeginDisabled(busy || selectedCount == 0);
         if (RenderSecondaryButton(rmSelLbl)) {
             std::vector<std::string> targets;
@@ -2621,27 +3018,34 @@ private:
         }
         ImGui::EndDisabled();
 
-        SameLineWrapIfNeeded(CalcButtonWidth("Выбрать дубликаты"));
+        const char* selDupTxt = hdm::Tr("Выбрать дубликаты", "Вибрати дублікати", "Select Duplicates");
+        SameLineWrapIfNeeded(CalcButtonWidth(selDupTxt));
         ImGui::BeginDisabled(busy || driverStoreCache_.duplicateCount == 0);
-        if (RenderSecondaryButton("Выбрать дубликаты")) {
+        if (RenderSecondaryButton(hdm::Tr(
+                "Выбрать дубликаты###DsSelDup",
+                "Вибрати дублікати###DsSelDup",
+                "Select Duplicates###DsSelDup"))) {
             for (auto& pkg : driverStoreCache_.packages) {
                 pkg.selected = (!pkg.inUse && pkg.isOldDuplicate);
             }
         }
         ImGui::EndDisabled();
 
-        SameLineWrapIfNeeded(CalcButtonWidth("Снять все"));
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Снять все", "Зняти всі", "Clear Selection")));
         ImGui::BeginDisabled(busy || selectedCount == 0);
-        if (RenderSecondaryButton("Снять все")) {
+        if (RenderSecondaryButton(hdm::Tr(
+                "Снять все###DsClear",
+                "Зняти всі###DsClear",
+                "Clear Selection###DsClear"))) {
             for (auto& pkg : driverStoreCache_.packages) {
                 pkg.selected = false;
             }
         }
         ImGui::EndDisabled();
 
-        SameLineWrapIfNeeded(CalcButtonWidth("Обновить"));
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Обновить", "Оновити", "Refresh")));
         ImGui::BeginDisabled(busy);
-        if (RenderSecondaryButton("Обновить")) {
+        if (RenderSecondaryButton(hdm::Tr("Обновить###DsRef", "Оновити###DsRef", "Refresh###DsRef"))) {
             localInstaller_.ScanDriverStoreAsync(devicesCache_, MakeLogger());
         }
         ImGui::EndDisabled();
@@ -2651,7 +3055,10 @@ private:
             std::snprintf(
                 storeSummary,
                 sizeof(storeSummary),
-                "Всего: %s  |  Активных: %zu  |  Дубликатов: %zu",
+                hdm::Tr(
+                    "Всего: %s  |  Активных: %zu  |  Дубликатов: %zu",
+                    "Усього: %s  |  Активних: %zu  |  Дублікатів: %zu",
+                    "Total: %s  |  Active: %zu  |  Duplicates: %zu"),
                 hdm::FormatBytes(driverStoreCache_.totalStoreBytes).c_str(),
                 driverStoreCache_.activeCount,
                 driverStoreCache_.duplicateCount);
@@ -2668,42 +3075,61 @@ private:
         }
 
         // Row 2: Filter pills + checkboxes
-        char allLbl[48], dupFiltLbl[48], actLbl[48];
-        std::snprintf(allLbl, sizeof(allLbl), "Все (%zu)###DsAll", driverStoreCache_.packages.size());
-        std::snprintf(dupFiltLbl, sizeof(dupFiltLbl), "Дубликаты (%zu)###DsDup", driverStoreCache_.duplicateCount);
-        std::snprintf(actLbl, sizeof(actLbl), "Активные (%zu)###DsAct", driverStoreCache_.activeCount);
+        char allLbl[64], dupFiltLbl[64], actLbl[64];
+        std::snprintf(
+            allLbl,
+            sizeof(allLbl),
+            hdm::Tr("Все (%zu)###DsAll", "Усі (%zu)###DsAll", "All (%zu)###DsAll"),
+            driverStoreCache_.packages.size());
+        std::snprintf(
+            dupFiltLbl,
+            sizeof(dupFiltLbl),
+            hdm::Tr("Дубликаты (%zu)###DsDup", "Дублікати (%zu)###DsDup", "Duplicates (%zu)###DsDup"),
+            driverStoreCache_.duplicateCount);
+        std::snprintf(
+            actLbl,
+            sizeof(actLbl),
+            hdm::Tr("Активные (%zu)###DsAct", "Активні (%zu)###DsAct", "Active (%zu)###DsAct"),
+            driverStoreCache_.activeCount);
 
         if (RenderPillButton(allLbl, storeFilterMode_ == DriverStoreFilterMode::All)) {
             storeFilterMode_ = DriverStoreFilterMode::All;
             storeViewDirty_ = true;
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Дубликаты (999)"));
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Дубликаты (999)", "Дублікати (999)", "Duplicates (999)")));
         if (RenderPillButton(dupFiltLbl, storeFilterMode_ == DriverStoreFilterMode::OldDuplicates)) {
             storeFilterMode_ = DriverStoreFilterMode::OldDuplicates;
             storeViewDirty_ = true;
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Активные (999)"));
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Активные (999)", "Активні (999)", "Active (999)")));
         if (RenderPillButton(actLbl, storeFilterMode_ == DriverStoreFilterMode::ActiveOnly)) {
             storeFilterMode_ = DriverStoreFilterMode::ActiveOnly;
             storeViewDirty_ = true;
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Неиспользуемые"));
-        if (RenderPillButton("Неиспользуемые", storeFilterMode_ == DriverStoreFilterMode::UnusedOnly)) {
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Неиспользуемые", "Невикористані", "Unused")));
+        if (RenderPillButton(
+                hdm::Tr("Неиспользуемые###DsUn", "Невикористані###DsUn", "Unused###DsUn"),
+                storeFilterMode_ == DriverStoreFilterMode::UnusedOnly)) {
             storeFilterMode_ = DriverStoreFilterMode::UnusedOnly;
             storeViewDirty_ = true;
         }
 
-        SameLineWrapIfNeeded(CalcButtonWidth("Без дубликатов") + 36.0f * uiScale);
-        ImGui::Checkbox("Без дубликатов", &backupSkipDuplicates_);
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Без дубликатов", "Без дублікатів", "Skip duplicates")) + 36.0f * uiScale);
+        ImGui::Checkbox(hdm::Tr("Без дубликатов###DsSkipDup", "Без дублікатів###DsSkipDup", "Skip duplicates###DsSkipDup"), &backupSkipDuplicates_);
         if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-            ImGui::SetTooltip("Не включать старые дубликаты пакетов при экспорте бэкапа в папку.");
+            ImGui::SetTooltip(
+                "%s",
+                hdm::Tr(
+                    "Не включать старые дубликаты пакетов при экспорте бэкапа в папку.",
+                    "Не включати старі дублікати пакетів під час експорту бекапу в папку.",
+                    "Exclude older duplicate driver packages when exporting backup."));
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Точка восстановления") + 32.0f * uiScale);
-        ImGui::Checkbox("Точка восстановления", &storeRestoreBefore_);
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Точка восстановления", "Точка відновлення", "Restore point")) + 32.0f * uiScale);
+        ImGui::Checkbox(hdm::Tr("Точка восстановления###DsRp", "Точка відновлення###DsRp", "Restore point###DsRp"), &storeRestoreBefore_);
 
         if (localInstaller_.IsExportingBackup() || localInstaller_.IsRemovingStorePackages()) {
             const float prog = localInstaller_.Progress();
-            const std::string statusMsg = localInstaller_.StatusMessage();
+            const std::string statusMsg = hdm::TrDyn(localInstaller_.StatusMessage());
             char overlay[128];
             std::snprintf(overlay, sizeof(overlay), "%.0f%% — %s", prog * 100.0f, statusMsg.c_str());
             ImGui::ProgressBar(prog, ImVec2(-1.0f, 18.0f * uiScale), overlay);
@@ -2712,7 +3138,12 @@ private:
         ImGui::Spacing();
 
         if (!driverStoreCache_.valid) {
-            ImGui::TextDisabled("Выполняется анализ хранилища драйверов DriverStore (oem*.inf)...");
+            ImGui::TextDisabled(
+                "%s",
+                hdm::Tr(
+                    "Выполняется анализ хранилища драйверов DriverStore (oem*.inf)...",
+                    "Виконується аналіз сховища драйверів DriverStore (oem*.inf)...",
+                    "Analyzing Windows DriverStore (oem*.inf)..."));
             return;
         }
 
@@ -2720,20 +3151,21 @@ private:
             ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable | ImGuiTableFlags_RowBg |
             ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_ScrollY;
 
-        const float rmBtnW = CalcButtonWidth("Удалить") + 8.0f * uiScale;
+        const char* rmTxt = hdm::Tr("Удалить", "Видалити", "Remove");
+        const float rmBtnW = CalcButtonWidth(rmTxt) + 8.0f * uiScale;
         const float actionColW = rmBtnW + style.CellPadding.x * 2.0f + 4.0f;
 
         if (ImGui::BeginTable("##DriverStoreTable", 9, kTableFlags, ImGui::GetContentRegionAvail())) {
             ImGui::TableSetupScrollFreeze(0, 1);
-            ImGui::TableSetupColumn("Выбор", ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 54.0f * uiScale, 8);
-            ImGui::TableSetupColumn("Статус", ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 1.44f, 0);
-            ImGui::TableSetupColumn("Пакет", ImGuiTableColumnFlags_WidthStretch, 0.66f, 1);
-            ImGui::TableSetupColumn("INF / Активное устройство", ImGuiTableColumnFlags_WidthStretch, 1.28f, 2);
-            ImGui::TableSetupColumn("Поставщик", ImGuiTableColumnFlags_WidthStretch, 0.76f, 3);
-            ImGui::TableSetupColumn("Класс", ImGuiTableColumnFlags_WidthStretch, 0.52f, 4);
-            ImGui::TableSetupColumn("Версия / Дата", ImGuiTableColumnFlags_WidthStretch, 1.14f, 5);
-            ImGui::TableSetupColumn("Размер", ImGuiTableColumnFlags_WidthStretch, 0.60f, 6);
-            ImGui::TableSetupColumn("Действие", ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, actionColW, 7);
+            ImGui::TableSetupColumn(hdm::Tr("Выбор", "Вибір", "Select"), ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 54.0f * uiScale, 8);
+            ImGui::TableSetupColumn(hdm::Tr("Статус", "Статус", "Status"), ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 1.44f, 0);
+            ImGui::TableSetupColumn(hdm::Tr("Пакет", "Пакет", "Package"), ImGuiTableColumnFlags_WidthStretch, 0.66f, 1);
+            ImGui::TableSetupColumn(hdm::Tr("INF / Активное устройство", "INF / Активний пристрій", "INF / Active Device"), ImGuiTableColumnFlags_WidthStretch, 1.28f, 2);
+            ImGui::TableSetupColumn(hdm::Tr("Поставщик", "Виробник", "Provider"), ImGuiTableColumnFlags_WidthStretch, 0.76f, 3);
+            ImGui::TableSetupColumn(hdm::Tr("Класс", "Клас", "Class"), ImGuiTableColumnFlags_WidthStretch, 0.52f, 4);
+            ImGui::TableSetupColumn(hdm::Tr("Версия / Дата", "Версія / Дата", "Version / Date"), ImGuiTableColumnFlags_WidthStretch, 1.14f, 5);
+            ImGui::TableSetupColumn(hdm::Tr("Размер", "Розмір", "Size"), ImGuiTableColumnFlags_WidthStretch, 0.60f, 6);
+            ImGui::TableSetupColumn(hdm::Tr("Действие", "Дія", "Action"), ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, actionColW, 7);
             ImGui::TableHeadersRow();
 
             ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs();
@@ -2764,11 +3196,20 @@ private:
 
                 ImGui::TableSetColumnIndex(1);
                 if (pkg.isOldDuplicate) {
-                    RenderStatusBadge(ImVec4(0.98f, 0.75f, 0.14f, 1.00f), "Старый дубликат", true);
+                    RenderStatusBadge(
+                        ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
+                        hdm::Tr("Старый дубликат", "Старий дублікат", "Old duplicate"),
+                        true);
                 } else if (pkg.inUse) {
-                    RenderStatusBadge(ImVec4(0.20f, 0.83f, 0.60f, 1.00f), "Активен", true);
+                    RenderStatusBadge(
+                        ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
+                        hdm::Tr("Активен", "Активний", "In Use"),
+                        true);
                 } else {
-                    RenderStatusBadge(ImVec4(0.58f, 0.68f, 0.86f, 1.00f), "В хранилище", true);
+                    RenderStatusBadge(
+                        ImVec4(0.58f, 0.68f, 0.86f, 1.00f),
+                        hdm::Tr("В хранилище", "У сховищі", "Stored"),
+                        true);
                 }
 
                 ImGui::TableSetColumnIndex(2);
@@ -2785,9 +3226,15 @@ private:
                     ImGui::PushTextWrapPos(460.0f * uiScale);
                     ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s (%s)", pkg.originalInfName.c_str(), pkg.oemInfName.c_str());
                     if (!pkg.activeDeviceName.empty()) {
-                        ImGui::Text("Устройство: %s", pkg.activeDeviceName.c_str());
+                        ImGui::Text(
+                            hdm::Tr("Устройство: %s", "Пристрій: %s", "Device: %s"),
+                            pkg.activeDeviceName.c_str());
                     }
-                    ImGui::TextDisabled("Поставщик: %s  |  Класс: %s",
+                    ImGui::TextDisabled(
+                        hdm::Tr(
+                            "Поставщик: %s  |  Класс: %s",
+                            "Виробник: %s  |  Клас: %s",
+                            "Provider: %s  |  Class: %s"),
                         pkg.provider.empty() ? "—" : pkg.provider.c_str(),
                         pkg.className.empty() ? "—" : pkg.className.c_str());
                     ImGui::PopTextWrapPos();
@@ -2813,7 +3260,9 @@ private:
                 ImGui::TableSetColumnIndex(8);
                 if (!pkg.inUse) {
                     ImGui::BeginDisabled(busy);
-                    if (RenderSecondaryButton("Удалить", ImVec2(rmBtnW, 0.0f))) {
+                    if (RenderSecondaryButton(
+                            hdm::Tr("Удалить###DsRm", "Видалити###DsRm", "Remove###DsRm"),
+                            ImVec2(rmBtnW, 0.0f))) {
                         localInstaller_.RemoveDriverStorePackagesAsync(
                             {pkg.oemInfName},
                             storeRestoreBefore_,
@@ -2827,13 +3276,14 @@ private:
                     }
                     ImGui::EndDisabled();
                 } else {
-                    const float usedW = ImGui::CalcTextSize("Занят").x;
+                    const char* busyTxt = hdm::Tr("Занят", "Зайнятий", "In use");
+                    const float usedW = ImGui::CalcTextSize(busyTxt).x;
                     const float availCell = ImGui::GetContentRegionAvail().x;
                     if (availCell > usedW) {
                         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availCell - usedW) * 0.5f);
                     }
                     ImGui::AlignTextToFramePadding();
-                    ImGui::TextDisabled("Занят");
+                    ImGui::TextDisabled("%s", busyTxt);
                 }
 
                 ImGui::PopID();
@@ -2847,7 +3297,12 @@ private:
         const ImGuiStyle& style = ImGui::GetStyle();
         const bool isAppForeground = (GetForegroundWindow() == hwnd_);
 
-        if (RenderPillButton("Установка из папки (.inf)", localSectionIndex_ == 0)) {
+        if (RenderPillButton(
+                hdm::Tr(
+                    "Установка из папки (.inf)###LocSec0",
+                    "Встановлення з папки (.inf)###LocSec0",
+                    "Install from Folder (.inf)###LocSec0"),
+                localSectionIndex_ == 0)) {
             localSectionIndex_ = 0;
         }
         char storePill[96];
@@ -2855,17 +3310,26 @@ private:
             std::snprintf(
                 storePill,
                 sizeof(storePill),
-                "Бэкап и хранилище DriverStore (%zu | %zu дубл.)###StorePill",
+                hdm::Tr(
+                    "Бэкап и хранилище DriverStore (%zu | %zu дубл.)###StorePill",
+                    "Бекап і сховище DriverStore (%zu | %zu дубл.)###StorePill",
+                    "DriverStore Backup & Cleanup (%zu | %zu dup.)###StorePill"),
                 driverStoreCache_.packages.size(),
                 driverStoreCache_.duplicateCount);
         } else {
             std::snprintf(
                 storePill,
                 sizeof(storePill),
-                "Бэкап и хранилище DriverStore (%zu)###StorePill",
+                hdm::Tr(
+                    "Бэкап и хранилище DriverStore (%zu)###StorePill",
+                    "Бекап і сховище DriverStore (%zu)###StorePill",
+                    "DriverStore Backup & Cleanup (%zu)###StorePill"),
                 driverStoreCache_.packages.size());
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Бэкап и хранилище DriverStore (999 | 99 дубл.)"));
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr(
+            "Бэкап и хранилище DriverStore (999 | 99 дубл.)",
+            "Бекап і сховище DriverStore (999 | 99 дубл.)",
+            "DriverStore Backup & Cleanup (999 | 99 dup.)")));
         if (RenderPillButton(storePill, localSectionIndex_ == 1)) {
             localSectionIndex_ = 1;
         }
@@ -2884,18 +3348,23 @@ private:
             localInstaller_.IsExportingBackup() ||
             localInstaller_.IsRemovingStorePackages();
 
-        const char* pickLbl = "Обзор папки...";
-        const char* scanLbl = "Найти .inf";
+        const char* pickLbl = hdm::Tr("Обзор папки...###LocPick", "Огляд папки...###LocPick", "Browse Folder...###LocPick");
+        const char* scanLbl = hdm::Tr("Найти .inf###LocScan", "Знайти .inf###LocScan", "Scan .inf###LocScan");
         const float buttonsW =
-            CalcButtonWidth(pickLbl) + CalcButtonWidth(scanLbl) + style.ItemSpacing.x * 2.0f + 4.0f;
+            CalcButtonWidth(hdm::Tr("Обзор папки...", "Огляд папки...", "Browse Folder...")) +
+            CalcButtonWidth(hdm::Tr("Найти .inf", "Знайти .inf", "Scan .inf")) +
+            style.ItemSpacing.x * 2.0f + 4.0f;
 
         ImGui::AlignTextToFramePadding();
-        ImGui::TextUnformatted("Папка с драйверами:");
+        ImGui::TextUnformatted(hdm::Tr("Папка с драйверами:", "Папка з драйверами:", "Drivers Folder:"));
         ImGui::SameLine();
         ImGui::SetNextItemWidth(std::max(180.0f, ImGui::GetContentRegionAvail().x - buttonsW));
         ImGui::InputTextWithHint(
             "##FolderInput",
-            "Выберите папку с распакованными .inf драйверами...",
+            hdm::Tr(
+                "Выберите папку с распакованными .inf драйверами...",
+                "Виберіть папку з розпакованими .inf драйверами...",
+                "Select folder containing extracted .inf drivers..."),
             localFolderBuf_,
             sizeof(localFolderBuf_));
 
@@ -2933,14 +3402,35 @@ private:
             }
         }
 
-        ImGui::Checkbox("Принудительная установка (DIIRFLAG_FORCE_INF)", &localForceInstall_);
-        SameLineWrapIfNeeded(CalcButtonWidth("Точка восстановления перед установкой") + 32.0f * uiScale);
-        ImGui::Checkbox("Точка восстановления перед установкой", &localRestoreBefore_);
+        ImGui::Checkbox(
+            hdm::Tr(
+                "Принудительная установка (DIIRFLAG_FORCE_INF)###LocForce",
+                "Примусове встановлення (DIIRFLAG_FORCE_INF)###LocForce",
+                "Force install (DIIRFLAG_FORCE_INF)###LocForce"),
+            &localForceInstall_);
+        SameLineWrapIfNeeded(
+            CalcButtonWidth(hdm::Tr(
+                "Точка восстановления перед установкой",
+                "Точка відновлення перед встановленням",
+                "Create restore point before installing")) +
+            32.0f * uiScale);
+        ImGui::Checkbox(
+            hdm::Tr(
+                "Точка восстановления перед установкой###LocRp",
+                "Точка відновлення перед встановленням###LocRp",
+                "Create restore point before installing###LocRp"),
+            &localRestoreBefore_);
 
         auto infFiles = localInstaller_.GetInfFilesSnapshot();
-        SameLineWrapIfNeeded(CalcButtonWidth("Установить все .inf (DiInstallDriverW)"));
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr(
+            "Установить все .inf (DiInstallDriverW)",
+            "Встановити всі .inf (DiInstallDriverW)",
+            "Install All .inf (DiInstallDriverW)")));
         ImGui::BeginDisabled(busy || std::strlen(localFolderBuf_) == 0);
-        if (ImGui::Button("Установить все .inf (DiInstallDriverW)")) {
+        if (ImGui::Button(hdm::Tr(
+                "Установить все .inf (DiInstallDriverW)###LocInstAll",
+                "Встановити всі .inf (DiInstallDriverW)###LocInstAll",
+                "Install All .inf (DiInstallDriverW)###LocInstAll"))) {
             localInstaller_.InstallFromFolderAsync(
                 hdm::Utf8ToWide(localFolderBuf_),
                 localForceInstall_,
@@ -2958,7 +3448,11 @@ private:
         ImGui::EndDisabled();
 
         char infCountBuf[64];
-        std::snprintf(infCountBuf, sizeof(infCountBuf), "Найдено .inf: %zu", infFiles.size());
+        std::snprintf(
+            infCountBuf,
+            sizeof(infCountBuf),
+            hdm::Tr("Найдено .inf: %zu", "Знайдено .inf: %zu", "Found .inf: %zu"),
+            infFiles.size());
         const float countW = ImGui::CalcTextSize(infCountBuf).x;
         const float winRight = ImGui::GetWindowContentRegionMax().x;
         const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
@@ -2985,9 +3479,9 @@ private:
 
         if (ImGui::BeginTable("##InfTable", 3, kTableFlags, ImGui::GetContentRegionAvail())) {
             ImGui::TableSetupScrollFreeze(0, 1);
-            ImGui::TableSetupColumn("Имя файла", ImGuiTableColumnFlags_WidthStretch, 1.00f, 0);
-            ImGui::TableSetupColumn("Относительный путь", ImGuiTableColumnFlags_WidthStretch, 2.00f, 1);
-            ImGui::TableSetupColumn("Размер", ImGuiTableColumnFlags_WidthStretch, 0.50f, 2);
+            ImGui::TableSetupColumn(hdm::Tr("Имя файла", "Ім'я файлу", "File Name"), ImGuiTableColumnFlags_WidthStretch, 1.00f, 0);
+            ImGui::TableSetupColumn(hdm::Tr("Относительный путь", "Відносний шлях", "Relative Path"), ImGuiTableColumnFlags_WidthStretch, 2.00f, 1);
+            ImGui::TableSetupColumn(hdm::Tr("Размер", "Розмір", "Size"), ImGuiTableColumnFlags_WidthStretch, 0.50f, 2);
             ImGui::TableHeadersRow();
 
             if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs()) {
@@ -3037,11 +3531,17 @@ private:
         const bool isAppForeground = (GetForegroundWindow() == hwnd_);
 
         ImGui::BeginDisabled(busy);
-        if (ImGui::Button("Обновить диагностику")) {
+        if (ImGui::Button(hdm::Tr(
+                "Обновить диагностику###DiagRef",
+                "Оновити діагностику###DiagRef",
+                "Refresh Diagnostics###DiagRef"))) {
             diagnostics_.StartScanAsync(devicesCache_, MakeLogger());
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Очистить кэш WU"));
-        if (RenderSecondaryButton("Очистить кэш WU")) {
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Очистить кэш WU", "Очистити кеш WU", "Reset WU Cache")));
+        if (RenderSecondaryButton(hdm::Tr(
+                "Очистить кэш WU###DiagWuReset",
+                "Очистити кеш WU###DiagWuReset",
+                "Reset WU Cache###DiagWuReset"))) {
             diagnostics_.RunMaintenanceAsync(
                 hdm::MaintenanceAction::ResetWuDownloadCache,
                 "",
@@ -3052,15 +3552,26 @@ private:
         if (isAppForeground &&
             ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(
-                "Останавливает wuauserv и BITS, очищает папку загрузок Windows Update "
-                "(SoftwareDistribution\\Download) и запускает службы заново.\n"
-                "Помогает, если скачивание обновлений зависло или повреждено.");
+                "%s",
+                hdm::Tr(
+                    "Останавливает wuauserv и BITS, очищает папку загрузок Windows Update "
+                    "(SoftwareDistribution\\Download) и запускает службы заново.\n"
+                    "Помогает, если скачивание обновлений зависло или повреждено.",
+                    "Зупиняє wuauserv та BITS, очищує папку завантажень Windows Update "
+                    "(SoftwareDistribution\\Download) і запускає служби знову.\n"
+                    "Допомагає, якщо завантаження оновлень зависло або пошкоджено.",
+                    "Stops wuauserv and BITS, clears the Windows Update download cache "
+                    "(SoftwareDistribution\\Download), and restarts both services.\n"
+                    "Fixes stuck or corrupted Windows Update downloads."));
         }
 
         const bool canExport = diagCache_.valid && !diagnostics_.IsExportingReport();
-        SameLineWrapIfNeeded(CalcButtonWidth("Сохранить отчёт..."));
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Сохранить отчёт...", "Зберегти звіт...", "Save Report...")));
         ImGui::BeginDisabled(!canExport);
-        if (RenderSecondaryButton("Сохранить отчёт...")) {
+        if (RenderSecondaryButton(hdm::Tr(
+                "Сохранить отчёт...###DiagSaveRep",
+                "Зберегти звіт...###DiagSaveRep",
+                "Save Report...###DiagSaveRep"))) {
             diagnostics_.ExportReportInteractiveAsync(
                 hwnd_,
                 diagCache_,
@@ -3072,13 +3583,22 @@ private:
         if (isAppForeground &&
             ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
             ImGui::SetTooltip(
-                "Сохранить сводный отчёт о плате, BIOS, драйверах, проблемных устройствах, библиотеках и службах\n"
-                "в формате Markdown (.md), TXT или JSON (без имени пользователя и личных данных).");
+                "%s",
+                hdm::Tr(
+                    "Сохранить сводный отчёт о плате, BIOS, драйверах, проблемных устройствах, библиотеках и службах\n"
+                    "в формате Markdown (.md), TXT или JSON (без имени пользователя и личных данных).",
+                    "Зберегти зведений звіт про плату, BIOS, драйвери, проблемні пристрої, бібліотеки та служби\n"
+                    "у форматі Markdown (.md), TXT або JSON (без імені користувача та особистих даних).",
+                    "Save a summary report on motherboard, BIOS, drivers, issue devices, runtimes, and services\n"
+                    "in Markdown (.md), TXT, or JSON (privacy-clean, without usernames or personal paths)."));
         }
 
-        SameLineWrapIfNeeded(CalcButtonWidth("Копировать отчёт"));
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Копировать отчёт", "Копіювати звіт", "Copy Report")));
         ImGui::BeginDisabled(!diagCache_.valid);
-        if (RenderSecondaryButton("Копировать отчёт")) {
+        if (RenderSecondaryButton(hdm::Tr(
+                "Копировать отчёт###DiagCopyRep",
+                "Копіювати звіт###DiagCopyRep",
+                "Copy Report###DiagCopyRep"))) {
             const std::string mdReport = hdm::SystemDiagnostics::BuildCleanSystemReport(
                 hdm::ReportFormat::Markdown,
                 diagCache_,
@@ -3087,28 +3607,31 @@ private:
             ImGui::SetClipboardText(mdReport.c_str());
             logBuffer_.Push(
                 hdm::LogLevel::Success,
-                "Отчёт о системе (Markdown) скопирован в буфер обмена.");
+                hdm::Tr(
+                    "Отчёт о системе (Markdown) скопирован в буфер обмена.",
+                    "Звіт про систему (Markdown) скопійовано до буфера обміну.",
+                    "System report (Markdown) copied to clipboard."));
         }
         ImGui::EndDisabled();
 
         const bool compInstalling = componentsScanner_.IsInstalling();
         if (diagnostics_.IsRunningAction()) {
-            SameLineWrapIfNeeded(CalcButtonWidth("Отмена"));
-            if (RenderSecondaryButton("Отмена")) {
+            SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Отмена", "Скасувати", "Cancel")));
+            if (RenderSecondaryButton(hdm::Tr("Отмена###DiagCancel", "Скасувати###DiagCancel", "Cancel###DiagCancel"))) {
                 diagnostics_.RequestCancel();
             }
-            const std::string phase = diagnostics_.ActionPhase();
+            const std::string phase = hdm::TrDyn(diagnostics_.ActionPhase());
             if (!phase.empty()) {
                 ImGui::SameLine(0.0f, 12.0f);
                 ImGui::AlignTextToFramePadding();
                 ImGui::TextColored(ImVec4(0.98f, 0.75f, 0.14f, 1.00f), "%s", phase.c_str());
             }
         } else if (compInstalling) {
-            SameLineWrapIfNeeded(CalcButtonWidth("Отмена"));
-            if (RenderSecondaryButton("Отмена")) {
+            SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Отмена", "Скасувати", "Cancel")));
+            if (RenderSecondaryButton(hdm::Tr("Отмена###DiagCompCancel", "Скасувати###DiagCompCancel", "Cancel###DiagCompCancel"))) {
                 componentsScanner_.RequestCancelInstall();
             }
-            const std::string phase = componentsScanner_.PhaseMessage();
+            const std::string phase = hdm::TrDyn(componentsScanner_.PhaseMessage());
             if (!phase.empty()) {
                 ImGui::SameLine(0.0f, 12.0f);
                 ImGui::AlignTextToFramePadding();
@@ -3121,7 +3644,10 @@ private:
                 std::snprintf(
                     msg,
                     sizeof(msg),
-                    "Отключено критичных служб: %zu",
+                    hdm::Tr(
+                        "Отключено критичных служб: %zu",
+                        "Вимкнено критичних служб: %zu",
+                        "Disabled critical services: %zu"),
                     diagCache_.disabledCriticalServices);
                 RenderStatusBadge(ImVec4(0.97f, 0.44f, 0.44f, 1.00f), msg, true);
             } else if (diagCache_.attentionControllers > 0) {
@@ -3129,19 +3655,30 @@ private:
                 std::snprintf(
                     msg,
                     sizeof(msg),
-                    "Контроллеры требуют внимания: %zu",
+                    hdm::Tr(
+                        "Контроллеры требуют внимания: %zu",
+                        "Контролери потребують уваги: %zu",
+                        "Controllers need attention: %zu"),
                     diagCache_.attentionControllers);
                 RenderStatusBadge(ImVec4(0.98f, 0.75f, 0.14f, 1.00f), msg, true);
             } else {
                 RenderStatusBadge(
                     ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
-                    "Системное окружение готово к обновлениям",
+                    hdm::Tr(
+                        "Системное окружение готово к обновлениям",
+                        "Системне оточення готове до оновлень",
+                        "System environment is ready for updates"),
                     true);
             }
         }
 
         if (!diagCache_.valid) {
-            ImGui::TextDisabled("Выполняется сбор сведений о материнской плате, службах и драйверах...");
+            ImGui::TextDisabled(
+                "%s",
+                hdm::Tr(
+                    "Выполняется сбор сведений о материнской плате, службах и драйверах...",
+                    "Виконується збір відомостей про материнську плату, служби та драйвери...",
+                    "Collecting motherboard, BIOS, service, and driver diagnostics..."));
             return;
         }
 
@@ -3165,7 +3702,10 @@ private:
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x, cardSpacingY));
         {
             const auto& mb = diagCache_.motherboard;
-            ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "Материнская плата и BIOS");
+            ImGui::TextColored(
+                ImVec4(0.45f, 0.73f, 1.00f, 1.00f),
+                "%s",
+                hdm::Tr("Материнская плата и BIOS", "Материнська плата та BIOS", "Motherboard & BIOS"));
             ImGui::Separator();
 
             std::string boardTitle;
@@ -3182,10 +3722,13 @@ private:
                 boardTitle += mb.systemProduct;
             }
             if (boardTitle.empty()) {
-                boardTitle = "Модель не определена в SMBIOS";
+                boardTitle = hdm::Tr(
+                    "Модель не определена в SMBIOS",
+                    "Модель не визначено в SMBIOS",
+                    "Model not defined in SMBIOS");
             }
 
-            ImGui::TextDisabled("Плата:");
+            ImGui::TextDisabled("%s", hdm::Tr("Плата:", "Плата:", "Board:"));
             ImGui::SameLine();
             if (RenderCellText(boardTitle) && isAppForeground &&
                 ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
@@ -3204,7 +3747,10 @@ private:
                 ImGui::SetCursorPosY(btnsY);
             }
             if (!mb.supportUrl.empty()) {
-                if (RenderSecondaryButton("Сайт платы")) {
+                if (RenderSecondaryButton(hdm::Tr(
+                        "Сайт платы###MbSite",
+                        "Сайт плати###MbSite",
+                        "Board Website###MbSite"))) {
                     OpenUrlInBrowser(mb.supportUrl);
                 }
                 if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
@@ -3212,16 +3758,25 @@ private:
                 }
                 ImGui::SameLine();
             }
-            if (RenderSecondaryButton("Поиск драйверов")) {
+            if (RenderSecondaryButton(hdm::Tr(
+                    "Поиск драйверов###MbSearch",
+                    "Пошук драйверів###MbSearch",
+                    "Find Drivers###MbSearch"))) {
                 OpenUrlInBrowser(
                     "https://www.google.com/search?q=" +
                     UrlEncode(boardTitle + " chipset lan audio drivers Windows"));
             }
             ImGui::SameLine();
-            if (RenderSecondaryButton("Копировать")) {
+            if (RenderSecondaryButton(hdm::Tr(
+                    "Копировать###MbCopy",
+                    "Копіювати###MbCopy",
+                    "Copy###MbCopy"))) {
                 const std::string copyText = boardTitle + " | BIOS: " + biosInfo;
                 ImGui::SetClipboardText(copyText.c_str());
-                logBuffer_.Push(hdm::LogLevel::Info, "Скопировано в буфер: " + copyText);
+                logBuffer_.Push(
+                    hdm::LogLevel::Info,
+                    std::string(hdm::Tr("Скопировано в буфер: ", "Скопійовано до буфера: ", "Copied to clipboard: ")) +
+                        copyText);
             }
         }
         ImGui::PopStyleVar();
@@ -3239,35 +3794,59 @@ private:
         ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(style.ItemSpacing.x, cardSpacingY));
         {
             const auto& rd = diagCache_.readiness;
-            ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "Готовность Windows и защита");
+            ImGui::TextColored(
+                ImVec4(0.45f, 0.73f, 1.00f, 1.00f),
+                "%s",
+                hdm::Tr(
+                    "Готовность Windows и защита",
+                    "Готовність Windows та захист",
+                    "Windows Readiness & Protection"));
             ImGui::Separator();
 
             if (rd.cbsRebootPending || rd.wuRebootRequired) {
                 RenderStatusBadge(
                     ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
-                    "Ожидается перезагрузка Windows (WU / CBS)");
+                    hdm::Tr(
+                        "Ожидается перезагрузка Windows (WU / CBS)",
+                        "Очікується перезавантаження Windows (WU / CBS)",
+                        "Windows reboot pending (WU / CBS)"));
             } else if (rd.pendingFileRenames) {
                 RenderStatusBadge(
                     ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
-                    "Есть отложенные операции замены системных файлов");
+                    hdm::Tr(
+                        "Есть отложенные операции замены системных файлов",
+                        "Є відкладені операції заміни системних файлів",
+                        "Pending system file rename operations"));
             } else {
                 RenderStatusBadge(
                     ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
-                    "Перезагрузка не требуется");
+                    hdm::Tr(
+                        "Перезагрузка не требуется",
+                        "Перезавантаження не потрібне",
+                        "No reboot required"));
             }
 
             if (rd.systemRestorePolicyDisabled) {
                 RenderStatusBadge(
                     ImVec4(0.97f, 0.44f, 0.44f, 1.00f),
-                    "Точки восстановления запрещены политикой (DisableSR)");
+                    hdm::Tr(
+                        "Точки восстановления запрещены политикой (DisableSR)",
+                        "Точки відновлення заборонено політикою (DisableSR)",
+                        "System Restore disabled by policy (DisableSR)"));
             } else if (rd.systemRestoreEnabled) {
                 RenderStatusBadge(
                     ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
-                    "Защита системы (точки восстановления) активна");
+                    hdm::Tr(
+                        "Защита системы (точки восстановления) активна",
+                        "Захист системи (точки відновлення) активний",
+                        "System Protection (Restore Points) enabled"));
             } else {
                 RenderStatusBadge(
                     ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
-                    "Защита системы отключена — точки могут не создаться");
+                    hdm::Tr(
+                        "Защита системы отключена — точки могут не создаться",
+                        "Захист системи вимкнено — точки можуть не створюватися",
+                        "System Protection disabled — restore points may fail"));
             }
 
             if (diagCache_.disabledCriticalServices > 0) {
@@ -3275,46 +3854,64 @@ private:
                 std::snprintf(
                     svcWarn,
                     sizeof(svcWarn),
-                    "Отключены критичные службы: %zu шт. (см. вкладку служб)",
+                    hdm::Tr(
+                        "Отключены критичные службы: %zu шт. (см. вкладку служб)",
+                        "Вимкнено критичних служб: %zu шт. (див. вкладку служб)",
+                        "Disabled critical services: %zu (check Services tab)"),
                     diagCache_.disabledCriticalServices);
                 RenderStatusBadge(ImVec4(0.97f, 0.44f, 0.44f, 1.00f), svcWarn);
             } else {
                 RenderStatusBadge(
                     ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
-                    "Критичные службы обновлений и защиты не отключены");
+                    hdm::Tr(
+                        "Критичные службы обновлений и защиты не отключены",
+                        "Критичні служби оновлень і захисту не вимкнено",
+                        "Critical update & protection services are enabled"));
             }
         }
         ImGui::PopStyleVar();
         ImGui::EndChild();
         ImGui::PopStyleVar();
 
-        // Section switcher pills: Controllers vs Windows Services
+        // Section switcher pills: Controllers vs Windows Services vs Restore Points vs Storage & Power
         char ctrlPill[96];
         std::snprintf(
             ctrlPill,
             sizeof(ctrlPill),
-            "Ключевые контроллеры платы (%zu)",
+            hdm::Tr(
+                "Ключевые контроллеры платы (%zu)###CtrlPill",
+                "Ключові контролери плати (%zu)###CtrlPill",
+                "Board Controllers (%zu)###CtrlPill"),
             diagCache_.controllers.size());
         if (RenderPillButton(ctrlPill, diagSectionIndex_ == 0)) {
             diagSectionIndex_ = 0;
         }
 
-        char svcPill[96];
+        char svcPill[128];
         if (diagCache_.disabledCriticalServices > 0) {
             std::snprintf(
                 svcPill,
                 sizeof(svcPill),
-                "Службы Windows и обновления (%zu | %zu откл.!)",
+                hdm::Tr(
+                    "Службы Windows и обновления (%zu | %zu откл.!)###SvcPill",
+                    "Служби Windows та оновлення (%zu | %zu вимкн.!)###SvcPill",
+                    "Windows & Update Services (%zu | %zu off!)###SvcPill"),
                 diagCache_.services.size(),
                 diagCache_.disabledCriticalServices);
         } else {
             std::snprintf(
                 svcPill,
                 sizeof(svcPill),
-                "Службы Windows и обновления (%zu)",
+                hdm::Tr(
+                    "Службы Windows и обновления (%zu)###SvcPill",
+                    "Служби Windows та оновлення (%zu)###SvcPill",
+                    "Windows & Update Services (%zu)###SvcPill"),
                 diagCache_.services.size());
         }
-        SameLineWrapIfNeeded(CalcButtonWidth(svcPill));
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr(
+            "Службы Windows и обновления (99 | 9 откл.!)",
+            "Служби Windows та оновлення (99 | 9 вимкн.!)",
+            "Windows & Update Services (99 | 9 off!)")));
         if (RenderPillButton(svcPill, diagSectionIndex_ == 1)) {
             diagSectionIndex_ = 1;
         }
@@ -3323,9 +3920,15 @@ private:
         std::snprintf(
             rpPill,
             sizeof(rpPill),
-            "Точки восстановления (%zu)###RpPill",
+            hdm::Tr(
+                "Точки восстановления (%zu)###RpPill",
+                "Точки відновлення (%zu)###RpPill",
+                "Restore Points (%zu)###RpPill"),
             diagCache_.restorePoints.size());
-        SameLineWrapIfNeeded(CalcButtonWidth("Точки восстановления (99)"));
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr(
+            "Точки восстановления (99)",
+            "Точки відновлення (99)",
+            "Restore Points (99)")));
         if (RenderPillButton(rpPill, diagSectionIndex_ == 2)) {
             diagSectionIndex_ = 2;
         }
@@ -3334,9 +3937,15 @@ private:
         std::snprintf(
             storPill,
             sizeof(storPill),
-            "Накопители и питание (%zu)###StorPill",
+            hdm::Tr(
+                "Накопители и питание (%zu)###StorPill",
+                "Накопичувачі та живлення (%zu)###StorPill",
+                "Storage & Power (%zu)###StorPill"),
             diagCache_.storageItems.size());
-        SameLineWrapIfNeeded(CalcButtonWidth("Накопители и питание (99)"));
+        SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr(
+            "Накопители и питание (99)",
+            "Накопичувачі та живлення (99)",
+            "Storage & Power (99)")));
         if (RenderPillButton(storPill, diagSectionIndex_ == 3)) {
             diagSectionIndex_ = 3;
         }
@@ -3349,17 +3958,17 @@ private:
             ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_ScrollY;
 
         if (diagSectionIndex_ == 0) {
-            const float instW = CalcButtonWidth("Установить") + 6.0f * uiScale;
-            const float catW = CalcButtonWidth("Каталог") + 6.0f * uiScale;
+            const float instW = CalcButtonWidth(hdm::Tr("Установить", "Встановити", "Install")) + 8.0f * uiScale;
+            const float catW = CalcButtonWidth(hdm::Tr("Каталог", "Каталог", "Catalog")) + 8.0f * uiScale;
             const float actionColW = instW + style.ItemSpacing.x + catW + style.CellPadding.x * 2.0f + 4.0f;
 
             if (ImGui::BeginTable("##DiagControllersTable", 5, kDiagTableFlags, ImVec2(0.0f, tableH))) {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("Состояние", ImGuiTableColumnFlags_WidthStretch, 1.34f);
-                ImGui::TableSetupColumn("Роль", ImGuiTableColumnFlags_WidthStretch, 0.62f);
-                ImGui::TableSetupColumn("Устройство", ImGuiTableColumnFlags_WidthStretch, 1.20f);
-                ImGui::TableSetupColumn("Драйвер / Дата", ImGuiTableColumnFlags_WidthStretch, 0.94f);
-                ImGui::TableSetupColumn("Действие", ImGuiTableColumnFlags_WidthFixed, actionColW);
+                ImGui::TableSetupColumn(hdm::Tr("Состояние", "Стан", "Status"), ImGuiTableColumnFlags_WidthStretch, 1.34f);
+                ImGui::TableSetupColumn(hdm::Tr("Роль", "Роль", "Role"), ImGuiTableColumnFlags_WidthStretch, 0.62f);
+                ImGui::TableSetupColumn(hdm::Tr("Устройство", "Пристрій", "Device"), ImGuiTableColumnFlags_WidthStretch, 1.20f);
+                ImGui::TableSetupColumn(hdm::Tr("Драйвер / Дата", "Драйвер / Дата", "Driver / Date"), ImGuiTableColumnFlags_WidthStretch, 0.94f);
+                ImGui::TableSetupColumn(hdm::Tr("Действие", "Дія", "Action"), ImGuiTableColumnFlags_WidthFixed, actionColW);
                 ImGui::TableHeadersRow();
 
                 for (size_t i = 0; i < diagCache_.controllers.size(); ++i) {
@@ -3374,10 +3983,11 @@ private:
                     } else if (item.health == hdm::ControllerHealth::Attention) {
                         col = ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
                     }
-                    RenderStatusBadge(col, item.statusText.c_str(), true);
+                    const std::string ctrlSt = hdm::TrDyn(item.statusText);
+                    RenderStatusBadge(col, ctrlSt.c_str(), true);
 
                     ImGui::TableSetColumnIndex(1);
-                    RenderCellText(item.role, false, true);
+                    RenderCellText(hdm::TrDyn(item.role), false, true);
 
                     ImGui::TableSetColumnIndex(2);
                     RenderCellText(item.deviceName, false, true);
@@ -3386,7 +3996,10 @@ private:
                         ImGui::PushTextWrapPos(440.0f * uiScale);
                         ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s", item.deviceName.c_str());
                         ImGui::TextDisabled(
-                            "Поставщик: %s | INF: %s",
+                            hdm::Tr(
+                                "Поставщик: %s | INF: %s",
+                                "Виробник: %s | INF: %s",
+                                "Vendor: %s | INF: %s"),
                             item.manufacturer.empty() ? "—" : item.manufacturer.c_str(),
                             item.infName.empty() ? "—" : item.infName.c_str());
                         if (!item.hardwareId.empty()) {
@@ -3407,7 +4020,10 @@ private:
                     const bool hasKey = !item.searchKey.empty() || !item.hardwareId.empty();
                     const bool instPrimary = (item.health != hdm::ControllerHealth::Ok);
                     ImGui::BeginDisabled(busy || compInstalling || !hasKey);
-                    if (RenderActionButton("Установить", ImVec2(instW, 0.0f), instPrimary)) {
+                    if (RenderActionButton(
+                            hdm::Tr("Установить###CInst", "Встановити###CInst", "Install###CInst"),
+                            ImVec2(instW, 0.0f),
+                            instPrimary)) {
                         componentsScanner_.SearchAndInstallFromCatalogAsync(
                             item.deviceName,
                             item.searchKey,
@@ -3428,11 +4044,17 @@ private:
                     if (isAppForeground &&
                         ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
                         ImGui::SetTooltip(
-                            "Автоматически найти, скачать (.cab), проверить подпись и установить свежий WHQL-драйвер из Microsoft Update Catalog.");
+                            "%s",
+                            hdm::Tr(
+                                "Автоматически найти, скачать (.cab), проверить подпись и установить свежий WHQL-драйвер из Microsoft Update Catalog.",
+                                "Автоматично знайти, завантажити (.cab), перевірити підпис і встановити свіжий WHQL-драйвер із Microsoft Update Catalog.",
+                                "Automatically search, download (.cab), verify signature, and install the latest WHQL driver from Microsoft Update Catalog."));
                     }
                     ImGui::SameLine();
                     ImGui::BeginDisabled(item.searchKey.empty());
-                    if (RenderSecondaryButton("Каталог", ImVec2(catW, 0.0f))) {
+                    if (RenderSecondaryButton(
+                            hdm::Tr("Каталог###CCat", "Каталог###CCat", "Catalog###CCat"),
+                            ImVec2(catW, 0.0f))) {
                         OpenUrlInBrowser(
                             "https://www.catalog.update.microsoft.com/Search.aspx?q=" +
                             UrlEncode(item.searchKey));
@@ -3444,15 +4066,16 @@ private:
                 ImGui::EndTable();
             }
         } else if (diagSectionIndex_ == 1) {
-            const float svcBtnW = CalcButtonWidth("Включить") + 10.0f * uiScale;
+            const char* enSvcTxt = hdm::Tr("Включить", "Увімкнути", "Enable");
+            const float svcBtnW = CalcButtonWidth(enSvcTxt) + 10.0f * uiScale;
             const float svcActionW = svcBtnW + style.CellPadding.x * 2.0f + 4.0f;
             if (ImGui::BeginTable("##DiagServicesTable", 5, kDiagTableFlags, ImVec2(0.0f, tableH))) {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("Статус", ImGuiTableColumnFlags_WidthStretch, 1.18f);
-                ImGui::TableSetupColumn("Служба", ImGuiTableColumnFlags_WidthStretch, 1.12f);
-                ImGui::TableSetupColumn("Назначение", ImGuiTableColumnFlags_WidthStretch, 1.15f);
-                ImGui::TableSetupColumn("Тип запуска", ImGuiTableColumnFlags_WidthStretch, 0.62f);
-                ImGui::TableSetupColumn("Действие", ImGuiTableColumnFlags_WidthFixed, svcActionW);
+                ImGui::TableSetupColumn(hdm::Tr("Статус", "Статус", "Status"), ImGuiTableColumnFlags_WidthStretch, 1.18f);
+                ImGui::TableSetupColumn(hdm::Tr("Служба", "Служба", "Service"), ImGuiTableColumnFlags_WidthStretch, 1.12f);
+                ImGui::TableSetupColumn(hdm::Tr("Назначение", "Призначення", "Purpose"), ImGuiTableColumnFlags_WidthStretch, 1.15f);
+                ImGui::TableSetupColumn(hdm::Tr("Тип запуска", "Тип запуску", "Startup"), ImGuiTableColumnFlags_WidthStretch, 0.62f);
+                ImGui::TableSetupColumn(hdm::Tr("Действие", "Дія", "Action"), ImGuiTableColumnFlags_WidthFixed, svcActionW);
                 ImGui::TableHeadersRow();
 
                 for (size_t i = 0; i < diagCache_.services.size(); ++i) {
@@ -3467,28 +4090,32 @@ private:
                     } else if (svc.health == hdm::ServiceHealthState::MissingOrError) {
                         col = ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
                     }
-                    RenderStatusBadge(col, svc.stateText.c_str(), true);
+                    const std::string svcStateShown = hdm::TrDyn(svc.stateText);
+                    RenderStatusBadge(col, svcStateShown.c_str(), true);
 
                     ImGui::TableSetColumnIndex(1);
-                    const std::string svcLabel = svc.serviceName + " — " + svc.displayName;
+                    const std::string svcLabel = svc.serviceName + " — " + hdm::TrDyn(svc.displayName);
                     if (RenderCellText(svcLabel, false, true) && isAppForeground &&
                         ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                         ImGui::SetTooltip("%s", svcLabel.c_str());
                     }
 
                     ImGui::TableSetColumnIndex(2);
-                    if (RenderCellText(svc.purpose, true, true) && isAppForeground &&
+                    const std::string svcPurposeShown = hdm::TrDyn(svc.purpose);
+                    if (RenderCellText(svcPurposeShown, true, true) && isAppForeground &&
                         ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                        ImGui::SetTooltip("%s", svc.purpose.c_str());
+                        ImGui::SetTooltip("%s", svcPurposeShown.c_str());
                     }
 
                     ImGui::TableSetColumnIndex(3);
-                    RenderCellText(svc.startTypeText, false, true);
+                    RenderCellText(hdm::TrDyn(svc.startTypeText), false, true);
 
                     ImGui::TableSetColumnIndex(4);
                     if (svc.health == hdm::ServiceHealthState::Disabled) {
                         ImGui::BeginDisabled(busy);
-                        if (ImGui::Button("Включить", ImVec2(svcBtnW, 0.0f))) {
+                        if (ImGui::Button(
+                                hdm::Tr("Включить###SvcEn", "Увімкнути###SvcEn", "Enable###SvcEn"),
+                                ImVec2(svcBtnW, 0.0f))) {
                             diagnostics_.RunMaintenanceAsync(
                                 hdm::MaintenanceAction::EnableService,
                                 svc.serviceName,
@@ -3497,13 +4124,14 @@ private:
                         }
                         ImGui::EndDisabled();
                     } else {
-                        const float okW = ImGui::CalcTextSize("ОК").x;
+                        const char* okTxt = hdm::Tr("ОК", "ОК", "OK");
+                        const float okW = ImGui::CalcTextSize(okTxt).x;
                         const float availCell = ImGui::GetContentRegionAvail().x;
                         if (availCell > okW) {
                             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availCell - okW) * 0.5f);
                         }
                         ImGui::AlignTextToFramePadding();
-                        ImGui::TextDisabled("ОК");
+                        ImGui::TextDisabled("%s", okTxt);
                     }
 
                     ImGui::PopID();
@@ -3513,10 +4141,10 @@ private:
         } else if (diagSectionIndex_ == 2) {
             if (ImGui::BeginTable("##DiagRestorePointsTable", 4, kDiagTableFlags, ImVec2(0.0f, tableH))) {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("Тип / Статус", ImGuiTableColumnFlags_WidthStretch, 0.85f);
-                ImGui::TableSetupColumn("Дата и время", ImGuiTableColumnFlags_WidthStretch, 0.72f);
-                ImGui::TableSetupColumn("Описание точки восстановления", ImGuiTableColumnFlags_WidthStretch, 1.85f);
-                ImGui::TableSetupColumn("Источник", ImGuiTableColumnFlags_WidthStretch, 0.88f);
+                ImGui::TableSetupColumn(hdm::Tr("Тип / Статус", "Тип / Статус", "Type / Status"), ImGuiTableColumnFlags_WidthStretch, 0.85f);
+                ImGui::TableSetupColumn(hdm::Tr("Дата и время", "Дата і час", "Date & Time"), ImGuiTableColumnFlags_WidthStretch, 0.72f);
+                ImGui::TableSetupColumn(hdm::Tr("Описание точки восстановления", "Опис точки відновлення", "Restore Point Description"), ImGuiTableColumnFlags_WidthStretch, 1.85f);
+                ImGui::TableSetupColumn(hdm::Tr("Источник", "Джерело", "Source"), ImGuiTableColumnFlags_WidthStretch, 0.88f);
                 ImGui::TableHeadersRow();
 
                 for (size_t i = 0; i < diagCache_.restorePoints.size(); ++i) {
@@ -3531,7 +4159,8 @@ private:
                     } else if (rp.categoryLabel == "Windows Update") {
                         col = ImVec4(0.38f, 0.68f, 0.98f, 1.00f);
                     }
-                    RenderStatusBadge(col, rp.categoryLabel.c_str(), true);
+                    const std::string rpCatShown = hdm::TrDyn(rp.categoryLabel);
+                    RenderStatusBadge(col, rpCatShown.c_str(), true);
 
                     ImGui::TableSetColumnIndex(1);
                     RenderCellText(rp.timestamp, false, true);
@@ -3550,17 +4179,17 @@ private:
                 ImGui::EndTable();
             }
         } else {
-            const float instW = CalcButtonWidth("Установить") + 6.0f * uiScale;
-            const float catW = CalcButtonWidth("Каталог") + 6.0f * uiScale;
+            const float instW = CalcButtonWidth(hdm::Tr("Установить", "Встановити", "Install")) + 8.0f * uiScale;
+            const float catW = CalcButtonWidth(hdm::Tr("Каталог", "Каталог", "Catalog")) + 8.0f * uiScale;
             const float actionColW = instW + style.ItemSpacing.x + catW + style.CellPadding.x * 2.0f + 4.0f;
 
             if (ImGui::BeginTable("##DiagStorageTable", 5, kDiagTableFlags, ImVec2(0.0f, tableH))) {
                 ImGui::TableSetupScrollFreeze(0, 1);
-                ImGui::TableSetupColumn("Состояние", ImGuiTableColumnFlags_WidthStretch, 1.28f);
-                ImGui::TableSetupColumn("Тип", ImGuiTableColumnFlags_WidthStretch, 0.80f);
-                ImGui::TableSetupColumn("Устройство / Накопитель", ImGuiTableColumnFlags_WidthStretch, 1.30f);
-                ImGui::TableSetupColumn("Драйвер / INF", ImGuiTableColumnFlags_WidthStretch, 0.94f);
-                ImGui::TableSetupColumn("Действие", ImGuiTableColumnFlags_WidthFixed, actionColW);
+                ImGui::TableSetupColumn(hdm::Tr("Состояние", "Стан", "Status"), ImGuiTableColumnFlags_WidthStretch, 1.28f);
+                ImGui::TableSetupColumn(hdm::Tr("Тип", "Тип", "Type"), ImGuiTableColumnFlags_WidthStretch, 0.80f);
+                ImGui::TableSetupColumn(hdm::Tr("Устройство / Накопитель", "Пристрій / Накопичувач", "Device / Storage Drive"), ImGuiTableColumnFlags_WidthStretch, 1.30f);
+                ImGui::TableSetupColumn(hdm::Tr("Драйвер / INF", "Драйвер / INF", "Driver / INF"), ImGuiTableColumnFlags_WidthStretch, 0.94f);
+                ImGui::TableSetupColumn(hdm::Tr("Действие", "Дія", "Action"), ImGuiTableColumnFlags_WidthFixed, actionColW);
                 ImGui::TableHeadersRow();
 
                 for (size_t i = 0; i < diagCache_.storageItems.size(); ++i) {
@@ -3575,10 +4204,11 @@ private:
                     } else if (st.health == hdm::ControllerHealth::Attention) {
                         col = ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
                     }
-                    RenderStatusBadge(col, st.statusText.c_str(), true);
+                    const std::string stStatusShown = hdm::TrDyn(st.statusText);
+                    RenderStatusBadge(col, stStatusShown.c_str(), true);
 
                     ImGui::TableSetColumnIndex(1);
-                    RenderCellText(st.role, false, true);
+                    RenderCellText(hdm::TrDyn(st.role), false, true);
 
                     ImGui::TableSetColumnIndex(2);
                     RenderCellText(st.deviceName, false, true);
@@ -3587,7 +4217,10 @@ private:
                         ImGui::PushTextWrapPos(440.0f * uiScale);
                         ImGui::TextColored(ImVec4(0.45f, 0.73f, 1.00f, 1.00f), "%s", st.deviceName.c_str());
                         ImGui::TextDisabled(
-                            "Поставщик: %s | INF: %s",
+                            hdm::Tr(
+                                "Поставщик: %s | INF: %s",
+                                "Виробник: %s | INF: %s",
+                                "Vendor: %s | INF: %s"),
                             st.manufacturer.empty() ? "—" : st.manufacturer.c_str(),
                             st.infName.empty() ? "—" : st.infName.c_str());
                         if (!st.hardwareId.empty()) {
@@ -3609,7 +4242,10 @@ private:
                         const bool hasKey = !st.searchKey.empty() || !st.hardwareId.empty();
                         const bool instPrimary = (st.health != hdm::ControllerHealth::Ok);
                         ImGui::BeginDisabled(busy || compInstalling || !hasKey);
-                        if (RenderActionButton("Установить", ImVec2(instW, 0.0f), instPrimary)) {
+                        if (RenderActionButton(
+                                hdm::Tr("Установить###StInst", "Встановити###StInst", "Install###StInst"),
+                                ImVec2(instW, 0.0f),
+                                instPrimary)) {
                             componentsScanner_.SearchAndInstallFromCatalogAsync(
                                 st.deviceName,
                                 st.searchKey,
@@ -3625,14 +4261,19 @@ private:
                         ImGui::EndDisabled();
                         ImGui::SameLine();
                         ImGui::BeginDisabled(st.searchKey.empty());
-                        if (RenderSecondaryButton("Каталог", ImVec2(catW, 0.0f))) {
+                        if (RenderSecondaryButton(
+                                hdm::Tr("Каталог###StCat", "Каталог###StCat", "Catalog###StCat"),
+                                ImVec2(catW, 0.0f))) {
                             OpenUrlInBrowser(
                                 "https://www.catalog.update.microsoft.com/Search.aspx?q=" +
                                 UrlEncode(st.searchKey));
                         }
                         ImGui::EndDisabled();
                     } else {
-                        const char* sysLbl = "Системный (disk.inf)";
+                        const char* sysLbl = hdm::Tr(
+                            "Системный (disk.inf)",
+                            "Системний (disk.inf)",
+                            "Inbox (disk.inf)");
                         const float sysW = ImGui::CalcTextSize(sysLbl).x;
                         const float availCell = ImGui::GetContentRegionAvail().x;
                         if (availCell > sysW) {
@@ -3657,22 +4298,28 @@ private:
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         if (diagSectionIndex_ == 3) {
             const char* trimTxt =
-                diagCache_.readiness.trimEnabled ? "NTFS TRIM: Активен" : "NTFS TRIM: Отключён";
+                diagCache_.readiness.trimEnabled
+                    ? hdm::Tr("NTFS TRIM: Активен", "NTFS TRIM: Активний", "NTFS TRIM: Enabled")
+                    : hdm::Tr("NTFS TRIM: Отключён", "NTFS TRIM: Вимкнено", "NTFS TRIM: Disabled");
             const float trimW = ImGui::CalcTextSize(trimTxt).x;
             const float winRight = ImGui::GetWindowContentRegionMax().x;
 
             ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("Схема электропитания:");
+            ImGui::TextDisabled(
+                "%s",
+                hdm::Tr("Схема электропитания:", "Схема електроживлення:", "Windows Power Plan:"));
             ImGui::BeginDisabled(busy);
             for (const auto& ps : diagCache_.powerSchemes) {
-                const float btnW = CalcButtonWidth(ps.friendlyName.c_str());
+                const std::string psShown = hdm::TrDyn(ps.friendlyName);
+                const float btnW = CalcButtonWidth(psShown.c_str());
                 const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
                 if (lastEnd + style.ItemSpacing.x + btnW > winRight - trimW - 16.0f) {
                     break;
                 }
                 ImGui::SameLine();
                 ImGui::PushID(ps.guidString.c_str());
-                if (RenderPillButton(ps.friendlyName.c_str(), ps.isActive) && !ps.isActive) {
+                const std::string psBtnLbl = psShown + "###PsBtn";
+                if (RenderPillButton(psBtnLbl.c_str(), ps.isActive) && !ps.isActive) {
                     diagnostics_.SetActivePowerSchemeAsync(
                         ps.guidString, devicesCache_, MakeLogger());
                 }
@@ -3695,9 +4342,15 @@ private:
             };
 
             ImGui::BeginDisabled(systemRestore_.IsBusy());
-            if (ImGui::Button("Создать точку восстановления")) {
+            if (ImGui::Button(hdm::Tr(
+                    "Создать точку восстановления###FtRpCreate",
+                    "Створити точку відновлення###FtRpCreate",
+                    "Create Restore Point###FtRpCreate"))) {
                 systemRestore_.CreateRestorePointAsync(
-                    "DriverLoom (ручная точка восстановления)",
+                    hdm::Tr(
+                        "DriverLoom (ручная точка восстановления)",
+                        "DriverLoom (ручна точка відновлення)",
+                        "DriverLoom (manual restore point)"),
                     MakeLogger(),
                     [this](bool ok, const std::string&) {
                         if (ok && !diagnostics_.IsBusy()) {
@@ -3708,12 +4361,18 @@ private:
             ImGui::EndDisabled();
 
             ImGui::SameLine();
-            if (RenderSecondaryButton("Запустить откат системы (rstrui.exe)")) {
+            if (RenderSecondaryButton(hdm::Tr(
+                    "Запустить откат системы (rstrui.exe)###FtRstrui",
+                    "Запустити відкат системи (rstrui.exe)###FtRstrui",
+                    "Open System Restore (rstrui.exe)###FtRstrui"))) {
                 launchSystem32Tool(L"rstrui.exe");
             }
 
             ImGui::SameLine();
-            if (RenderSecondaryButton("Настроить защиту диска")) {
+            if (RenderSecondaryButton(hdm::Tr(
+                    "Настроить защиту диска###FtProt",
+                    "Налаштувати захист диска###FtProt",
+                    "Configure Protection###FtProt"))) {
                 launchSystem32Tool(L"SystemPropertiesProtection.exe");
             }
 
@@ -3721,7 +4380,10 @@ private:
             std::snprintf(
                 srMeta,
                 sizeof(srMeta),
-                "Резерв диска: %u%%  |  Индекс: #%u",
+                hdm::Tr(
+                    "Резерв диска: %u%%  |  Индекс: #%u",
+                    "Резерв диска: %u%%  |  Індекс: #%u",
+                    "Disk Quota: %u%%  |  Index: #%u"),
                 diagCache_.readiness.restoreDiskPercent,
                 diagCache_.readiness.restoreLastIndex);
             const float metaW = ImGui::CalcTextSize(srMeta).x;
@@ -3734,7 +4396,12 @@ private:
             }
         } else {
             ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("Проверка системных файлов:");
+            ImGui::TextDisabled(
+                "%s",
+                hdm::Tr(
+                    "Проверка системных файлов:",
+                    "Перевірка системних файлів:",
+                    "System File Check:"));
             ImGui::BeginDisabled(busy);
             ImGui::SameLine(0.0f, 10.0f);
             if (RenderSecondaryButton("SFC /scannow")) {
@@ -3743,7 +4410,12 @@ private:
             }
             if (isAppForeground &&
                 ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip("Запускает встроенную проверку и восстановление защищённых файлов Windows (sfc.exe /scannow).");
+                ImGui::SetTooltip(
+                    "%s",
+                    hdm::Tr(
+                        "Запускает встроенную проверку и восстановление защищённых файлов Windows (sfc.exe /scannow).",
+                        "Запускає вбудовану перевірку та відновлення захищених файлів Windows (sfc.exe /scannow).",
+                        "Runs built-in Windows protected system file verification and repair (sfc.exe /scannow)."));
             }
 
             ImGui::SameLine();
@@ -3753,7 +4425,12 @@ private:
             }
             if (isAppForeground &&
                 ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip("Быстрая проверка хранилища компонентов Windows без изменений (DISM /CheckHealth).");
+                ImGui::SetTooltip(
+                    "%s",
+                    hdm::Tr(
+                        "Быстрая проверка хранилища компонентов Windows без изменений (DISM /CheckHealth).",
+                        "Швидка перевірка сховища компонентів Windows без змін (DISM /CheckHealth).",
+                        "Quick non-destructive check of Windows component store health (DISM /CheckHealth)."));
             }
 
             ImGui::SameLine();
@@ -3763,7 +4440,12 @@ private:
             }
             if (isAppForeground &&
                 ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
-                ImGui::SetTooltip("Глубокое восстановление хранилища компонентов Windows через Windows Update (DISM /RestoreHealth).");
+                ImGui::SetTooltip(
+                    "%s",
+                    hdm::Tr(
+                        "Глубокое восстановление хранилища компонентов Windows через Windows Update (DISM /RestoreHealth).",
+                        "Глибоке відновлення сховища компонентів Windows через Windows Update (DISM /RestoreHealth).",
+                        "Deep repair of the Windows component store via Windows Update (DISM /RestoreHealth)."));
             }
             ImGui::EndDisabled();
         }
@@ -3784,15 +4466,21 @@ private:
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
         ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(ImVec4(0.62f, 0.74f, 0.90f, 1.00f), "Журнал событий");
+        ImGui::TextColored(
+            ImVec4(0.62f, 0.74f, 0.90f, 1.00f),
+            "%s",
+            hdm::Tr("Журнал событий", "Журнал подій", "Event Log"));
         ImGui::SameLine(0.0f, 8.0f);
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("(%zu)", entries.size());
 
         ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(9.0f * uiScale, 3.0f * uiScale));
-        const float copyW = ImGui::CalcTextSize("Копировать").x + 18.0f * uiScale;
-        const float clearW = ImGui::CalcTextSize("Очистить").x + 18.0f * uiScale;
-        const float autoW = ImGui::CalcTextSize("Автопрокрутка").x + ImGui::GetFrameHeight() + 8.0f;
+        const char* copyLogTxt = hdm::Tr("Копировать", "Копіювати", "Copy");
+        const char* clearLogTxt = hdm::Tr("Очистить", "Очистити", "Clear");
+        const char* autoLogTxt = hdm::Tr("Автопрокрутка", "Автопрокрутка", "Auto-scroll");
+        const float copyW = ImGui::CalcTextSize(copyLogTxt).x + 18.0f * uiScale;
+        const float clearW = ImGui::CalcTextSize(clearLogTxt).x + 18.0f * uiScale;
+        const float autoW = ImGui::CalcTextSize(autoLogTxt).x + ImGui::GetFrameHeight() + 8.0f;
         const float totalRightW = autoW + copyW + clearW + style.ItemSpacing.x * 2.0f;
         const float winRight = ImGui::GetWindowContentRegionMax().x;
         if (winRight - totalRightW > ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x + 12.0f) {
@@ -3801,17 +4489,23 @@ private:
             ImGui::SameLine(0.0f, 16.0f);
         }
 
-        ImGui::Checkbox("Автопрокрутка", &logAutoScroll_);
+        ImGui::Checkbox(
+            hdm::Tr("Автопрокрутка###LogAuto", "Автопрокрутка###LogAuto", "Auto-scroll###LogAuto"),
+            &logAutoScroll_);
         ImGui::SameLine();
-        if (RenderSecondaryButton("Копировать", ImVec2(copyW, 0.0f))) {
+        if (RenderSecondaryButton(
+                hdm::Tr("Копировать###LogCopy", "Копіювати###LogCopy", "Copy###LogCopy"),
+                ImVec2(copyW, 0.0f))) {
             std::string all;
             for (const auto& e : entries) {
-                all += "[" + e.timestamp + "] " + e.message + "\n";
+                all += "[" + e.timestamp + "] " + hdm::TrDyn(e.message) + "\n";
             }
             ImGui::SetClipboardText(all.c_str());
         }
         ImGui::SameLine();
-        if (RenderSecondaryButton("Очистить", ImVec2(clearW, 0.0f))) {
+        if (RenderSecondaryButton(
+                hdm::Tr("Очистить###LogClr", "Очистити###LogClr", "Clear###LogClr"),
+                ImVec2(clearW, 0.0f))) {
             logBuffer_.Clear();
         }
         ImGui::PopStyleVar();
@@ -3834,7 +4528,7 @@ private:
                 ImGui::TextColored(ImVec4(0.49f, 0.56f, 0.67f, 1.00f), "[%s]", entry.timestamp.c_str());
                 ImGui::SameLine();
                 ImGui::PushStyleColor(ImGuiCol_Text, col);
-                ImGui::TextUnformatted(entry.message.c_str());
+                ImGui::TextUnformatted(hdm::TrDyn(entry.message).c_str());
                 ImGui::PopStyleColor();
             }
         }
@@ -4012,6 +4706,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     int initialLocalSection = 0;
     int initialSelectedDeviceRow = -1;
     std::wstring screenshotPath;
+    hdm::DetectSystemLanguage();
     {
         int argc = 0;
         if (LPWSTR* argv = CommandLineToArgvW(GetCommandLineW(), &argc)) {
@@ -4027,6 +4722,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                     initialSelectedDeviceRow = _wtoi(argv[++i]);
                 } else if (arg == L"--screenshot" && i + 1 < argc) {
                     screenshotPath = argv[++i];
+                } else if (arg == L"--lang" && i + 1 < argc) {
+                    const std::wstring langArg = argv[++i];
+                    if (langArg == L"uk" || langArg == L"ua" || langArg == L"UK" || langArg == L"UA") {
+                        hdm::SetLang(hdm::Lang::Uk);
+                    } else if (langArg == L"en" || langArg == L"EN" || langArg == L"eng" || langArg == L"ENG") {
+                        hdm::SetLang(hdm::Lang::En);
+                    } else if (langArg == L"ru" || langArg == L"RU") {
+                        hdm::SetLang(hdm::Lang::Ru);
+                    }
                 }
             }
             LocalFree(argv);

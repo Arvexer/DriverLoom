@@ -1610,7 +1610,9 @@ std::string FormatMotherboardTitle(const MotherboardInfo& mb) {
         if (!title.empty()) title += " ";
         title += mb.systemProduct;
     }
-    return title.empty() ? "Не определена в SMBIOS" : title;
+    return title.empty()
+               ? Tr("Не определена в SMBIOS", "Не визначено в SMBIOS", "Not defined in SMBIOS")
+               : title;
 }
 
 std::string FormatVersionAndDate(std::string_view ver, std::string_view date) {
@@ -1624,8 +1626,8 @@ std::string FormatVersionAndDate(std::string_view ver, std::string_view date) {
 const char* ControllerHealthLabel(ControllerHealth h) noexcept {
     switch (h) {
     case ControllerHealth::Ok: return "OK";
-    case ControllerHealth::Attention: return "Внимание";
-    case ControllerHealth::Problem: return "Проблема";
+    case ControllerHealth::Attention: return Tr("Внимание", "Увага", "Attention");
+    case ControllerHealth::Problem: return Tr("Проблема", "Проблема", "Problem");
     }
     return "OK";
 }
@@ -1633,8 +1635,9 @@ const char* ControllerHealthLabel(ControllerHealth h) noexcept {
 const char* ServiceHealthLabel(ServiceHealthState s) noexcept {
     switch (s) {
     case ServiceHealthState::Healthy: return "OK";
-    case ServiceHealthState::Disabled: return "Отключена";
-    case ServiceHealthState::MissingOrError: return "Ошибка / Недоступна";
+    case ServiceHealthState::Disabled: return Tr("Отключена", "Вимкнена", "Disabled");
+    case ServiceHealthState::MissingOrError:
+        return Tr("Ошибка / Недоступна", "Помилка / Недоступна", "Error / Unavailable");
     }
     return "OK";
 }
@@ -1673,40 +1676,61 @@ std::string BuildMarkdownReport(
     const std::vector<SystemComponentItem>& components,
     const ReportSummaryCounts& s) {
     std::ostringstream oss;
-    oss << "# Отчёт о системе DriverLoom\n\n";
-    oss << "- **Сформирован**: " << s.generatedAt << "\n";
-    oss << "- **Примечание**: отчёт очищен от имени пользователя и личных путей.\n\n";
+    oss << "# " << Tr("Отчёт о системе DriverLoom", "Звіт про систему DriverLoom", "DriverLoom System Report") << "\n\n";
+    oss << "- **" << Tr("Сформирован", "Сформовано", "Generated") << "**: " << s.generatedAt << "\n";
+    oss << "- **" << Tr("Примечание", "Примітка", "Note") << "**: "
+        << Tr("отчёт очищен от имени пользователя и личных путей.",
+              "звіт очищено від імені користувача та особистих шляхів.",
+              "this report is stripped of usernames and personal file paths.")
+        << "\n\n";
 
-    oss << "## 1. Материнская плата, BIOS и готовность Windows\n\n";
-    oss << "| Параметр | Значение |\n";
+    oss << "## 1. "
+        << Tr("Материнская плата, BIOS и готовность Windows",
+              "Материнська плата, BIOS та готовність Windows",
+              "Motherboard, BIOS & Windows Readiness")
+        << "\n\n";
+    oss << "| " << Tr("Параметр", "Параметр", "Parameter")
+        << " | " << Tr("Значение", "Значення", "Value") << " |\n";
     oss << "| --- | --- |\n";
-    oss << "| Материнская плата | " << MdCell(s.boardTitle) << " |\n";
+    oss << "| " << Tr("Материнская плата", "Материнська плата", "Motherboard") << " | " << MdCell(s.boardTitle) << " |\n";
     oss << "| BIOS | " << MdCell(s.biosSummary) << " |\n";
-    oss << "| Сайт поддержки платы | " << MdCell(diag.motherboard.supportUrl) << " |\n";
-    oss << "| Ожидается перезагрузка (CBS / WU) | "
-        << ((diag.readiness.cbsRebootPending || diag.readiness.wuRebootRequired) ? "Да" : "Нет") << " |\n";
-    oss << "| Отложенная замена файлов (PendingFileRename) | "
-        << (diag.readiness.pendingFileRenames ? "Да" : "Нет") << " |\n";
-    oss << "| Защита системы (точки восстановления) | "
-        << (diag.readiness.systemRestorePolicyDisabled
-                ? "Запрещена политикой (DisableSR)"
-                : (diag.readiness.systemRestoreEnabled ? "Активна" : "Отключена"))
+    oss << "| " << Tr("Сайт поддержки платы", "Сайт підтримки плати", "Motherboard Support URL") << " | " << MdCell(diag.motherboard.supportUrl) << " |\n";
+    oss << "| " << Tr("Ожидается перезагрузка (CBS / WU)", "Очікується перезавантаження (CBS / WU)", "Reboot Pending (CBS / WU)") << " | "
+        << ((diag.readiness.cbsRebootPending || diag.readiness.wuRebootRequired)
+                ? Tr("Да", "Так", "Yes")
+                : Tr("Нет", "Ні", "No"))
         << " |\n";
-    oss << "| Всего PnP-устройств | " << devices.size() << " |\n";
-    oss << "| Мониторов | " << s.monitors.size() << " |\n";
-    oss << "| Устройств с замечаниями | " << s.problemDevices.size() << " |\n";
-    oss << "| Отключённых критичных служб | " << diag.disabledCriticalServices << " |\n";
-    oss << "| Контроллеров с замечаниями | " << diag.attentionControllers << " |\n\n";
+    oss << "| " << Tr("Отложенная замена файлов (PendingFileRename)", "Відкладена заміна файлів (PendingFileRename)", "Pending File Renames") << " | "
+        << (diag.readiness.pendingFileRenames ? Tr("Да", "Так", "Yes") : Tr("Нет", "Ні", "No")) << " |\n";
+    oss << "| " << Tr("Защита системы (точки восстановления)", "Захист системи (точки відновлення)", "System Protection (Restore Points)") << " | "
+        << (diag.readiness.systemRestorePolicyDisabled
+                ? Tr("Запрещена политикой (DisableSR)", "Заборонено політикою (DisableSR)", "Disabled by policy (DisableSR)")
+                : (diag.readiness.systemRestoreEnabled
+                       ? Tr("Активна", "Активна", "Enabled")
+                       : Tr("Отключена", "Вимкнено", "Disabled")))
+        << " |\n";
+    oss << "| " << Tr("Всего PnP-устройств", "Усього PnP-пристроїв", "Total PnP Devices") << " | " << devices.size() << " |\n";
+    oss << "| " << Tr("Мониторов", "Моніторів", "Monitors") << " | " << s.monitors.size() << " |\n";
+    oss << "| " << Tr("Устройств с замечаниями", "Пристроїв із зауваженнями", "Devices with Issues") << " | " << s.problemDevices.size() << " |\n";
+    oss << "| " << Tr("Отключённых критичных служб", "Вимкнених критичних служб", "Disabled Critical Services") << " | " << diag.disabledCriticalServices << " |\n";
+    oss << "| " << Tr("Контроллеров с замечаниями", "Контролерів із зауваженнями", "Controllers Needing Attention") << " | " << diag.attentionControllers << " |\n\n";
 
-    oss << "## 2. Ключевые контроллеры платы (" << diag.controllers.size() << ")\n\n";
+    oss << "## 2. "
+        << Tr("Ключевые контроллеры платы", "Ключові контролери плати", "Key Board Controllers")
+        << " (" << diag.controllers.size() << ")\n\n";
     if (diag.controllers.empty()) {
-        oss << "_Ключевые контроллеры не обнаружены._\n\n";
+        oss << "_" << Tr("Ключевые контроллеры не обнаружены.", "Ключові контролери не виявлено.", "No key controllers detected.") << "_\n\n";
     } else {
-        oss << "| Роль | Состояние | Устройство | Поставщик | Драйвер / Дата | INF | Hardware ID |\n";
+        oss << "| " << Tr("Роль", "Роль", "Role")
+            << " | " << Tr("Состояние", "Стан", "Status")
+            << " | " << Tr("Устройство", "Пристрій", "Device")
+            << " | " << Tr("Поставщик", "Виробник", "Vendor")
+            << " | " << Tr("Драйвер / Дата", "Драйвер / Дата", "Driver / Date")
+            << " | INF | Hardware ID |\n";
         oss << "| --- | --- | --- | --- | --- | --- | --- |\n";
         for (const auto& c : diag.controllers) {
-            oss << "| " << MdCell(c.role)
-                << " | " << MdCell(c.statusText)
+            oss << "| " << MdCell(TrDyn(c.role))
+                << " | " << MdCell(TrDyn(c.statusText))
                 << " | " << MdCell(c.deviceName)
                 << " | " << MdCell(c.manufacturer)
                 << " | " << MdCell(FormatVersionAndDate(c.driverVersion, c.driverDate))
@@ -1716,14 +1740,24 @@ std::string BuildMarkdownReport(
         oss << "\n";
     }
 
-    oss << "## 3. Устройства, требующие внимания (" << s.problemDevices.size() << ")\n\n";
+    oss << "## 3. "
+        << Tr("Устройства, требующие внимания", "Пристрої, що потребують уваги", "Devices Requiring Attention")
+        << " (" << s.problemDevices.size() << ")\n\n";
     if (s.problemDevices.empty()) {
-        oss << "_Проблемных устройств и устройств без драйверов не обнаружено._\n\n";
+        oss << "_" << Tr("Проблемных устройств и устройств без драйверов не обнаружено.",
+                         "Проблемних пристроїв і пристроїв без драйверів не виявлено.",
+                         "No problematic devices or devices missing drivers detected.")
+            << "_\n\n";
     } else {
-        oss << "| Статус | Устройство | Класс | Поставщик | Версия / Дата | INF | Hardware ID |\n";
+        oss << "| " << Tr("Статус", "Статус", "Status")
+            << " | " << Tr("Устройство", "Пристрій", "Device")
+            << " | " << Tr("Класс", "Клас", "Class")
+            << " | " << Tr("Поставщик", "Виробник", "Vendor")
+            << " | " << Tr("Версия / Дата", "Версія / Дата", "Version / Date")
+            << " | INF | Hardware ID |\n";
         oss << "| --- | --- | --- | --- | --- | --- | --- |\n";
         for (const DeviceInfo* d : s.problemDevices) {
-            oss << "| " << MdCell(d->statusText)
+            oss << "| " << MdCell(TrDyn(d->statusText))
                 << " | " << MdCell(d->name)
                 << " | " << MdCell(d->deviceClass)
                 << " | " << MdCell(d->manufacturer)
@@ -1734,11 +1768,15 @@ std::string BuildMarkdownReport(
         oss << "\n";
     }
 
-    oss << "## 4. Мониторы (EDID) (" << s.monitors.size() << ")\n\n";
+    oss << "## 4. " << Tr("Мониторы (EDID)", "Монітори (EDID)", "Monitors (EDID)") << " (" << s.monitors.size() << ")\n\n";
     if (s.monitors.empty()) {
-        oss << "_Мониторы не обнаружены._\n\n";
+        oss << "_" << Tr("Мониторы не обнаружены.", "Монітори не виявлено.", "No monitors detected.") << "_\n\n";
     } else {
-        oss << "| Название | Модель (EDID) | Производитель | Драйвер / Дата | INF | Статус |\n";
+        oss << "| " << Tr("Название", "Назва", "Name")
+            << " | " << Tr("Модель (EDID)", "Модель (EDID)", "Model (EDID)")
+            << " | " << Tr("Производитель", "Виробник", "Manufacturer")
+            << " | " << Tr("Драйвер / Дата", "Драйвер / Дата", "Driver / Date")
+            << " | INF | " << Tr("Статус", "Статус", "Status") << " |\n";
         oss << "| --- | --- | --- | --- | --- | --- |\n";
         for (const DeviceInfo* m : s.monitors) {
             oss << "| " << MdCell(m->name)
@@ -1746,41 +1784,57 @@ std::string BuildMarkdownReport(
                 << " | " << MdCell(m->manufacturer)
                 << " | " << MdCell(FormatVersionAndDate(m->driverVersion, m->driverDate))
                 << " | " << MdCell(m->infName)
-                << " | " << MdCell(m->statusText) << " |\n";
+                << " | " << MdCell(TrDyn(m->statusText)) << " |\n";
         }
         oss << "\n";
     }
 
-    oss << "## 5. Системные библиотеки, компоненты и ПО периферии (" << components.size() << ")\n\n";
+    oss << "## 5. "
+        << Tr("Системные библиотеки, компоненты и ПО периферии",
+              "Системні бібліотеки, компоненти та ПЗ периферії",
+              "System Runtimes, Components & Peripheral Software")
+        << " (" << components.size() << ")\n\n";
     if (components.empty()) {
-        oss << "_Список компонентов ещё не заполнен._\n\n";
+        oss << "_" << Tr("Список компонентов ещё не заполнен.", "Список компонентів ще не заповнено.", "Component list is not populated yet.") << "_\n\n";
     } else {
-        oss << "| Статус | Компонент | Устройство / Назначение | Установлено | Актуальная |\n";
+        oss << "| " << Tr("Статус", "Статус", "Status")
+            << " | " << Tr("Компонент", "Компонент", "Component")
+            << " | " << Tr("Устройство / Назначение", "Пристрій / Призначення", "Hardware / Purpose")
+            << " | " << Tr("Установлено", "Встановлено", "Installed")
+            << " | " << Tr("Актуальная", "Актуальна", "Latest") << " |\n";
         oss << "| --- | --- | --- | --- | --- |\n";
         for (const auto& c : components) {
             const std::string& hwOrDesc =
                 c.detectedHardware.empty() ? c.purposeDescription : c.detectedHardware;
-            oss << "| " << MdCell(c.statusText)
+            oss << "| " << MdCell(TrDyn(c.statusText))
                 << " | " << MdCell(c.name)
-                << " | " << MdCell(hwOrDesc)
+                << " | " << MdCell(TrDyn(hwOrDesc))
                 << " | " << MdCell(c.installedVersion)
-                << " | " << MdCell(c.latestVersion) << " |\n";
+                << " | " << MdCell(TrDyn(c.latestVersion)) << " |\n";
         }
         oss << "\n";
     }
 
-    oss << "## 6. Службы Windows и обновления (" << diag.services.size() << ")\n\n";
+    oss << "## 6. "
+        << Tr("Службы Windows и обновления",
+              "Служби Windows та оновлення",
+              "Windows & Update Services")
+        << " (" << diag.services.size() << ")\n\n";
     if (diag.services.empty()) {
-        oss << "_Сведения о службах отсутствуют._\n";
+        oss << "_" << Tr("Сведения о службах отсутствуют.", "Відомості про служби відсутні.", "No service diagnostics available.") << "_\n";
     } else {
-        oss << "| Служба | Название | Статус | Тип запуска | Назначение |\n";
+        oss << "| " << Tr("Служба", "Служба", "Service")
+            << " | " << Tr("Название", "Назва", "Display Name")
+            << " | " << Tr("Статус", "Статус", "State")
+            << " | " << Tr("Тип запуска", "Тип запуску", "Startup")
+            << " | " << Tr("Назначение", "Призначення", "Purpose") << " |\n";
         oss << "| --- | --- | --- | --- | --- |\n";
         for (const auto& svc : diag.services) {
             oss << "| " << MdCell(svc.serviceName)
-                << " | " << MdCell(svc.displayName)
-                << " | " << MdCell(svc.stateText)
-                << " | " << MdCell(svc.startTypeText)
-                << " | " << MdCell(svc.purpose) << " |\n";
+                << " | " << MdCell(TrDyn(svc.displayName))
+                << " | " << MdCell(TrDyn(svc.stateText))
+                << " | " << MdCell(TrDyn(svc.startTypeText))
+                << " | " << MdCell(TrDyn(svc.purpose)) << " |\n";
         }
     }
 
@@ -1794,98 +1848,112 @@ std::string BuildTextReport(
     const ReportSummaryCounts& s) {
     std::ostringstream oss;
     oss << "====================================================================\n";
-    oss << "DriverLoom — Отчёт о состоянии ПК и драйверов (без личных данных)\n";
-    oss << "Сформирован: " << s.generatedAt << "\n";
+    oss << Tr("DriverLoom — Отчёт о состоянии ПК и драйверов (без личных данных)",
+              "DriverLoom — Звіт про стан ПК та драйверів (без особистих даних)",
+              "DriverLoom — Privacy-Clean System & Driver Report")
+        << "\n";
+    oss << Tr("Сформирован: ", "Сформовано: ", "Generated: ") << s.generatedAt << "\n";
     oss << "====================================================================\n\n";
 
-    oss << "[1] МАТЕРИНСКАЯ ПЛАТА, BIOS И ГОТОВНОСТЬ WINDOWS\n";
-    oss << "  Плата: " << TxtVal(s.boardTitle) << "\n";
+    oss << "[1] " << Tr("МАТЕРИНСКАЯ ПЛАТА, BIOS И ГОТОВНОСТЬ WINDOWS",
+                         "МАТЕРИНСЬКА ПЛАТА, BIOS ТА ГОТОВНІСТЬ WINDOWS",
+                         "MOTHERBOARD, BIOS & WINDOWS READINESS") << "\n";
+    oss << "  " << Tr("Плата: ", "Плата: ", "Board: ") << TxtVal(s.boardTitle) << "\n";
     oss << "  BIOS: " << TxtVal(s.biosSummary) << "\n";
-    oss << "  Поддержка платы: " << TxtVal(diag.motherboard.supportUrl) << "\n";
-    oss << "  Перезагрузка Windows (CBS/WU): "
-        << ((diag.readiness.cbsRebootPending || diag.readiness.wuRebootRequired) ? "Требуется" : "Нет")
+    oss << "  " << Tr("Поддержка платы: ", "Підтримка плати: ", "Support URL: ") << TxtVal(diag.motherboard.supportUrl) << "\n";
+    oss << "  " << Tr("Перезагрузка Windows (CBS/WU): ", "Перезавантаження Windows (CBS/WU): ", "Reboot Pending (CBS/WU): ")
+        << ((diag.readiness.cbsRebootPending || diag.readiness.wuRebootRequired)
+                ? Tr("Требуется", "Потрібне", "Required")
+                : Tr("Нет", "Ні", "No"))
         << "\n";
-    oss << "  Отложенная замена файлов: "
-        << (diag.readiness.pendingFileRenames ? "Да" : "Нет") << "\n";
-    oss << "  Защита системы: "
+    oss << "  " << Tr("Отложенная замена файлов: ", "Відкладена заміна файлів: ", "Pending File Renames: ")
+        << (diag.readiness.pendingFileRenames ? Tr("Да", "Так", "Yes") : Tr("Нет", "Ні", "No")) << "\n";
+    oss << "  " << Tr("Защита системы: ", "Захист системи: ", "System Protection: ")
         << (diag.readiness.systemRestorePolicyDisabled
-                ? "Запрещена политикой (DisableSR)"
-                : (diag.readiness.systemRestoreEnabled ? "Активна" : "Отключена"))
+                ? Tr("Запрещена политикой (DisableSR)", "Заборонено політикою (DisableSR)", "Disabled by policy (DisableSR)")
+                : (diag.readiness.systemRestoreEnabled
+                       ? Tr("Активна", "Активна", "Enabled")
+                       : Tr("Отключена", "Вимкнено", "Disabled")))
         << "\n";
-    oss << "  Сводка: устройств=" << devices.size()
-        << ", мониторов=" << s.monitors.size()
-        << ", проблемных=" << s.problemDevices.size()
-        << ", откл. служб=" << diag.disabledCriticalServices
-        << ", контроллеров с замечаниями=" << diag.attentionControllers << "\n\n";
+    oss << "  " << Tr("Сводка: устройств=", "Зведення: пристроїв=", "Summary: devices=") << devices.size()
+        << Tr(", мониторов=", ", моніторів=", ", monitors=") << s.monitors.size()
+        << Tr(", проблемных=", ", проблемних=", ", issues=") << s.problemDevices.size()
+        << Tr(", откл. служб=", ", вимкн. служб=", ", disabled services=") << diag.disabledCriticalServices
+        << Tr(", контроллеров с замечаниями=", ", контролерів із зауваженнями=", ", attention controllers=") << diag.attentionControllers << "\n\n";
 
-    oss << "[2] КЛЮЧЕВЫЕ КОНТРОЛЛЕРЫ ПЛАТЫ (" << diag.controllers.size() << ")\n";
+    oss << "[2] " << Tr("КЛЮЧЕВЫЕ КОНТРОЛЛЕРЫ ПЛАТЫ", "КЛЮЧОВІ КОНТРОЛЕРИ ПЛАТИ", "KEY BOARD CONTROLLERS")
+        << " (" << diag.controllers.size() << ")\n";
     if (diag.controllers.empty()) {
-        oss << "  (нет данных)\n";
+        oss << "  (" << Tr("нет данных", "немає даних", "no data") << ")\n";
     } else {
         for (const auto& c : diag.controllers) {
-            oss << "  - [" << ControllerHealthLabel(c.health) << "] " << TxtVal(c.role)
+            oss << "  - [" << ControllerHealthLabel(c.health) << "] " << TxtVal(TrDyn(c.role))
                 << ": " << TxtVal(c.deviceName)
-                << " | Статус: " << TxtVal(c.statusText)
-                << " | Поставщик: " << TxtVal(c.manufacturer)
-                << " | Версия: " << TxtVal(FormatVersionAndDate(c.driverVersion, c.driverDate))
+                << " | " << Tr("Статус: ", "Статус: ", "Status: ") << TxtVal(TrDyn(c.statusText))
+                << " | " << Tr("Поставщик: ", "Виробник: ", "Vendor: ") << TxtVal(c.manufacturer)
+                << " | " << Tr("Версия: ", "Версія: ", "Version: ") << TxtVal(FormatVersionAndDate(c.driverVersion, c.driverDate))
                 << " | INF: " << TxtVal(c.infName)
                 << " | HWID: " << TxtVal(c.hardwareId) << "\n";
         }
     }
     oss << "\n";
 
-    oss << "[3] УСТРОЙСТВА, ТРЕБУЮЩИЕ ВНИМАНИЯ (" << s.problemDevices.size() << ")\n";
+    oss << "[3] " << Tr("УСТРОЙСТВА, ТРЕБУЮЩИЕ ВНИМАНИЯ", "ПРИСТРОЇ, ЩО ПОТРЕБУЮТЬ УВАГИ", "DEVICES REQUIRING ATTENTION")
+        << " (" << s.problemDevices.size() << ")\n";
     if (s.problemDevices.empty()) {
-        oss << "  Проблемных устройств не обнаружено.\n";
+        oss << "  " << Tr("Проблемных устройств не обнаружено.", "Проблемних пристроїв не виявлено.", "No problematic devices detected.") << "\n";
     } else {
         for (const DeviceInfo* d : s.problemDevices) {
-            oss << "  - [" << TxtVal(d->statusText) << "] " << TxtVal(d->name)
-                << " | Класс: " << TxtVal(d->deviceClass)
-                << " | Поставщик: " << TxtVal(d->manufacturer)
-                << " | Версия: " << TxtVal(FormatVersionAndDate(d->driverVersion, d->driverDate))
+            oss << "  - [" << TxtVal(TrDyn(d->statusText)) << "] " << TxtVal(d->name)
+                << " | " << Tr("Класс: ", "Клас: ", "Class: ") << TxtVal(d->deviceClass)
+                << " | " << Tr("Поставщик: ", "Виробник: ", "Vendor: ") << TxtVal(d->manufacturer)
+                << " | " << Tr("Версия: ", "Версія: ", "Version: ") << TxtVal(FormatVersionAndDate(d->driverVersion, d->driverDate))
                 << " | INF: " << TxtVal(d->infName)
                 << " | HWID: " << TxtVal(d->hardwareId) << "\n";
         }
     }
     oss << "\n";
 
-    oss << "[4] МОНИТОРЫ (EDID) (" << s.monitors.size() << ")\n";
+    oss << "[4] " << Tr("МОНИТОРЫ (EDID)", "МОНІТОРИ (EDID)", "MONITORS (EDID)") << " (" << s.monitors.size() << ")\n";
     if (s.monitors.empty()) {
-        oss << "  Мониторы не обнаружены.\n";
+        oss << "  " << Tr("Мониторы не обнаружены.", "Монітори не виявлено.", "No monitors detected.") << "\n";
     } else {
         for (const DeviceInfo* m : s.monitors) {
             oss << "  - " << TxtVal(m->name)
                 << " | EDID: " << TxtVal(m->edidModel)
-                << " | Производитель: " << TxtVal(m->manufacturer)
-                << " | Версия: " << TxtVal(FormatVersionAndDate(m->driverVersion, m->driverDate))
+                << " | " << Tr("Производитель: ", "Виробник: ", "Manufacturer: ") << TxtVal(m->manufacturer)
+                << " | " << Tr("Версия: ", "Версія: ", "Version: ") << TxtVal(FormatVersionAndDate(m->driverVersion, m->driverDate))
                 << " | INF: " << TxtVal(m->infName)
-                << " | Статус: " << TxtVal(m->statusText) << "\n";
+                << " | " << Tr("Статус: ", "Статус: ", "Status: ") << TxtVal(TrDyn(m->statusText)) << "\n";
         }
     }
     oss << "\n";
 
-    oss << "[5] СИСТЕМНЫЕ БИБЛИОТЕКИ, КОМПОНЕНТЫ И ПО ПЕРИФЕРИИ (" << components.size() << ")\n";
+    oss << "[5] " << Tr("СИСТЕМНЫЕ БИБЛИОТЕКИ, КОМПОНЕНТЫ И ПО ПЕРИФЕРИИ",
+                         "СИСТЕМНІ БІБЛІОТЕКИ, КОМПОНЕНТИ ТА ПЗ ПЕРИФЕРІЇ",
+                         "SYSTEM RUNTIMES, COMPONENTS & PERIPHERALS") << " (" << components.size() << ")\n";
     if (components.empty()) {
-        oss << "  (нет данных)\n";
+        oss << "  (" << Tr("нет данных", "немає даних", "no data") << ")\n";
     } else {
         for (const auto& c : components) {
             const std::string& hwOrDesc =
                 c.detectedHardware.empty() ? c.purposeDescription : c.detectedHardware;
-            oss << "  - [" << TxtVal(c.statusText) << "] " << TxtVal(c.name)
-                << " | Назначение: " << TxtVal(hwOrDesc)
-                << " | Установлено: " << TxtVal(c.installedVersion)
-                << " | Актуальная: " << TxtVal(c.latestVersion) << "\n";
+            oss << "  - [" << TxtVal(TrDyn(c.statusText)) << "] " << TxtVal(c.name)
+                << " | " << Tr("Назначение: ", "Призначення: ", "Target: ") << TxtVal(TrDyn(hwOrDesc))
+                << " | " << Tr("Установлено: ", "Встановлено: ", "Installed: ") << TxtVal(c.installedVersion)
+                << " | " << Tr("Актуальная: ", "Актуальна: ", "Latest: ") << TxtVal(TrDyn(c.latestVersion)) << "\n";
         }
     }
     oss << "\n";
 
-    oss << "[6] СЛУЖБЫ WINDOWS И ОБНОВЛЕНИЯ (" << diag.services.size() << ")\n";
+    oss << "[6] " << Tr("СЛУЖБЫ WINDOWS И ОБНОВЛЕНИЯ", "СЛУЖБИ WINDOWS ТА ОНОВЛЕННЯ", "WINDOWS & UPDATE SERVICES")
+        << " (" << diag.services.size() << ")\n";
     for (const auto& svc : diag.services) {
         oss << "  - [" << ServiceHealthLabel(svc.health) << "] " << TxtVal(svc.serviceName)
-            << " (" << TxtVal(svc.displayName) << ")"
-            << " | Состояние: " << TxtVal(svc.stateText)
-            << " | Запуск: " << TxtVal(svc.startTypeText)
-            << " | Назначение: " << TxtVal(svc.purpose) << "\n";
+            << " (" << TxtVal(TrDyn(svc.displayName)) << ")"
+            << " | " << Tr("Состояние: ", "Стан: ", "State: ") << TxtVal(TrDyn(svc.stateText))
+            << " | " << Tr("Запуск: ", "Запуск: ", "Startup: ") << TxtVal(TrDyn(svc.startTypeText))
+            << " | " << Tr("Назначение: ", "Призначення: ", "Purpose: ") << TxtVal(TrDyn(svc.purpose)) << "\n";
     }
 
     return SanitizePersonalPaths(oss.str());
@@ -2119,16 +2187,23 @@ void SystemDiagnostics::ExportReportInteractiveAsync(
                                 FormatHResult(hr));
                     }
                 } else {
-                    static constexpr COMDLG_FILTERSPEC kFilters[] = {
-                        {L"Отчёт Markdown (*.md)", L"*.md"},
-                        {L"Текстовый отчёт (*.txt)", L"*.txt"},
-                        {L"Отчёт JSON (*.json)", L"*.json"},
+                    const std::wstring mdFilter = Utf8ToWide(Tr("Отчёт Markdown (*.md)", "Звіт Markdown (*.md)", "Markdown Report (*.md)"));
+                    const std::wstring txtFilter = Utf8ToWide(Tr("Текстовый отчёт (*.txt)", "Текстовий звіт (*.txt)", "Text Report (*.txt)"));
+                    const std::wstring jsonFilter = Utf8ToWide(Tr("Отчёт JSON (*.json)", "Звіт JSON (*.json)", "JSON Report (*.json)"));
+                    const COMDLG_FILTERSPEC filters[] = {
+                        {mdFilter.c_str(), L"*.md"},
+                        {txtFilter.c_str(), L"*.txt"},
+                        {jsonFilter.c_str(), L"*.json"},
                     };
-                    dialog->SetFileTypes(3, kFilters);
+                    dialog->SetFileTypes(3, filters);
                     dialog->SetFileTypeIndex(1);
                     dialog->SetDefaultExtension(L"md");
                     dialog->SetFileName(L"DriverLoom_Report.md");
-                    dialog->SetTitle(L"Сохранить отчёт о системе (без личных данных)");
+                    const std::wstring dlgTitle = Utf8ToWide(Tr(
+                        "Сохранить отчёт о системе (без личных данных)",
+                        "Зберегти звіт про систему (без особистих даних)",
+                        "Save System Report (Privacy Clean)"));
+                    dialog->SetTitle(dlgTitle.c_str());
 
                     hr = dialog->Show(ownerWindow);
                     if (SUCCEEDED(hr)) {
