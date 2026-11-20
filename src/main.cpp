@@ -890,30 +890,35 @@ public:
             };
 
             if (ImGui::BeginTabItem("  Устройства и мониторы  ", nullptr, tabFlag(0))) {
+                activeTabIndex_ = 0;
                 beginTabCard("##TabCardDevices");
                 RenderDevicesTab();
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("  Компоненты и периферия  ", nullptr, tabFlag(1))) {
+                activeTabIndex_ = 1;
                 beginTabCard("##TabCardComponents");
                 RenderComponentsTab();
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("  Windows Update  ", nullptr, tabFlag(2))) {
+                activeTabIndex_ = 2;
                 beginTabCard("##TabCardWu");
                 RenderWindowsUpdateTab();
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("  Локальные (.inf)  ", nullptr, tabFlag(3))) {
+                activeTabIndex_ = 3;
                 beginTabCard("##TabCardLocal");
                 RenderLocalInstallerTab();
                 ImGui::EndChild();
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem("  Система и диагностика  ", nullptr, tabFlag(4))) {
+                activeTabIndex_ = 4;
                 beginTabCard("##TabCardDiag");
                 RenderDiagnosticsTab();
                 ImGui::EndChild();
@@ -922,6 +927,7 @@ public:
             ImGui::EndTabBar();
         }
         pendingInitialTab_ = -1;
+        HandleKeyboardShortcuts();
         ImGui::EndChild();
 
         RenderLogPanel();
@@ -932,6 +938,7 @@ public:
     bool ShouldExitApp() const noexcept { return exitRequested_; }
     void SetInitialDiagSection(int sec) noexcept { diagSectionIndex_ = sec; }
     void SetInitialLocalSection(int sec) noexcept { localSectionIndex_ = sec; }
+    void SetInitialSelectedDeviceRow(int row) noexcept { pendingSelectDeviceRow_ = row; }
     bool IsInitialScanSettled() const noexcept {
         return lastDeviceGen_ > 0 && lastComponentsGen_ > 0 && lastDiagGen_ > 0 &&
                lastDriverStoreGen_ > 0 &&
@@ -1214,6 +1221,103 @@ private:
         return ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
     }
 
+    const hdm::DeviceInfo* FindSelectedDevice() const {
+        if (selectedDeviceInstanceId_.empty()) {
+            return nullptr;
+        }
+        for (const auto& d : devicesCache_) {
+            if (d.instanceId == selectedDeviceInstanceId_) {
+                return &d;
+            }
+        }
+        return nullptr;
+    }
+
+    void HandleKeyboardShortcuts() {
+        const ImGuiIO& io = ImGui::GetIO();
+
+        if (ImGui::IsKeyPressed(ImGuiKey_F5, false)) {
+            switch (activeTabIndex_) {
+            case 0:
+                if (!scanner_.IsBusy() && !componentsScanner_.IsInstalling()) {
+                    scanner_.StartScanAsync(MakeLogger());
+                }
+                break;
+            case 1:
+                if (!componentsScanner_.IsScanning() &&
+                    !componentsScanner_.IsCheckingOnline() &&
+                    !componentsScanner_.IsInstalling()) {
+                    componentsScanner_.StartLocalScanAsync(devicesCache_, MakeLogger());
+                }
+                break;
+            case 2:
+                if (!wuManager_.IsBusy()) {
+                    selectedWuIndex_ = -1;
+                    wuManager_.StartSearchAsync(MakeLogger(), !wuIncludeSystemUpdates_);
+                }
+                break;
+            case 3:
+                if (localSectionIndex_ == 1) {
+                    if (!localInstaller_.IsScanningStore() &&
+                        !localInstaller_.IsExportingBackup() &&
+                        !localInstaller_.IsRemovingStorePackages()) {
+                        localInstaller_.ScanDriverStoreAsync(devicesCache_, MakeLogger());
+                    }
+                } else if (std::strlen(localFolderBuf_) > 0 && !localInstaller_.IsScanningInf()) {
+                    localInstaller_.ScanInfFilesAsync(
+                        hdm::Utf8ToWide(localFolderBuf_), MakeLogger());
+                }
+                break;
+            case 4:
+                if (!diagnostics_.IsBusy()) {
+                    diagnostics_.StartScanAsync(devicesCache_, MakeLogger());
+                }
+                break;
+            default:
+                break;
+            }
+        }
+
+        if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+            if (activeTabIndex_ != 0) {
+                pendingInitialTab_ = 0;
+            }
+            focusDeviceSearchNextFrame_ = true;
+        }
+
+        if (!io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) {
+            if (activeTabIndex_ == 0) {
+                if (const hdm::DeviceInfo* sel = FindSelectedDevice()) {
+                    if (!sel->hardwareId.empty()) {
+                        ImGui::SetClipboardText(sel->hardwareId.c_str());
+                        logBuffer_.Push(
+                            hdm::LogLevel::Info,
+                            "Скопирован Hardware ID (Ctrl+C): " + sel->hardwareId);
+                    }
+                }
+            } else if (activeTabIndex_ == 2) {
+                if (selectedWuIndex_ >= 0 &&
+                    selectedWuIndex_ < static_cast<int>(wuCache_.size())) {
+                    const auto& wu = wuCache_[static_cast<size_t>(selectedWuIndex_)];
+                    if (!wu.title.empty()) {
+                        ImGui::SetClipboardText(wu.title.c_str());
+                        logBuffer_.Push(
+                            hdm::LogLevel::Info,
+                            "Скопировано название обновления (Ctrl+C): " + wu.title);
+                    }
+                }
+            }
+        }
+
+        if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+            if (activeTabIndex_ == 0 && !selectedDeviceInstanceId_.empty()) {
+                selectedDeviceInstanceId_.clear();
+            } else if (activeTabIndex_ == 2 && selectedWuIndex_ >= 0) {
+                selectedWuIndex_ = -1;
+            }
+        }
+    }
+
     void RenderDevicesTab() {
         const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
         const bool isAppForeground = (GetForegroundWindow() == hwnd_);
@@ -1297,9 +1401,13 @@ private:
 
         // Row 2: Responsive full-width search bar
         ImGui::SetNextItemWidth(std::max(180.0f, ImGui::GetContentRegionAvail().x));
+        if (focusDeviceSearchNextFrame_) {
+            ImGui::SetKeyboardFocusHere();
+            focusDeviceSearchNextFrame_ = false;
+        }
         if (ImGui::InputTextWithHint(
                 "##DeviceSearch",
-                "Поиск по названию, модели монитора (EDID), бренду, версии или Hardware ID...",
+                "Поиск по названию, модели монитора (EDID), бренду, версии или Hardware ID... (Ctrl+F)",
                 deviceFilterBuf_,
                 sizeof(deviceFilterBuf_))) {
             deviceViewDirty_ = true;
@@ -1329,12 +1437,38 @@ private:
 
         ImGui::Spacing();
 
+        if (pendingSelectDeviceRow_ >= 0) {
+            if (deviceViewDirty_ && !devicesCache_.empty()) {
+                RebuildDeviceViewCache(nullptr);
+            }
+            if (!visibleDeviceIndices_.empty()) {
+                const size_t pick = std::min(
+                    static_cast<size_t>(pendingSelectDeviceRow_),
+                    visibleDeviceIndices_.size() - 1);
+                selectedDeviceInstanceId_ = devicesCache_[visibleDeviceIndices_[pick]].instanceId;
+                pendingSelectDeviceRow_ = -1;
+            }
+        }
+
+        const hdm::DeviceInfo* selectedDevBefore = FindSelectedDevice();
+        const ImGuiStyle& devStyle = ImGui::GetStyle();
+        const float cardPadY = std::round(8.0f * uiScale);
+        const float detailsH =
+            (selectedDevBefore != nullptr)
+                ? (ImGui::GetTextLineHeightWithSpacing() * 2.0f + ImGui::GetFrameHeight() +
+                   cardPadY * 2.0f + 8.0f * uiScale)
+                : 0.0f;
+        const float tableH = std::max(
+            110.0f,
+            ImGui::GetContentRegionAvail().y -
+                (detailsH > 0.0f ? detailsH + devStyle.ItemSpacing.y : 0.0f));
+
         constexpr ImGuiTableFlags kTableFlags =
             ImGuiTableFlags_Resizable | ImGuiTableFlags_Reorderable | ImGuiTableFlags_Hideable |
             ImGuiTableFlags_Sortable | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
             ImGuiTableFlags_BordersOuter | ImGuiTableFlags_ScrollY;
 
-        if (ImGui::BeginTable("##DevicesTable", 7, kTableFlags, ImGui::GetContentRegionAvail())) {
+        if (ImGui::BeginTable("##DevicesTable", 7, kTableFlags, ImVec2(0.0f, tableH))) {
             ImGui::TableSetupScrollFreeze(0, 1);
             ImGui::TableSetupColumn(
                 "Статус",
@@ -1371,12 +1505,24 @@ private:
                     // Col 0: Full-row selectable behind rounded status badge (zero X-shift)
                     ImGui::TableSetColumnIndex(0);
                     const ImVec2 cellStart = ImGui::GetCursorPos();
-                    ImGui::Selectable(
-                        "##rowSel",
-                        false,
-                        ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
-                        ImVec2(0.0f, rowBadgeH));
+                    const bool isRowSelected =
+                        (!selectedDeviceInstanceId_.empty() &&
+                         dev.instanceId == selectedDeviceInstanceId_);
+                    if (ImGui::Selectable(
+                            "##rowSel",
+                            isRowSelected,
+                            ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
+                            ImVec2(0.0f, rowBadgeH))) {
+                        if (isRowSelected) {
+                            selectedDeviceInstanceId_.clear();
+                        } else if (!dev.instanceId.empty()) {
+                            selectedDeviceInstanceId_ = dev.instanceId;
+                        }
+                    }
                     if (ImGui::BeginPopupContextItem("##DevCtxMenu")) {
+                        if (!dev.instanceId.empty()) {
+                            selectedDeviceInstanceId_ = dev.instanceId;
+                        }
                         ImGui::TextDisabled("%s", dev.name.c_str());
                         ImGui::Separator();
 
@@ -1541,6 +1687,119 @@ private:
                 }
             }
             ImGui::EndTable();
+        }
+
+        if (const hdm::DeviceInfo* selectedDev = FindSelectedDevice()) {
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(devStyle.WindowPadding.x, cardPadY));
+            ImGui::BeginChild(
+                "##DeviceDetailsCard",
+                ImVec2(0.0f, detailsH),
+                true,
+                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+
+            ImGui::TextColored(
+                ImVec4(0.45f, 0.73f, 1.00f, 1.00f),
+                "%s",
+                EllipsizeUtf8(selectedDev->name, 420.0f * uiScale).c_str());
+            ImGui::SameLine(0.0f, 12.0f);
+            const std::string metaLine =
+                "Статус: " + selectedDev->statusText +
+                "  |  Класс: " + (selectedDev->deviceClass.empty() ? "—" : selectedDev->deviceClass) +
+                "  |  INF: " + (selectedDev->infName.empty() ? "—" : selectedDev->infName);
+            RenderCellText(metaLine, true);
+
+            const std::string idLine =
+                "Hardware ID: " + (selectedDev->hardwareId.empty() ? "—" : selectedDev->hardwareId) +
+                "   |   Instance ID: " +
+                (selectedDev->instanceId.empty() ? "—" : selectedDev->instanceId);
+            if (RenderCellText(idLine, true) && isAppForeground &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                ImGui::SetTooltip("%s", idLine.c_str());
+            }
+
+            const bool hasHwKey =
+                !selectedDev->searchHardwareKey.empty() || !selectedDev->hardwareId.empty();
+            const bool canControl = !devBusy && !selectedDev->instanceId.empty();
+            const bool highlightCatalog =
+                (selectedDev->health != hdm::DeviceHealth::Ok || selectedDev->isGenericMonitorDriver);
+
+            ImGui::BeginDisabled(devBusy || !hasHwKey);
+            if (RenderActionButton("Установить из Catalog (WHQL)", ImVec2(0.0f, 0.0f), highlightCatalog)) {
+                componentsScanner_.SearchAndInstallFromCatalogAsync(
+                    selectedDev->name,
+                    selectedDev->searchHardwareKey,
+                    selectedDev->hardwareId,
+                    selectedDev->driverVersion,
+                    devicesCache_,
+                    MakeLogger(),
+                    [this](bool ok, bool rebootReq) {
+                        if (rebootReq) rebootRequired_.store(true);
+                        if (ok) pendingDeviceRescan_.store(true);
+                    });
+            }
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!canControl);
+            if (RenderSecondaryButton("Перезапустить")) {
+                scanner_.RunDeviceActionAsync(
+                    hdm::DeviceAction::Restart,
+                    selectedDev->instanceId,
+                    selectedDev->name,
+                    MakeLogger(),
+                    [this](bool, bool rebootReq) {
+                        if (rebootReq) rebootRequired_.store(true);
+                    });
+            }
+            ImGui::SameLine();
+            ImGui::BeginDisabled(!selectedDev->hasDriver);
+            if (RenderSecondaryButton("Откатить драйвер")) {
+                scanner_.RunDeviceActionAsync(
+                    hdm::DeviceAction::RollbackDriver,
+                    selectedDev->instanceId,
+                    selectedDev->name,
+                    MakeLogger(),
+                    [this](bool, bool rebootReq) {
+                        if (rebootReq) rebootRequired_.store(true);
+                    });
+            }
+            ImGui::EndDisabled();
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(selectedDev->hardwareId.empty());
+            if (RenderSecondaryButton("Копировать HWID (Ctrl+C)")) {
+                ImGui::SetClipboardText(selectedDev->hardwareId.c_str());
+                logBuffer_.Push(
+                    hdm::LogLevel::Info,
+                    "Скопирован Hardware ID: " + selectedDev->hardwareId);
+            }
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(selectedDev->instanceId.empty());
+            if (RenderSecondaryButton("Копировать Instance ID")) {
+                ImGui::SetClipboardText(selectedDev->instanceId.c_str());
+                logBuffer_.Push(
+                    hdm::LogLevel::Info,
+                    "Скопирован Instance ID: " + selectedDev->instanceId);
+            }
+            ImGui::EndDisabled();
+
+            const float closeW = CalcButtonWidth("Закрыть (Esc)");
+            const float winRight = ImGui::GetWindowContentRegionMax().x;
+            const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+            if (winRight - closeW > lastEnd + devStyle.ItemSpacing.x) {
+                ImGui::SameLine(winRight - closeW);
+            } else {
+                ImGui::SameLine();
+            }
+            if (RenderSecondaryButton("Закрыть (Esc)", ImVec2(closeW, 0.0f))) {
+                selectedDeviceInstanceId_.clear();
+            }
+
+            ImGui::EndChild();
+            ImGui::PopStyleVar();
         }
     }
 
@@ -3345,6 +3604,7 @@ private:
     HWND hwnd_{nullptr};
     bool isElevated_{false};
     int pendingInitialTab_{-1};
+    int activeTabIndex_{0};
     bool exitRequested_{false};
     std::atomic<bool> rebootRequired_{false};
     std::atomic<bool> pendingDeviceRescan_{false};
@@ -3374,6 +3634,9 @@ private:
     char deviceFilterBuf_[256]{};
     DeviceFilterMode deviceFilterMode_{DeviceFilterMode::All};
     bool deviceViewDirty_{true};
+    std::string selectedDeviceInstanceId_;
+    int pendingSelectDeviceRow_{-1};
+    bool focusDeviceSearchNextFrame_{false};
 
     // Components & Peripherals UI state
     std::vector<hdm::SystemComponentItem> componentsCache_;
@@ -3502,6 +3765,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     int initialTab = -1;
     int initialDiagSection = 0;
     int initialLocalSection = 0;
+    int initialSelectedDeviceRow = -1;
     std::wstring screenshotPath;
     {
         int argc = 0;
@@ -3514,6 +3778,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                     initialDiagSection = _wtoi(argv[++i]);
                 } else if (arg == L"--local-section" && i + 1 < argc) {
                     initialLocalSection = _wtoi(argv[++i]);
+                } else if (arg == L"--select-device-row" && i + 1 < argc) {
+                    initialSelectedDeviceRow = _wtoi(argv[++i]);
                 } else if (arg == L"--screenshot" && i + 1 < argc) {
                     screenshotPath = argv[++i];
                 }
@@ -3526,6 +3792,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         DriverLoomApp app(hwnd, initialTab);
         app.SetInitialDiagSection(initialDiagSection);
         app.SetInitialLocalSection(initialLocalSection);
+        app.SetInitialSelectedDeviceRow(initialSelectedDeviceRow);
         const ImVec4 clearColor(0.059f, 0.071f, 0.098f, 1.00f);
 
         bool done = false;
