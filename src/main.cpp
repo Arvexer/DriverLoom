@@ -1464,35 +1464,46 @@ private:
             componentsScanner_.IsCheckingOnline() ||
             componentsScanner_.IsInstalling();
 
+        std::vector<hdm::SystemComponentItem> batchTargets;
+        for (const auto& comp : componentsCache_) {
+            if ((!comp.installed || comp.updateAvailable) && !comp.directInstallerUrl.empty()) {
+                batchTargets.push_back(comp);
+            }
+        }
+
         ImGui::BeginDisabled(busy);
         if (RenderSecondaryButton("Обновить проверку")) {
             componentsScanner_.StartLocalScanAsync(devicesCache_, MakeLogger());
         }
         SameLineWrapIfNeeded(CalcButtonWidth("Проверить онлайн"));
-        if (ImGui::Button("Проверить онлайн")) {
+        if (RenderSecondaryButton("Проверить онлайн")) {
             componentsScanner_.StartOnlineVersionCheckAsync(MakeLogger());
         }
         ImGui::EndDisabled();
 
-        SameLineWrapIfNeeded(CalcButtonWidth("Все"));
-        if (RenderPillButton("Все", compFilterMode_ == ComponentFilterMode::All)) {
-            compFilterMode_ = ComponentFilterMode::All;
-            compViewDirty_ = true;
+        char batchLbl[96];
+        if (!batchTargets.empty()) {
+            std::snprintf(
+                batchLbl,
+                sizeof(batchLbl),
+                "Обновить все доступные (%zu)###BatchCompBtn",
+                batchTargets.size());
+        } else {
+            std::snprintf(batchLbl, sizeof(batchLbl), "Обновить все доступные (0)###BatchCompBtn");
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Игры и библиотеки"));
-        if (RenderPillButton("Игры и библиотеки", compFilterMode_ == ComponentFilterMode::GamingRuntimes)) {
-            compFilterMode_ = ComponentFilterMode::GamingRuntimes;
-            compViewDirty_ = true;
+        SameLineWrapIfNeeded(CalcButtonWidth("Обновить все доступные (99)"));
+        ImGui::BeginDisabled(busy || batchTargets.empty());
+        if (ImGui::Button(batchLbl)) {
+            componentsScanner_.DownloadAndInstallBatchAsync(
+                std::move(batchTargets), devicesCache_, MakeLogger());
         }
-        SameLineWrapIfNeeded(CalcButtonWidth("Клавиатуры / Мыши / Аудио"));
-        if (RenderPillButton("Клавиатуры / Мыши / Аудио", compFilterMode_ == ComponentFilterMode::Peripherals)) {
-            compFilterMode_ = ComponentFilterMode::Peripherals;
-            compViewDirty_ = true;
-        }
-        SameLineWrapIfNeeded(CalcButtonWidth("Мониторы и GPU"));
-        if (RenderPillButton("Мониторы и GPU", compFilterMode_ == ComponentFilterMode::MonitorsAndGpu)) {
-            compFilterMode_ = ComponentFilterMode::MonitorsAndGpu;
-            compViewDirty_ = true;
+        ImGui::EndDisabled();
+
+        if (componentsScanner_.IsInstalling()) {
+            SameLineWrapIfNeeded(CalcButtonWidth("Отмена"));
+            if (RenderSecondaryButton("Отмена")) {
+                componentsScanner_.RequestCancelInstall();
+            }
         }
 
         const std::string phase = componentsScanner_.PhaseMessage();
@@ -1512,6 +1523,27 @@ private:
             } else {
                 ImGui::TextDisabled("%s", phase.c_str());
             }
+        }
+
+        // Row 2: Filter pills
+        if (RenderPillButton("Все", compFilterMode_ == ComponentFilterMode::All)) {
+            compFilterMode_ = ComponentFilterMode::All;
+            compViewDirty_ = true;
+        }
+        SameLineWrapIfNeeded(CalcButtonWidth("Игры и библиотеки"));
+        if (RenderPillButton("Игры и библиотеки", compFilterMode_ == ComponentFilterMode::GamingRuntimes)) {
+            compFilterMode_ = ComponentFilterMode::GamingRuntimes;
+            compViewDirty_ = true;
+        }
+        SameLineWrapIfNeeded(CalcButtonWidth("Клавиатуры / Мыши / Аудио"));
+        if (RenderPillButton("Клавиатуры / Мыши / Аудио", compFilterMode_ == ComponentFilterMode::Peripherals)) {
+            compFilterMode_ = ComponentFilterMode::Peripherals;
+            compViewDirty_ = true;
+        }
+        SameLineWrapIfNeeded(CalcButtonWidth("Мониторы и GPU"));
+        if (RenderPillButton("Мониторы и GPU", compFilterMode_ == ComponentFilterMode::MonitorsAndGpu)) {
+            compFilterMode_ = ComponentFilterMode::MonitorsAndGpu;
+            compViewDirty_ = true;
         }
 
         if (componentsScanner_.IsInstalling()) {

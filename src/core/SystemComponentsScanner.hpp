@@ -69,6 +69,13 @@ public:
         std::vector<DeviceInfo> devicesSnapshot,
         LogCallback onLog);
 
+    void DownloadAndInstallBatchAsync(
+        std::vector<SystemComponentItem> itemsToInstall,
+        std::vector<DeviceInfo> devicesSnapshot,
+        LogCallback onLog);
+
+    void RequestCancelInstall() noexcept { cancelInstallRequested_.store(true); }
+
     [[nodiscard]] bool IsScanning() const noexcept { return scanning_.load(); }
     [[nodiscard]] bool IsCheckingOnline() const noexcept { return checkingOnline_.load(); }
     [[nodiscard]] bool IsInstalling() const noexcept { return installing_.load(); }
@@ -83,10 +90,17 @@ public:
 
 private:
     void SetPhaseMessage(const std::string& msg);
+    bool InstallSingleComponentSync(
+        const SystemComponentItem& item,
+        float baseProgress,
+        float progressSpan,
+        const std::vector<DeviceInfo>& devs,
+        const LogCallback& log);
 
     std::atomic<bool> scanning_{false};
     std::atomic<bool> checkingOnline_{false};
     std::atomic<bool> installing_{false};
+    std::atomic<bool> cancelInstallRequested_{false};
     std::atomic<float> progress_{0.0f};
     std::atomic<uint64_t> generation_{0};
 

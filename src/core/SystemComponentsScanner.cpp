@@ -951,7 +951,10 @@ bool DownloadFileViaWinHttp(
     const std::wstring& url,
     const std::filesystem::path& destPath,
     std::atomic<float>* progress,
-    std::string* outError) {
+    std::string* outError,
+    float baseProgress = 0.0f,
+    float progressSpan = 1.0f,
+    const std::atomic<bool>* cancelFlag = nullptr) {
     URL_COMPONENTS urlComp{};
     urlComp.dwStructSize = sizeof(urlComp);
     wchar_t hostBuf[256]{};
@@ -1052,6 +1055,13 @@ bool DownloadFileViaWinHttp(
     ULONGLONG downloaded = 0;
     DWORD avail = 0;
     while (WinHttpQueryDataAvailable(request.Get(), &avail) && avail > 0) {
+        if (cancelFlag != nullptr && cancelFlag->load()) {
+            ofs.close();
+            std::error_code rmEc;
+            std::filesystem::remove(destPath, rmEc);
+            if (outError) *outError = "Отменено пользователем.";
+            return false;
+        }
         std::vector<char> buf(std::min<DWORD>(avail, 65536));
         DWORD readBytes = 0;
         if (!WinHttpReadData(request.Get(), buf.data(), static_cast<DWORD>(buf.size()), &readBytes) ||
@@ -1061,8 +1071,9 @@ bool DownloadFileViaWinHttp(
         ofs.write(buf.data(), static_cast<std::streamsize>(readBytes));
         downloaded += readBytes;
         if (progress != nullptr && totalSize > 0) {
-            progress->store(std::clamp(static_cast<float>(downloaded) / static_cast<float>(totalSize),
-                                       0.0f, 0.94f));
+            const float localFrac = std::clamp(
+                static_cast<float>(downloaded) / static_cast<float>(totalSize), 0.0f, 0.90f);
+            progress->store(std::clamp(baseProgress + localFrac * progressSpan, 0.0f, 0.99f));
         }
     }
     ofs.close();
@@ -1443,6 +1454,7 @@ MonitorBrandInfo GetMonitorBrandSupport(const std::string& pnpOrBrand, const std
 } // namespace
 
 SystemComponentsScanner::~SystemComponentsScanner() {
+    cancelInstallRequested_.store(true);
     if (scanThread_.joinable()) scanThread_.join();
     if (onlineThread_.joinable()) onlineThread_.join();
     if (installThread_.joinable()) installThread_.join();
@@ -1822,6 +1834,257 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
     });
 }
 
+bool SystemComponentsScanner::InstallSingleComponentSync(
+    const SystemComponentItem& item,
+    float baseProgress,
+    float progressSpan,
+    const std::vector<DeviceInfo>& devs,
+    const LogCallback& log) {
+    if (cancelInstallRequested_.load() || item.directInstallerUrl.empty()) {
+        return false;
+    }
+
+    SetPhaseMessage("Скачивание: " + item.name);
+
+    wchar_t tempDir[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, tempDir);
+    const std::string cleanUrl = StripUrlQuery(item.directInstallerUrl);
+    bool isZipPackage = EndsWithCaseInsensitive(cleanUrl, ".zip");
+    const bool isDirectMsi = EndsWithCaseInsensitive(cleanUrl, ".msi");
+    const char* initialExt = isZipPackage ? ".zip" : (isDirectMsi ? ".msi" : ".exe");
+    std::filesystem::path destFile =
+        std::filesystem::path(tempDir) / ("DriverLoom_" + item.id + initialExt);
+
+    if (log) {
+        log(LogLevel::Info,
+            "Загрузка официального установщика \"" + item.name + "\"...");
+    }
+
+    std::string errMsg;
+    if (!DownloadFileViaWinHttp(
+            Utf8ToWide(item.directInstallerUrl),
+            destFile,
+            &progress_,
+            &errMsg,
+            baseProgress,
+            progressSpan,
+            &cancelInstallRequested_)) {
+        if (log) {
+            log(cancelInstallRequested_.load() ? LogLevel::Warning : LogLevel::Error,
+                "Ошибка скачивания " + item.name + ": " + errMsg);
+        }
+        SetPhaseMessage(cancelInstallRequested_.load() ? "Установка отменена" : "Ошибка загрузки");
+        return false;
+    }
+
+    if (!isZipPackage && HasZipMagicHeader(destFile)) {
+        std::filesystem::path zipRenamed = destFile;
+        zipRenamed.replace_extension(L".zip");
+        std::error_code rec;
+        std::filesystem::rename(destFile, zipRenamed, rec);
+        if (!rec) {
+            destFile = zipRenamed;
+            isZipPackage = true;
+        }
+    }
+
+    std::filesystem::path targetExe = destFile;
+    std::filesystem::path extractDir;
+
+    if (isZipPackage) {
+        SetPhaseMessage("Распаковка архива...");
+        extractDir = std::filesystem::path(tempDir) / ("DriverLoom_" + item.id + "_pkg");
+        std::error_code ec;
+        std::filesystem::remove_all(extractDir, ec);
+        if (!ExtractZipViaShellCom(destFile, extractDir)) {
+            std::filesystem::remove(destFile, ec);
+            if (log) {
+                log(LogLevel::Error, "Не удалось распаковать архив " + item.name + ".");
+            }
+            SetPhaseMessage("Ошибка распаковки");
+            return false;
+        }
+
+        targetExe.clear();
+        if (!item.nestedInstallerHint.empty()) {
+            std::wstring relW = Utf8ToWide(item.nestedInstallerHint);
+            std::replace(relW.begin(), relW.end(), L'/', L'\\');
+            const std::filesystem::path hinted = extractDir / relW;
+            if (std::filesystem::is_regular_file(hinted, ec)) {
+                targetExe = hinted;
+            }
+        }
+        if (targetExe.empty()) {
+            std::filesystem::path firstMsi;
+            std::filesystem::path setupExe;
+            std::filesystem::path firstExe;
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(extractDir, ec)) {
+                if (!entry.is_regular_file(ec)) {
+                    continue;
+                }
+                const std::string ext = ToLowerAscii(WideToUtf8(entry.path().extension().wstring()));
+                const std::string fname = ToLowerAscii(WideToUtf8(entry.path().filename().wstring()));
+                if (ext == ".msi" && firstMsi.empty()) {
+                    firstMsi = entry.path();
+                } else if (ext == ".exe") {
+                    if (firstExe.empty()) firstExe = entry.path();
+                    if (setupExe.empty() &&
+                        (fname.find("setup") != std::string::npos ||
+                         fname.find("install") != std::string::npos)) {
+                        setupExe = entry.path();
+                    }
+                }
+            }
+            if (!firstMsi.empty()) targetExe = firstMsi;
+            else if (!setupExe.empty()) targetExe = setupExe;
+            else targetExe = firstExe;
+        }
+        if (targetExe.empty()) {
+            std::filesystem::remove(destFile, ec);
+            std::filesystem::remove_all(extractDir, ec);
+            if (log) {
+                log(LogLevel::Error, "В архиве не найден исполняемый файл установщика.");
+            }
+            SetPhaseMessage("Установщик не найден");
+            return false;
+        }
+    }
+
+    if (cancelInstallRequested_.load()) {
+        std::error_code ec;
+        std::filesystem::remove(destFile, ec);
+        if (!extractDir.empty()) std::filesystem::remove_all(extractDir, ec);
+        SetPhaseMessage("Установка отменена");
+        return false;
+    }
+
+    SetPhaseMessage("Проверка цифровой подписи Authenticode...");
+    std::string sigErr;
+    if (!VerifyAuthenticodeSignature(targetExe, &sigErr)) {
+        std::error_code ec;
+        std::filesystem::remove(destFile, ec);
+        if (!extractDir.empty()) std::filesystem::remove_all(extractDir, ec);
+        if (log) {
+            log(LogLevel::Error,
+                "Цифровая подпись установщика не прошла проверку (" + sigErr +
+                    "). Запуск отменён в целях безопасности.");
+        }
+        SetPhaseMessage("Подпись не подтверждена");
+        return false;
+    }
+
+    const std::string dlVer = GetFileVersionUtf8(targetExe);
+    if (log) {
+        log(LogLevel::Success,
+            "Подпись подтверждена" +
+                (dlVer.empty() ? std::string() : " (версия файла: " + dlVer + ")") +
+                ". Запуск установки...");
+    }
+
+    SetPhaseMessage("Установка " + item.name + "...");
+    progress_.store(std::clamp(baseProgress + progressSpan * 0.94f, 0.0f, 0.99f));
+
+    DWORD exitCode = 0;
+    DWORD launchErr = 0;
+    bool launched = false;
+
+    if (item.id == "rt_dx_legacy") {
+        const std::filesystem::path dxExtractDir =
+            std::filesystem::path(tempDir) / L"DriverLoom_DX2010";
+        std::error_code ec;
+        std::filesystem::create_directories(dxExtractDir, ec);
+        const std::wstring extractArgs = L"/Q /T:\"" + dxExtractDir.wstring() + L"\"";
+        if (LaunchAndWaitProcess(targetExe, extractArgs, &exitCode, &launchErr)) {
+            const std::filesystem::path dxSetup = dxExtractDir / L"DXSETUP.exe";
+            if (std::filesystem::exists(dxSetup, ec)) {
+                launched = LaunchAndWaitProcess(dxSetup, L"/silent", &exitCode, &launchErr);
+            }
+        }
+        std::filesystem::remove_all(dxExtractDir, ec);
+    } else if (EndsWithCaseInsensitive(WideToUtf8(targetExe.extension().wstring()), ".msi")) {
+        const std::filesystem::path msiexec = GetSystemDirPath(false) / L"msiexec.exe";
+        const std::wstring msiArgs =
+            L"/i \"" + targetExe.wstring() + L"\" /passive /norestart";
+        launched = LaunchAndWaitProcess(msiexec, msiArgs, &exitCode, &launchErr);
+    } else {
+        launched = LaunchAndWaitProcess(
+            targetExe, Utf8ToWide(item.installerArgs), &exitCode, &launchErr);
+    }
+
+    bool succeeded = false;
+    if (!launched) {
+        if (log) {
+            log(launchErr == ERROR_CANCELLED ? LogLevel::Warning : LogLevel::Error,
+                launchErr == ERROR_CANCELLED
+                    ? "Установка отменена пользователем (UAC)."
+                    : "Не удалось запустить установщик: " + FormatWin32Error(launchErr));
+        }
+        if (launchErr == ERROR_CANCELLED) {
+            cancelInstallRequested_.store(true);
+        }
+    } else if (exitCode == 0 || exitCode == 3010) {
+        succeeded = true;
+        if (log) {
+            log(LogLevel::Success,
+                item.name + " успешно установлен" +
+                    (exitCode == 3010 ? " (требуется перезагрузка)." : "."));
+        }
+    } else {
+        if (log) {
+            log(LogLevel::Warning,
+                item.name + " завершился с кодом " + std::to_string(exitCode) + ".");
+        }
+    }
+
+    std::error_code ec;
+    std::filesystem::remove(destFile, ec);
+    if (!extractDir.empty()) {
+        std::filesystem::remove_all(extractDir, ec);
+    }
+
+    auto refreshAndCompare = [&]() {
+        auto refreshed = ScanLocalSynchronously(devs);
+        std::lock_guard<std::mutex> lock(dataMutex_);
+        if (!dlVer.empty() &&
+            (item.id == "rt_vcredist_x64" || item.id == "rt_vcredist_x86")) {
+            for (auto& oldIt : items_) {
+                if (oldIt.id == item.id) {
+                    oldIt.latestVersion = dlVer;
+                    oldIt.onlineChecked = true;
+                    break;
+                }
+            }
+        }
+        MergeOnlineMetadataIntoRefreshed(refreshed, items_);
+        items_ = std::move(refreshed);
+        generation_.fetch_add(1);
+    };
+
+    refreshAndCompare();
+
+    // Some web bootstrappers (Logitech G HUB / Razer Synapse / WebView2) continue finalizing
+    // registry Uninstall entries for a few seconds after the launcher returns.
+    if (launched) {
+        bool needRetry = false;
+        {
+            std::lock_guard<std::mutex> lock(dataMutex_);
+            for (const auto& cur : items_) {
+                if (cur.id == item.id && (!cur.installed || cur.updateAvailable)) {
+                    needRetry = true;
+                    break;
+                }
+            }
+        }
+        if (needRetry) {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+            refreshAndCompare();
+        }
+    }
+
+    progress_.store(std::clamp(baseProgress + progressSpan, 0.0f, 1.0f));
+    return succeeded;
+}
+
 void SystemComponentsScanner::DownloadAndInstallAsync(
     const SystemComponentItem& item,
     std::vector<DeviceInfo> devicesSnapshot,
@@ -1840,234 +2103,81 @@ void SystemComponentsScanner::DownloadAndInstallAsync(
         installThread_.join();
     }
 
+    cancelInstallRequested_.store(false);
     progress_.store(0.0f);
-    SetPhaseMessage("Скачивание: " + item.name);
 
     installThread_ = std::thread([this, item, devs = std::move(devicesSnapshot), log = std::move(onLog)]() {
-        wchar_t tempDir[MAX_PATH]{};
-        GetTempPathW(MAX_PATH, tempDir);
-        const std::string cleanUrl = StripUrlQuery(item.directInstallerUrl);
-        bool isZipPackage = EndsWithCaseInsensitive(cleanUrl, ".zip");
-        const bool isDirectMsi = EndsWithCaseInsensitive(cleanUrl, ".msi");
-        const char* initialExt = isZipPackage ? ".zip" : (isDirectMsi ? ".msi" : ".exe");
-        std::filesystem::path destFile =
-            std::filesystem::path(tempDir) / ("DriverLoom_" + item.id + initialExt);
+        const bool ok = InstallSingleComponentSync(item, 0.0f, 1.0f, devs, log);
+        progress_.store(1.0f);
+        SetPhaseMessage(ok ? "Установка завершена" : (cancelInstallRequested_.load() ? "Установка отменена" : "Установка завершена с предупреждением"));
+        installing_.store(false);
+    });
+}
+
+void SystemComponentsScanner::DownloadAndInstallBatchAsync(
+    std::vector<SystemComponentItem> itemsToInstall,
+    std::vector<DeviceInfo> devicesSnapshot,
+    LogCallback onLog) {
+    if (installing_.exchange(true)) {
+        if (onLog) {
+            onLog(LogLevel::Warning, "Установка компонентов уже выполняется.");
+        }
+        return;
+    }
+    if (itemsToInstall.empty()) {
+        installing_.store(false);
+        return;
+    }
+    if (installThread_.joinable()) {
+        installThread_.join();
+    }
+
+    cancelInstallRequested_.store(false);
+    progress_.store(0.0f);
+    SetPhaseMessage("Пакетное обновление компонентов...");
+
+    installThread_ = std::thread([this,
+                                  list = std::move(itemsToInstall),
+                                  devs = std::move(devicesSnapshot),
+                                  log = std::move(onLog)]() {
+        const size_t total = list.size();
+        size_t okCount = 0;
 
         if (log) {
             log(LogLevel::Info,
-                "Загрузка официального установщика \"" + item.name + "\"...");
+                "Начинается пакетная установка/обновление компонентов (" +
+                    std::to_string(total) + " шт.)...");
         }
 
-        std::string errMsg;
-        if (!DownloadFileViaWinHttp(
-                Utf8ToWide(item.directInstallerUrl), destFile, &progress_, &errMsg)) {
+        const float span = 1.0f / static_cast<float>(total);
+        for (size_t i = 0; i < total; ++i) {
+            if (cancelInstallRequested_.load()) {
+                if (log) {
+                    log(LogLevel::Warning, "Пакетная установка остановлена пользователем.");
+                }
+                break;
+            }
             if (log) {
-                log(LogLevel::Error, "Ошибка скачивания " + item.name + ": " + errMsg);
+                log(LogLevel::Info,
+                    "[" + std::to_string(i + 1) + "/" + std::to_string(total) +
+                        "] Пакетная установка: " + list[i].name);
             }
-            SetPhaseMessage("Ошибка загрузки");
-            installing_.store(false);
-            return;
-        }
-
-        if (!isZipPackage && HasZipMagicHeader(destFile)) {
-            std::filesystem::path zipRenamed = destFile;
-            zipRenamed.replace_extension(L".zip");
-            std::error_code rec;
-            std::filesystem::rename(destFile, zipRenamed, rec);
-            if (!rec) {
-                destFile = zipRenamed;
-                isZipPackage = true;
-            }
-        }
-
-        std::filesystem::path targetExe = destFile;
-        std::filesystem::path extractDir;
-
-        if (isZipPackage) {
-            SetPhaseMessage("Распаковка архива...");
-            extractDir = std::filesystem::path(tempDir) / ("DriverLoom_" + item.id + "_pkg");
-            std::error_code ec;
-            std::filesystem::remove_all(extractDir, ec);
-            if (!ExtractZipViaShellCom(destFile, extractDir)) {
-                std::filesystem::remove(destFile, ec);
-                if (log) {
-                    log(LogLevel::Error, "Не удалось распаковать архив " + item.name + ".");
-                }
-                SetPhaseMessage("Ошибка распаковки");
-                installing_.store(false);
-                return;
-            }
-
-            targetExe.clear();
-            if (!item.nestedInstallerHint.empty()) {
-                std::wstring relW = Utf8ToWide(item.nestedInstallerHint);
-                std::replace(relW.begin(), relW.end(), L'/', L'\\');
-                const std::filesystem::path hinted = extractDir / relW;
-                if (std::filesystem::is_regular_file(hinted, ec)) {
-                    targetExe = hinted;
-                }
-            }
-            if (targetExe.empty()) {
-                std::filesystem::path firstMsi;
-                std::filesystem::path setupExe;
-                std::filesystem::path firstExe;
-                for (const auto& entry : std::filesystem::recursive_directory_iterator(extractDir, ec)) {
-                    if (!entry.is_regular_file(ec)) {
-                        continue;
-                    }
-                    const std::string ext = ToLowerAscii(WideToUtf8(entry.path().extension().wstring()));
-                    const std::string fname = ToLowerAscii(WideToUtf8(entry.path().filename().wstring()));
-                    if (ext == ".msi" && firstMsi.empty()) {
-                        firstMsi = entry.path();
-                    } else if (ext == ".exe") {
-                        if (firstExe.empty()) firstExe = entry.path();
-                        if (setupExe.empty() &&
-                            (fname.find("setup") != std::string::npos ||
-                             fname.find("install") != std::string::npos)) {
-                            setupExe = entry.path();
-                        }
-                    }
-                }
-                if (!firstMsi.empty()) targetExe = firstMsi;
-                else if (!setupExe.empty()) targetExe = setupExe;
-                else targetExe = firstExe;
-            }
-            if (targetExe.empty()) {
-                std::filesystem::remove(destFile, ec);
-                std::filesystem::remove_all(extractDir, ec);
-                if (log) {
-                    log(LogLevel::Error, "В архиве не найден исполняемый файл установщика.");
-                }
-                SetPhaseMessage("Установщик не найден");
-                installing_.store(false);
-                return;
-            }
-        }
-
-        SetPhaseMessage("Проверка цифровой подписи Authenticode...");
-        std::string sigErr;
-        if (!VerifyAuthenticodeSignature(targetExe, &sigErr)) {
-            std::error_code ec;
-            std::filesystem::remove(destFile, ec);
-            if (!extractDir.empty()) std::filesystem::remove_all(extractDir, ec);
-            if (log) {
-                log(LogLevel::Error,
-                    "Цифровая подпись установщика не прошла проверку (" + sigErr +
-                        "). Запуск отменён в целях безопасности.");
-            }
-            SetPhaseMessage("Подпись не подтверждена");
-            installing_.store(false);
-            return;
-        }
-
-        const std::string dlVer = GetFileVersionUtf8(targetExe);
-        if (log) {
-            log(LogLevel::Success,
-                "Подпись подтверждена" +
-                    (dlVer.empty() ? std::string() : " (версия файла: " + dlVer + ")") +
-                    ". Запуск установки...");
-        }
-
-        SetPhaseMessage("Установка " + item.name + "...");
-        progress_.store(0.96f);
-
-        DWORD exitCode = 0;
-        DWORD launchErr = 0;
-        bool launched = false;
-
-        if (item.id == "rt_dx_legacy") {
-            const std::filesystem::path dxExtractDir =
-                std::filesystem::path(tempDir) / L"DriverLoom_DX2010";
-            std::error_code ec;
-            std::filesystem::create_directories(dxExtractDir, ec);
-            const std::wstring extractArgs = L"/Q /T:\"" + dxExtractDir.wstring() + L"\"";
-            if (LaunchAndWaitProcess(targetExe, extractArgs, &exitCode, &launchErr)) {
-                const std::filesystem::path dxSetup = dxExtractDir / L"DXSETUP.exe";
-                if (std::filesystem::exists(dxSetup, ec)) {
-                    launched = LaunchAndWaitProcess(dxSetup, L"/silent", &exitCode, &launchErr);
-                }
-            }
-            std::filesystem::remove_all(dxExtractDir, ec);
-        } else if (EndsWithCaseInsensitive(WideToUtf8(targetExe.extension().wstring()), ".msi")) {
-            const std::filesystem::path msiexec = GetSystemDirPath(false) / L"msiexec.exe";
-            const std::wstring msiArgs =
-                L"/i \"" + targetExe.wstring() + L"\" /passive /norestart";
-            launched = LaunchAndWaitProcess(msiexec, msiArgs, &exitCode, &launchErr);
-        } else {
-            launched = LaunchAndWaitProcess(
-                targetExe, Utf8ToWide(item.installerArgs), &exitCode, &launchErr);
-        }
-
-        if (!launched) {
-            if (log) {
-                log(launchErr == ERROR_CANCELLED ? LogLevel::Warning : LogLevel::Error,
-                    launchErr == ERROR_CANCELLED
-                        ? "Установка отменена пользователем (UAC)."
-                        : "Не удалось запустить установщик: " + FormatWin32Error(launchErr));
-            }
-        } else {
-            if (exitCode == 0 || exitCode == 3010) {
-                if (log) {
-                    log(LogLevel::Success,
-                        item.name + " успешно установлен" +
-                            (exitCode == 3010 ? " (требуется перезагрузка)." : "."));
-                }
-            } else {
-                if (log) {
-                    log(LogLevel::Warning,
-                        item.name + " завершился с кодом " + std::to_string(exitCode) + ".");
-                }
-            }
-        }
-
-        std::error_code ec;
-        std::filesystem::remove(destFile, ec);
-        if (!extractDir.empty()) {
-            std::filesystem::remove_all(extractDir, ec);
-        }
-
-        auto refreshAndCompare = [&]() {
-            auto refreshed = ScanLocalSynchronously(devs);
-            std::lock_guard<std::mutex> lock(dataMutex_);
-            // If we downloaded a VC++ installer with a known file version, record it.
-            if (!dlVer.empty() &&
-                (item.id == "rt_vcredist_x64" || item.id == "rt_vcredist_x86")) {
-                for (auto& oldIt : items_) {
-                    if (oldIt.id == item.id) {
-                        oldIt.latestVersion = dlVer;
-                        oldIt.onlineChecked = true;
-                        break;
-                    }
-                }
-            }
-            MergeOnlineMetadataIntoRefreshed(refreshed, items_);
-            items_ = std::move(refreshed);
-            generation_.fetch_add(1);
-        };
-
-        refreshAndCompare();
-
-        // Some web bootstrappers (Logitech G HUB / Razer Synapse / WebView2) continue finalizing
-        // registry Uninstall entries for a few seconds after the launcher returns.
-        if (launched) {
-            bool needRetry = false;
-            {
-                std::lock_guard<std::mutex> lock(dataMutex_);
-                for (const auto& cur : items_) {
-                    if (cur.id == item.id && (!cur.installed || cur.updateAvailable)) {
-                        needRetry = true;
-                        break;
-                    }
-                }
-            }
-            if (needRetry) {
-                std::this_thread::sleep_for(std::chrono::seconds(3));
-                refreshAndCompare();
+            if (InstallSingleComponentSync(list[i], static_cast<float>(i) * span, span, devs, log)) {
+                ++okCount;
             }
         }
 
         progress_.store(1.0f);
-        SetPhaseMessage("Установка завершена");
+        const std::string doneMsg =
+            cancelInstallRequested_.load()
+                ? ("Пакетная установка прервана (" + std::to_string(okCount) + " из " +
+                   std::to_string(total) + ")")
+                : ("Пакетная установка завершена: успешно — " + std::to_string(okCount) +
+                   " из " + std::to_string(total));
+        SetPhaseMessage(doneMsg);
+        if (log) {
+            log(okCount == total ? LogLevel::Success : LogLevel::Warning, doneMsg + ".");
+        }
         installing_.store(false);
     });
 }
