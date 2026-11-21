@@ -50,6 +50,14 @@ endif()
 
 add_executable(DriverLoom WIN32
     src/main.cpp
+    src/app/CliWorker.cpp
+    src/ui/AppWidgets.cpp
+    src/ui/DriverLoomApp.cpp
+    src/ui/TabDevices.cpp
+    src/ui/TabComponents.cpp
+    src/ui/TabWindowsUpdate.cpp
+    src/ui/TabLocalInstaller.cpp
+    src/ui/TabDiagnostics.cpp
     src/core/DeviceScanner.cpp
     src/core/WindowsUpdateManager.cpp
     src/core/LocalDriverInstaller.cpp

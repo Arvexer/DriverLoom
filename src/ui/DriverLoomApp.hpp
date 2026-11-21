@@ -1,0 +1,180 @@
+#pragma once
+
+#include "ui/AppWidgets.hpp"
+#include "core/DeviceScanner.hpp"
+#include "core/LocalDriverInstaller.hpp"
+#include "core/SystemComponentsScanner.hpp"
+#include "core/SystemDiagnostics.hpp"
+#include "core/SystemRestore.hpp"
+#include "core/WindowsUpdateManager.hpp"
+
+#include "imgui.h"
+
+#include <atomic>
+#include <cstddef>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
+#include <vector>
+
+class DriverLoomApp {
+public:
+    explicit DriverLoomApp(HWND mainHwnd, int initialTab = -1);
+
+    void RenderFrame();
+
+    bool ShouldExitApp() const noexcept { return exitRequested_; }
+    void SetInitialDiagSection(int sec) noexcept { diagSectionIndex_ = sec; }
+    void SetInitialLocalSection(int sec) noexcept { localSectionIndex_ = sec; }
+    void SetInitialSelectedDeviceRow(int row) noexcept { pendingSelectDeviceRow_ = row; }
+    bool IsInitialScanSettled() const noexcept;
+    void ConfigureCaptureState(
+        int tab,
+        int diagSec,
+        int localSec,
+        bool advancedMode,
+        bool lightTheme,
+        int selectDevRow = -1);
+
+private:
+    enum class DeviceFilterMode {
+        All,
+        ProblemOnly,
+        Monitors,
+        Peripherals,
+        DisplayAndChipset
+    };
+
+    enum class ComponentFilterMode {
+        All,
+        GamingRuntimes,
+        Peripherals,
+        MonitorsAndGpu
+    };
+
+    enum class DriverStoreFilterMode {
+        All,
+        OldDuplicates,
+        ActiveOnly,
+        UnusedOnly
+    };
+
+    hdm::LogCallback MakeLogger();
+
+    static std::string FormatSnapshotEntrySummary(
+        const std::string& driverVersion,
+        const std::string& driverDate,
+        const std::string& infName,
+        const std::string& statusText);
+
+    void LoadBaselineSnapshot();
+    void CaptureCurrentAsBaseline(bool logNotification);
+    void RebuildSnapshotDiff();
+    void SyncScannerSnapshots();
+
+    void RenderHeaderBar();
+    void RenderRebootBanner();
+
+    void RebuildDeviceViewCache(ImGuiTableSortSpecs* sortSpecs);
+    static void SameLineWrapIfNeeded(float nextItemWidth);
+    static float CalcButtonWidth(const char* label);
+    const hdm::DeviceInfo* FindSelectedDevice() const;
+    static bool IsOemInfName(const std::string& infName);
+    void JumpToDriverStorePackage(const std::string& infName);
+    void HandleKeyboardShortcuts();
+
+    void RenderDevicesTab();
+    void RebuildComponentsViewCache(ImGuiTableSortSpecs* sortSpecs);
+    void RenderComponentsTab();
+    void RenderWindowsUpdateTab();
+    void RebuildDriverStoreViewCache(ImGuiTableSortSpecs* sortSpecs);
+    void RenderDriverStoreSection();
+    void RenderLocalInstallerTab();
+    void RenderDiagnosticsTab();
+    void RenderLogPanel();
+
+    HWND hwnd_{nullptr};
+    bool isElevated_{false};
+    int pendingInitialTab_{-1};
+    int activeTabIndex_{0};
+    bool exitRequested_{false};
+    std::atomic<bool> rebootRequired_{false};
+    std::atomic<bool> pendingDeviceRescan_{false};
+    double lastFocusRefreshTime_{-10.0};
+
+    hdm::LogBuffer logBuffer_;
+    hdm::DeviceScanner scanner_;
+    hdm::SystemComponentsScanner componentsScanner_;
+    hdm::SystemDiagnostics diagnostics_;
+    hdm::WindowsUpdateManager wuManager_;
+    hdm::LocalDriverInstaller localInstaller_;
+    hdm::SystemRestore systemRestore_;
+
+    // System diagnostics snapshot & tab subview state
+    hdm::SystemDiagnosticsSnapshot diagCache_;
+    uint64_t lastDiagGen_{0};
+    int diagSectionIndex_{0};
+
+    // Driver Baseline ("Before / After") snapshot & diff state
+    std::string baselineTimestamp_;
+    std::vector<DriverBaselineEntry> baselineEntries_;
+    std::vector<DriverSnapshotDiffRow> snapshotDiffRows_;
+    size_t snapshotChangedCount_{0};
+    [[maybe_unused]] bool snapshotLoadedFromReg_{false};
+    bool snapShowAll_{false};
+    hdm::Lang lastSnapshotLang_{hdm::Lang::Ru};
+
+    // Cached Devices UI state (zero per-frame filtering/sorting allocations)
+    std::vector<hdm::DeviceInfo> devicesCache_;
+    std::vector<size_t> visibleDeviceIndices_;
+    uint64_t lastDeviceGen_{0};
+    size_t totalDevicesCount_{0};
+    size_t problemDevicesCount_{0};
+    size_t monitorDevicesCount_{0};
+    size_t peripheralDevicesCount_{0};
+    char deviceFilterBuf_[256]{};
+    DeviceFilterMode deviceFilterMode_{DeviceFilterMode::All};
+    bool deviceViewDirty_{true};
+    std::string selectedDeviceInstanceId_;
+    int pendingSelectDeviceRow_{-1};
+    bool focusDeviceSearchNextFrame_{false};
+
+    // Components & Peripherals UI state
+    std::vector<hdm::SystemComponentItem> componentsCache_;
+    std::vector<size_t> visibleComponentIndices_;
+    std::unordered_set<std::string> selectedComponentIds_;
+    uint64_t lastComponentsGen_{0};
+    ComponentFilterMode compFilterMode_{ComponentFilterMode::All};
+    bool compRestoreBefore_{true};
+    bool compViewDirty_{true};
+
+    // WU UI state
+    std::vector<hdm::DriverUpdateItem> wuCache_;
+    uint64_t lastWuGen_{0};
+    int selectedWuIndex_{-1};
+    bool wuSortDirty_{false};
+    bool wuRestoreBefore_{true};
+    bool wuIncludeSystemUpdates_{false};
+    bool wuShowHidden_{false};
+
+    // Local INF & DriverStore backup UI state
+    int localSectionIndex_{0};
+    char localFolderBuf_[1024]{};
+    bool localForceInstall_{false};
+    bool localRestoreBefore_{true};
+    bool backupSkipDuplicates_{true};
+    bool storeRestoreBefore_{true};
+    char storeFilterBuf_[256]{};
+    hdm::DriverStoreSnapshot driverStoreCache_;
+    std::vector<size_t> visibleStoreIndices_;
+    uint64_t lastDriverStoreGen_{0};
+    DriverStoreFilterMode storeFilterMode_{DriverStoreFilterMode::All};
+    bool storeViewDirty_{true};
+    std::mutex pendingPathMutex_;
+    std::string pendingFolderUtf8_;
+    bool hasPendingFolder_{false};
+
+    // Log UI state
+    bool logAutoScroll_{true};
+};

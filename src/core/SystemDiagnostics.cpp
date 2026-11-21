@@ -431,6 +431,7 @@ bool IsVirtualOrSoftwareAdapter(const DeviceInfo& d) {
            ContainsCaseInsensitive(d.name, "Personal Area Network") ||
            ContainsCaseInsensitive(d.name, "SteelSeries Sonar") ||
            ContainsCaseInsensitive(d.name, "Razer THX") ||
+           ContainsCaseInsensitive(d.name, "NVIDIA Broadcast") ||
            ContainsCaseInsensitive(d.name, "NVIDIA Virtual Audio");
 }
 
@@ -536,6 +537,11 @@ std::vector<ControllerDiagnosticItem> AnalyzeKeyControllers(
         const bool isFallbackMsDriver =
             (clsLower == "media" && infLower == "hdaudio.inf") ||
             (clsLower == "display" && infLower == "basicdisplay.inf");
+        const bool isStandardStorageOrChipsetBridge =
+            (role == "SATA / AHCI" &&
+             (ContainsCaseInsensitive(d.name, "AHCI") || infLower == "mshdc.inf")) ||
+            (role == "NVMe контроллер" && infLower == "stornvme.inf") ||
+            (role == "Чипсет / плата") || isUsbAudioOrBt;
 
         const int drvYear = ParseDriverYear(d.driverDate);
         const bool isMicrosoftGeneric2006 =
@@ -552,7 +558,8 @@ std::vector<ControllerDiagnosticItem> AnalyzeKeyControllers(
             item.health = ControllerHealth::Attention;
             item.statusText = "Базовый драйвер Windows (" + d.infName + ")";
             ++outAttention;
-        } else if (drvYear > 0 && !isMicrosoftGeneric2006 && (currentYear - drvYear) >= 5) {
+        } else if (drvYear > 0 && !isMicrosoftGeneric2006 && !isStandardStorageOrChipsetBridge &&
+                   (currentYear - drvYear) >= 5) {
             item.health = ControllerHealth::Attention;
             item.statusText = "Устаревший драйвер (" + std::to_string(drvYear) + " г.)";
             ++outAttention;

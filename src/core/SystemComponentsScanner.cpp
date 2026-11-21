@@ -125,19 +125,6 @@ std::vector<InstalledAppEntry> CollectAllInstalledApps() {
     return apps;
 }
 
-const InstalledAppEntry* FindInstalledApp(
-    const std::vector<InstalledAppEntry>& apps,
-    std::initializer_list<const char*> keywords) {
-    for (const auto& app : apps) {
-        for (const char* kw : keywords) {
-            if (kw != nullptr && ContainsCaseInsensitive(app.displayName, kw)) {
-                return &app;
-            }
-        }
-    }
-    return nullptr;
-}
-
 std::string GetFileVersionUtf8(const std::filesystem::path& filePath) {
     std::error_code ec;
     if (!std::filesystem::exists(filePath, ec)) {
@@ -209,6 +196,31 @@ bool IsVersionNewer(const std::string& latest, const std::string& current) {
         }
     }
     return false;
+}
+
+const InstalledAppEntry* FindInstalledApp(
+    const std::vector<InstalledAppEntry>& apps,
+    std::initializer_list<const char*> keywords) {
+    const InstalledAppEntry* best = nullptr;
+    for (const auto& app : apps) {
+        bool matched = false;
+        for (const char* kw : keywords) {
+            if (kw != nullptr && ContainsCaseInsensitive(app.displayName, kw)) {
+                matched = true;
+                break;
+            }
+        }
+        if (!matched) {
+            continue;
+        }
+        if (best == nullptr ||
+            (!app.displayVersion.empty() &&
+             (best->displayVersion.empty() ||
+              IsVersionNewer(app.displayVersion, best->displayVersion)))) {
+            best = &app;
+        }
+    }
+    return best;
 }
 
 bool EndsWithCaseInsensitive(std::string_view text, std::string_view suffix) {
@@ -647,6 +659,100 @@ std::string UrlEncodeCatalogParam(std::string_view val) {
     return out;
 }
 
+bool IsValidCatalogVersion(std::string_view ver) {
+    if (ver.empty() || std::isdigit(static_cast<unsigned char>(ver.front())) == 0 ||
+        std::isdigit(static_cast<unsigned char>(ver.back())) == 0 ||
+        ver.find('.') == std::string_view::npos) {
+        return false;
+    }
+    bool prevDot = false;
+    for (char ch : ver) {
+        if (ch == '.') {
+            if (prevDot) return false;
+            prevDot = true;
+        } else if (std::isdigit(static_cast<unsigned char>(ch)) != 0) {
+            prevDot = false;
+        } else {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::string ExtractVersionFromCatalogRowChunk(std::string_view rowChunk) {
+    const size_t linkPos = rowChunk.rfind("_link'");
+    const size_t linkAltPos = rowChunk.rfind("_link\"");
+    size_t anchor = std::string_view::npos;
+    if (linkPos != std::string_view::npos && linkAltPos != std::string_view::npos) {
+        anchor = std::max(linkPos, linkAltPos);
+    } else {
+        anchor = (linkPos != std::string_view::npos) ? linkPos : linkAltPos;
+    }
+    if (anchor == std::string_view::npos) {
+        return {};
+    }
+    const size_t gt = rowChunk.find('>', anchor);
+    const size_t endA = (gt != std::string_view::npos) ? rowChunk.find("</a>", gt + 1) : std::string_view::npos;
+    if (gt == std::string_view::npos || endA == std::string_view::npos) {
+        return {};
+    }
+    const std::string_view title = rowChunk.substr(gt + 1, endA - gt - 1);
+
+    std::string lastVer;
+    size_t i = 0;
+    while (i < title.size()) {
+        if (std::isdigit(static_cast<unsigned char>(title[i])) == 0) {
+            ++i;
+            continue;
+        }
+        const size_t start = i;
+        while (i < title.size() &&
+               (std::isdigit(static_cast<unsigned char>(title[i])) != 0 || title[i] == '.')) {
+            ++i;
+        }
+        size_t end = i;
+        while (end > start && title[end - 1] == '.') {
+            --end;
+        }
+        const std::string_view cand = title.substr(start, end - start);
+        if (IsValidCatalogVersion(cand)) {
+            lastVer.assign(cand);
+        }
+    }
+    return lastVer;
+}
+
+std::string ExtractVenDevSubsysKey(std::string_view hwId) {
+    if (hwId.empty()) {
+        return {};
+    }
+    std::string upper(hwId);
+    for (char& ch : upper) {
+        if (ch >= 'a' && ch <= 'z') {
+            ch = static_cast<char>(ch - 'a' + 'A');
+        }
+    }
+    auto extractHex = [&upper](std::string_view tag, size_t len) -> std::string {
+        const size_t p = upper.find(tag);
+        if (p == std::string::npos || p + tag.size() + len > upper.size()) {
+            return {};
+        }
+        for (size_t i = 0; i < len; ++i) {
+            if (std::isxdigit(static_cast<unsigned char>(upper[p + tag.size() + i])) == 0) {
+                return {};
+            }
+        }
+        return upper.substr(p + tag.size(), len);
+    };
+    const std::string ven = extractHex("VEN_", 4);
+    const std::string dev = extractHex("DEV_", 4);
+    const std::string subsys = extractHex("SUBSYS_", 8);
+    if (ven.empty() || dev.empty() || subsys.empty()) {
+        return {};
+    }
+    return "VEN_" + ven + "&DEV_" + dev + "&SUBSYS_" + subsys;
+}
+
 // Queries Microsoft Update Catalog for a Hardware ID fragment (e.g. VEN_10EC&DEV_8125),
 // selects the highest WHQL version (preferring Windows 11 targets on ties), and fetches its .cab URL.
 std::pair<std::string, std::string> ResolveMsCatalogDriverCab(const std::string& searchKey) {
@@ -685,25 +791,21 @@ std::pair<std::string, std::string> ResolveMsCatalogDriverCab(const std::string&
             continue;
         }
 
-        const std::string ver = TrimCopy(std::string_view(html.data() + tdClose + 1, endTd - tdClose - 1));
-        bool validVer = !ver.empty() && std::isdigit(static_cast<unsigned char>(ver.front())) != 0 &&
-                        ver.find('.') != std::string::npos;
-        for (char ch : ver) {
-            if (!std::isdigit(static_cast<unsigned char>(ch)) && ch != '.') {
-                validVer = false;
-                break;
-            }
+        const size_t winStart = (pos > 2000) ? (pos - 2000) : 0;
+        const std::string_view rowChunk(html.data() + winStart, pos - winStart);
+
+        std::string ver = TrimCopy(std::string_view(html.data() + tdClose + 1, endTd - tdClose - 1));
+        if (!IsValidCatalogVersion(ver)) {
+            ver = ExtractVersionFromCatalogRowChunk(rowChunk);
         }
 
-        if (validVer) {
-            const size_t winStart = (pos > 900) ? (pos - 900) : 0;
-            const std::string_view rowChunk(html.data() + winStart, pos - winStart);
+        if (IsValidCatalogVersion(ver)) {
             const bool hasWin11 = (rowChunk.find("Windows 11") != std::string_view::npos);
             const bool strictlyNewer = bestVer.empty() || IsVersionNewer(ver, bestVer);
             const bool sameVerBetterOs = (!bestVer.empty() && !IsVersionNewer(ver, bestVer) &&
                                           !IsVersionNewer(bestVer, ver) && !bestHasWin11 && hasWin11);
             if (strictlyNewer || sameVerBetterOs) {
-                bestVer = ver;
+                bestVer = std::move(ver);
                 bestGuid.assign(guidCandidate);
                 bestHasWin11 = hasWin11;
             }
@@ -2312,15 +2414,18 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         if (launchErr == ERROR_CANCELLED) {
             cancelInstallRequested_.store(true);
         }
-    } else if (exitCode == 0 || exitCode == 3010) {
+    } else if (exitCode == 0 || exitCode == 3010 || exitCode == 1641 ||
+               (exitCode == 2 && item.id == "chip_amd")) {
         succeeded = true;
-        if (outRebootRequired != nullptr && exitCode == 3010) {
+        const bool needReboot =
+            (exitCode == 3010 || exitCode == 1641 || (exitCode == 2 && item.id == "chip_amd"));
+        if (outRebootRequired != nullptr && needReboot) {
             *outRebootRequired = true;
         }
         if (log) {
             log(LogLevel::Success,
                 item.name + " успешно установлен" +
-                    (exitCode == 3010 ? " (требуется перезагрузка)." : "."));
+                    (needReboot ? " (требуется перезагрузка для применения изменений)." : "."));
         }
     } else {
         if (log) {
@@ -2400,9 +2505,13 @@ void SystemComponentsScanner::DownloadAndInstallAsync(
     progress_.store(0.0f);
 
     installThread_ = std::thread([this, item, devs = std::move(devicesSnapshot), log = std::move(onLog)]() {
-        const bool ok = InstallSingleComponentSync(item, 0.0f, 1.0f, devs, log);
+        bool rebootReq = false;
+        const bool ok = InstallSingleComponentSync(item, 0.0f, 1.0f, devs, log, &rebootReq);
         progress_.store(1.0f);
-        SetPhaseMessage(ok ? "Установка завершена" : (cancelInstallRequested_.load() ? "Установка отменена" : "Установка завершена с предупреждением"));
+        SetPhaseMessage(
+            ok ? (rebootReq ? "Установка завершена (требуется перезагрузка)" : "Установка завершена")
+               : (cancelInstallRequested_.load() ? "Установка отменена"
+                                                : "Установка завершена с предупреждением"));
         installing_.store(false);
     });
 }
@@ -2561,9 +2670,17 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
                     primaryKey + ")...");
         }
 
-        auto [catVer, cabUrl] = ResolveMsCatalogDriverCab(primaryKey);
+        std::string catVer;
+        std::string cabUrl;
+        const std::string subsysKey = ExtractVenDevSubsysKey(fullHardwareId);
+        if (!subsysKey.empty()) {
+            std::tie(catVer, cabUrl) = ResolveMsCatalogDriverCab(subsysKey);
+        }
+        if (cabUrl.empty() && !cancelInstallRequested_.load()) {
+            std::tie(catVer, cabUrl) = ResolveMsCatalogDriverCab(primaryKey);
+        }
         if (cabUrl.empty() && !fullHardwareId.empty() && fullHardwareId != primaryKey &&
-            !cancelInstallRequested_.load()) {
+            fullHardwareId != subsysKey && !cancelInstallRequested_.load()) {
             std::tie(catVer, cabUrl) = ResolveMsCatalogDriverCab(fullHardwareId);
         }
 
@@ -2576,12 +2693,28 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
         }
 
         if (cabUrl.empty()) {
-            if (log) {
-                log(LogLevel::Warning,
-                    "В Microsoft Update Catalog не найден .cab-пакет драйвера для «" +
-                        deviceName + "» (" + primaryKey + ").");
+            const bool isStandardStorageOrChipset =
+                ContainsCaseInsensitive(deviceName, "AHCI") ||
+                ContainsCaseInsensitive(deviceName, "NVM Express") ||
+                ContainsCaseInsensitive(primaryKey, "VEN_1022") ||
+                ContainsCaseInsensitive(primaryKey, "VEN_8086");
+            if (isStandardStorageOrChipset) {
+                if (log) {
+                    log(LogLevel::Info,
+                        "Для «" + deviceName + "» (" + primaryKey +
+                            ") отдельный .cab-пакет в Microsoft Update Catalog не выпускается — устройство использует стандартный драйвер Windows / пакета чипсета" +
+                            (installedVersion.empty() ? std::string(".")
+                                                      : (" (текущая версия " + installedVersion + ").")));
+                }
+                SetPhaseMessage("Используется стандартный драйвер Windows / чипсета");
+            } else {
+                if (log) {
+                    log(LogLevel::Warning,
+                        "В Microsoft Update Catalog не найден .cab-пакет драйвера для «" +
+                            deviceName + "» (" + primaryKey + ").");
+                }
+                SetPhaseMessage("Драйвер в Microsoft Update Catalog не найден");
             }
-            SetPhaseMessage("Драйвер в Microsoft Update Catalog не найден");
             progress_.store(1.0f);
             installing_.store(false);
             if (cb) cb(false, false);
