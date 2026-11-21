@@ -2,6 +2,9 @@
 setlocal
 cd /d "%~dp0"
 
+set "CAP_LANG=%~1"
+if "%CAP_LANG%"=="" set "CAP_LANG=en"
+
 if not exist "build\DriverLoom.exe" (
     echo [ERROR] build\DriverLoom.exe not found. Build the project first:
     echo   cmake --build build -j 8
@@ -13,8 +16,8 @@ if not exist "docs\screenshots" (
     mkdir "docs\screenshots"
 )
 
-echo [1/2] Capturing DriverLoom screenshots across all tabs...
-"build\DriverLoom.exe" --lang ru --capture-suite "docs\screenshots"
+echo [1/2] Capturing DriverLoom screenshots across all tabs (--lang %CAP_LANG%)...
+"build\DriverLoom.exe" --lang %CAP_LANG% --capture-suite "docs\screenshots"
 if errorlevel 1 (
     echo [ERROR] DriverLoom screenshot capture failed.
     pause
