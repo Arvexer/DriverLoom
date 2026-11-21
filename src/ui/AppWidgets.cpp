@@ -11,6 +11,7 @@
 std::atomic<bool> g_windowRegainedFocus{false};
 bool g_isLightTheme = false;
 bool g_isAdvancedMode = false;
+bool g_autoCheckAppUpdates = true;
 float g_dpiScale = 1.0f;
 
 ImFont* g_fontRegular = nullptr;
@@ -284,6 +285,9 @@ void LoadUserPreferences() noexcept {
     if (readDword(L"LightTheme", dw)) {
         g_isLightTheme = (dw != 0);
     }
+    if (readDword(L"AutoCheckUpdates", dw)) {
+        g_autoCheckAppUpdates = (dw != 0);
+    }
     if (readDword(L"Language", dw)) {
         if (dw == static_cast<DWORD>(hdm::Lang::Ru)) {
             hdm::SetLang(hdm::Lang::Ru);
@@ -322,6 +326,7 @@ void SaveUserPreferences() noexcept {
 
     writeDword(L"AdvancedMode", g_isAdvancedMode ? 1u : 0u);
     writeDword(L"LightTheme", g_isLightTheme ? 1u : 0u);
+    writeDword(L"AutoCheckUpdates", g_autoCheckAppUpdates ? 1u : 0u);
     writeDword(L"Language", static_cast<DWORD>(hdm::GetLang()));
 }
 

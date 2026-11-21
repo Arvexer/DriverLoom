@@ -14,6 +14,7 @@
 #include <cstddef>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -21,6 +22,7 @@
 class DriverLoomApp {
 public:
     explicit DriverLoomApp(HWND mainHwnd, int initialTab = -1);
+    ~DriverLoomApp();
 
     void RenderFrame();
 
@@ -75,6 +77,16 @@ private:
 
     void RenderHeaderBar();
     void RenderRebootBanner();
+    void StartAppUpdateCheckAsync(bool manual);
+    void RenderAboutModal();
+
+    enum class AppUpdateState {
+        Idle,
+        Checking,
+        UpToDate,
+        UpdateAvailable,
+        Error
+    };
 
     void RebuildDeviceViewCache(ImGuiTableSortSpecs* sortSpecs);
     static void SameLineWrapIfNeeded(float nextItemWidth);
@@ -177,4 +189,14 @@ private:
 
     // Log UI state
     bool logAutoScroll_{true};
+
+    // About dialog & GitHub Releases update checker
+    bool openAboutPopupNextFrame_{false};
+    bool aboutModalOpen_{false};
+    std::atomic<bool> checkingAppUpdate_{false};
+    mutable std::mutex appUpdateMutex_;
+    AppUpdateState appUpdateState_{AppUpdateState::Idle};
+    std::string appLatestVersion_{"1.0.0"};
+    std::string appReleaseUrl_{"https://github.com/Arvexer/DriverLoom/releases"};
+    std::thread appUpdateThread_;
 };

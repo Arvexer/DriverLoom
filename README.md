@@ -209,3 +209,13 @@ cmake --build build -j 8
 ```
 
 </details>
+
+---
+
+## Автор и обратная связь
+
+- **Разработчик:** [Arvexer](https://github.com/Arvexer)
+- **Репозиторий:** [github.com/Arvexer/DriverLoom](https://github.com/Arvexer/DriverLoom)
+- **E-mail:** [arvexer.dev@proton.me](mailto:arvexer.dev@proton.me?subject=DriverLoom%20Feedback)
+
+Распространяется по лицензии **MIT**.

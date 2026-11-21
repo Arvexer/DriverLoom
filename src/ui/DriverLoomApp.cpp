@@ -1,6 +1,7 @@
 #include "ui/DriverLoomApp.hpp"
 
 #include <shellapi.h>
+#include <winhttp.h>
 
 #include <algorithm>
 #include <cmath>
@@ -23,6 +24,15 @@ DriverLoomApp::DriverLoomApp(HWND mainHwnd, int initialTab)
                  : hdm::Tr("Обычный (UAC по запросу)", "Звичайний (UAC за запитом)", "Standard (UAC on demand)")));
     LoadBaselineSnapshot();
     scanner_.StartScanAsync(MakeLogger());
+    if (g_autoCheckAppUpdates) {
+        StartAppUpdateCheckAsync(false);
+    }
+}
+
+DriverLoomApp::~DriverLoomApp() {
+    if (appUpdateThread_.joinable()) {
+        appUpdateThread_.join();
+    }
 }
 
 void DriverLoomApp::RenderFrame() {
@@ -185,6 +195,8 @@ void DriverLoomApp::RenderFrame() {
     ImGui::EndChild();
 
     RenderLogPanel();
+
+    RenderAboutModal();
 
     ImGui::End();
 }
@@ -519,8 +531,38 @@ void DriverLoomApp::RenderHeaderBar() {
     }
     RenderVerticalDivider(6.0f);
     ImGui::SameLine(0.0f, 2.0f * uiScale);
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("v1.0.0");
+    {
+        AppUpdateState updState = AppUpdateState::Idle;
+        std::string latestVer;
+        {
+            std::lock_guard<std::mutex> lock(appUpdateMutex_);
+            updState = appUpdateState_;
+            latestVer = appLatestVersion_;
+        }
+        const bool hasUpdate =
+            (updState == AppUpdateState::UpdateAvailable && !latestVer.empty());
+        char verBtnLbl[96];
+        if (hasUpdate) {
+            std::snprintf(
+                verBtnLbl, sizeof(verBtnLbl), "v1.0.0 -> v%s###AboutVerBtn", latestVer.c_str());
+        } else {
+            std::snprintf(verBtnLbl, sizeof(verBtnLbl), "v1.0.0  ?###AboutVerBtn");
+        }
+        const bool clickedVer =
+            hasUpdate ? RenderPillButton(verBtnLbl, true) : RenderSecondaryButton(verBtnLbl);
+        if (clickedVer) {
+            openAboutPopupNextFrame_ = true;
+            aboutModalOpen_ = true;
+        }
+        if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip(
+                "%s",
+                hdm::Tr(
+                    "О приложении DriverLoom (F1) • Автор: Arvexer • Проверка обновлений",
+                    "Про програму DriverLoom (F1) • Автор: Arvexer • Перевірка оновлень",
+                    "About DriverLoom (F1) • Author: Arvexer • Check for updates"));
+        }
+    }
 
     ImGui::SameLine(0.0f, 12.0f * uiScale);
     if (isElevated_) {
@@ -780,6 +822,386 @@ void DriverLoomApp::RenderRebootBanner() {
     ImGui::PopStyleVar();
 }
 
+void DriverLoomApp::StartAppUpdateCheckAsync(bool manual) {
+    if (checkingAppUpdate_.exchange(true)) {
+        return;
+    }
+    if (appUpdateThread_.joinable()) {
+        appUpdateThread_.join();
+    }
+    {
+        std::lock_guard<std::mutex> lock(appUpdateMutex_);
+        appUpdateState_ = AppUpdateState::Checking;
+    }
+
+    appUpdateThread_ = std::thread([this, manual]() {
+        struct WinHttpHandleGuard {
+            HINTERNET h{nullptr};
+            ~WinHttpHandleGuard() {
+                if (h != nullptr) {
+                    WinHttpCloseHandle(h);
+                }
+            }
+        };
+
+        constexpr const char* kCurrentVersion = "1.0.0";
+        AppUpdateState resultState = AppUpdateState::Error;
+        std::string foundVer = kCurrentVersion;
+        std::string foundUrl = "https://github.com/Arvexer/DriverLoom/releases";
+
+        WinHttpHandleGuard session{WinHttpOpen(
+            L"DriverLoom/1.0",
+            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+            WINHTTP_NO_PROXY_NAME,
+            WINHTTP_NO_PROXY_BYPASS,
+            0)};
+        if (session.h != nullptr) {
+            WinHttpSetTimeouts(session.h, 3000, 3000, 3500, 5000);
+            WinHttpHandleGuard connect{
+                WinHttpConnect(session.h, L"github.com", INTERNET_DEFAULT_HTTPS_PORT, 0)};
+            if (connect.h != nullptr) {
+                WinHttpHandleGuard request{WinHttpOpenRequest(
+                    connect.h,
+                    L"HEAD",
+                    L"/Arvexer/DriverLoom/releases/latest",
+                    nullptr,
+                    WINHTTP_NO_REFERER,
+                    WINHTTP_DEFAULT_ACCEPT_TYPES,
+                    WINHTTP_FLAG_SECURE)};
+                if (request.h != nullptr) {
+                    DWORD redirPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+                    WinHttpSetOption(
+                        request.h, WINHTTP_OPTION_REDIRECT_POLICY, &redirPolicy, sizeof(redirPolicy));
+                    if (WinHttpSendRequest(
+                            request.h,
+                            WINHTTP_NO_ADDITIONAL_HEADERS,
+                            0,
+                            WINHTTP_NO_REQUEST_DATA,
+                            0,
+                            0,
+                            0) &&
+                        WinHttpReceiveResponse(request.h, nullptr)) {
+                        DWORD statusCode = 0;
+                        DWORD statusBytes = sizeof(statusCode);
+                        WinHttpQueryHeaders(
+                            request.h,
+                            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                            WINHTTP_HEADER_NAME_BY_INDEX,
+                            &statusCode,
+                            &statusBytes,
+                            WINHTTP_NO_HEADER_INDEX);
+
+                        std::string locationUrl;
+                        if (statusCode >= 300 && statusCode < 400) {
+                            wchar_t locBuf[1024]{};
+                            DWORD locBytes = sizeof(locBuf) - sizeof(wchar_t);
+                            if (WinHttpQueryHeaders(
+                                    request.h,
+                                    WINHTTP_QUERY_LOCATION,
+                                    WINHTTP_HEADER_NAME_BY_INDEX,
+                                    locBuf,
+                                    &locBytes,
+                                    WINHTTP_NO_HEADER_INDEX)) {
+                                locationUrl = hdm::WideToUtf8(locBuf);
+                            }
+                        }
+
+                        std::string tagVer;
+                        const size_t tagPos = locationUrl.find("/releases/tag/");
+                        if (tagPos != std::string::npos) {
+                            tagVer = locationUrl.substr(tagPos + 14);
+                            const size_t endPos = tagVer.find_first_of("/?#\r\n ");
+                            if (endPos != std::string::npos) {
+                                tagVer.resize(endPos);
+                            }
+                            if (!tagVer.empty() && (tagVer[0] == 'v' || tagVer[0] == 'V')) {
+                                tagVer.erase(0, 1);
+                            }
+                        }
+
+                        if (!tagVer.empty() &&
+                            CompareVersionOrString(tagVer, kCurrentVersion) > 0) {
+                            resultState = AppUpdateState::UpdateAvailable;
+                            foundVer = tagVer;
+                            if (!locationUrl.empty()) {
+                                if (locationUrl.rfind("http", 0) == 0) {
+                                    foundUrl = locationUrl;
+                                } else if (locationUrl.front() == '/') {
+                                    foundUrl = "https://github.com" + locationUrl;
+                                } else {
+                                    foundUrl = "https://github.com/" + locationUrl;
+                                }
+                            }
+                        } else if (statusCode == 404 || statusCode == 200 ||
+                                   (statusCode >= 300 && statusCode < 400)) {
+                            resultState = AppUpdateState::UpToDate;
+                        }
+                    }
+                }
+            }
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(appUpdateMutex_);
+            appUpdateState_ = resultState;
+            appLatestVersion_ = foundVer;
+            appReleaseUrl_ = foundUrl;
+        }
+        checkingAppUpdate_.store(false);
+
+        if (resultState == AppUpdateState::UpdateAvailable) {
+            logBuffer_.Push(
+                hdm::LogLevel::Success,
+                std::string(hdm::Tr(
+                    "Доступна новая версия DriverLoom v",
+                    "Доступна нова версія DriverLoom v",
+                    "New DriverLoom version available: v")) +
+                    foundVer +
+                    hdm::Tr(" на GitHub Releases!", " на GitHub Releases!", " on GitHub Releases!"));
+        } else if (manual && resultState == AppUpdateState::UpToDate) {
+            logBuffer_.Push(
+                hdm::LogLevel::Info,
+                hdm::Tr(
+                    "Установлена актуальная версия DriverLoom (v1.0.0).",
+                    "Встановлено актуальну версію DriverLoom (v1.0.0).",
+                    "DriverLoom is up to date (v1.0.0)."));
+        } else if (manual && resultState == AppUpdateState::Error) {
+            logBuffer_.Push(
+                hdm::LogLevel::Warning,
+                hdm::Tr(
+                    "Не удалось проверить обновления DriverLoom на GitHub.",
+                    "Не вдалося перевірити оновлення DriverLoom на GitHub.",
+                    "Failed to check DriverLoom updates on GitHub."));
+        }
+    });
+}
+
+void DriverLoomApp::RenderAboutModal() {
+    const char* modalTitle = hdm::Tr(
+        "О приложении DriverLoom###AboutModal",
+        "Про програму DriverLoom###AboutModal",
+        "About DriverLoom###AboutModal");
+
+    if (openAboutPopupNextFrame_) {
+        aboutModalOpen_ = true;
+        ImGui::OpenPopup(modalTitle);
+        openAboutPopupNextFrame_ = false;
+    }
+
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSize(
+        ImVec2(std::min(620.0f * uiScale, vp->WorkSize.x * 0.92f), 0.0f),
+        ImGuiCond_Appearing);
+
+    if (!ImGui::BeginPopupModal(
+            modalTitle,
+            &aboutModalOpen_,
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
+        return;
+    }
+
+    const ImGuiStyle& style = ImGui::GetStyle();
+    {
+        PushFontSafe(g_fontPrimaryHeader);
+        ImGui::TextColored(AccentTextColor(), "DriverLoom v1.0.0 (x64)");
+        PopFontSafe(g_fontPrimaryHeader);
+    }
+    ImGui::TextWrapped(
+        "%s",
+        hdm::Tr(
+            "Нативный гибридный менеджер драйверов, устройств, системных компонентов и диагностики для Windows 10/11.",
+            "Нативний гібридний менеджер драйверів, пристроїв, системних компонентів і діагностики для Windows 10/11.",
+            "Native hybrid driver, device, runtime component, and diagnostics manager for Windows 10/11."));
+
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
+    ImGui::BeginChild(
+        "##AboutAuthorCard",
+        ImVec2(0.0f, 0.0f),
+        ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY,
+        ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleColor();
+    {
+        RenderSecondaryCardHeader(hdm::Tr(
+            "Автор и контакты",
+            "Автор і контакти",
+            "Author & Contact"));
+        ImGui::TextDisabled("%s", hdm::Tr("Автор:", "Автор:", "Author:"));
+        ImGui::SameLine();
+        ImGui::TextColored(AccentTextColor(), "Arvexer");
+
+        ImGui::TextDisabled("GitHub:");
+        ImGui::SameLine();
+        ImGui::TextUnformatted("https://github.com/Arvexer/DriverLoom");
+        if (RenderActionButton(
+                hdm::Tr("Открыть GitHub###AboutGh", "Відкрити GitHub###AboutGh", "Open GitHub###AboutGh"),
+                ImVec2(0.0f, 0.0f),
+                true)) {
+            OpenUrlInBrowser("https://github.com/Arvexer/DriverLoom");
+        }
+        ImGui::SameLine();
+        if (RenderSecondaryButton(hdm::Tr(
+                "Релизы###AboutRel",
+                "Релізи###AboutRel",
+                "Releases###AboutRel"))) {
+            OpenUrlInBrowser("https://github.com/Arvexer/DriverLoom/releases");
+        }
+        ImGui::SameLine();
+        if (RenderSecondaryButton(hdm::Tr(
+                "Сообщить о проблеме###AboutIss",
+                "Повідомити про проблему###AboutIss",
+                "Report Issue###AboutIss"))) {
+            OpenUrlInBrowser("https://github.com/Arvexer/DriverLoom/issues");
+        }
+
+        ImGui::Spacing();
+        ImGui::TextDisabled("E-mail:");
+        ImGui::SameLine();
+        ImGui::TextUnformatted("arvexer.dev@proton.me");
+        if (RenderSecondaryButton(hdm::Tr(
+                "Написать письмо###AboutMail",
+                "Написати листа###AboutMail",
+                "Send E-mail###AboutMail"))) {
+            OpenUrlInBrowser("mailto:arvexer.dev@proton.me?subject=DriverLoom%20Feedback");
+        }
+        ImGui::SameLine();
+        if (RenderSecondaryButton(hdm::Tr(
+                "Копировать e-mail###AboutCopyMail",
+                "Копіювати e-mail###AboutCopyMail",
+                "Copy E-mail###AboutCopyMail"))) {
+            ImGui::SetClipboardText("arvexer.dev@proton.me");
+            logBuffer_.Push(
+                hdm::LogLevel::Info,
+                hdm::Tr(
+                    "Скопирован e-mail разработчика: arvexer.dev@proton.me",
+                    "Скопійовано e-mail розробника: arvexer.dev@proton.me",
+                    "Developer e-mail copied: arvexer.dev@proton.me"));
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
+    ImGui::BeginChild(
+        "##AboutUpdatesCard",
+        ImVec2(0.0f, 0.0f),
+        ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY,
+        ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleColor();
+    {
+        RenderSecondaryCardHeader(hdm::Tr(
+            "Обновления приложения",
+            "Оновлення програми",
+            "Application Updates"));
+
+        AppUpdateState updState = AppUpdateState::Idle;
+        std::string latestVer;
+        std::string releaseUrl;
+        {
+            std::lock_guard<std::mutex> lock(appUpdateMutex_);
+            updState = appUpdateState_;
+            latestVer = appLatestVersion_;
+            releaseUrl = appReleaseUrl_;
+        }
+
+        if (updState == AppUpdateState::Checking) {
+            RenderStatusBadge(
+                ImVec4(0.38f, 0.68f, 0.98f, 1.00f),
+                hdm::Tr(
+                    "Проверка обновлений на GitHub...",
+                    "Перевірка оновлень на GitHub...",
+                    "Checking for updates on GitHub..."),
+                true);
+        } else if (updState == AppUpdateState::UpdateAvailable) {
+            const std::string updMsg =
+                std::string(hdm::Tr(
+                    "Доступна новая версия: v",
+                    "Доступна нова версія: v",
+                    "New version available: v")) +
+                latestVer;
+            RenderStatusBadge(ImVec4(0.20f, 0.83f, 0.60f, 1.00f), updMsg.c_str(), true);
+        } else if (updState == AppUpdateState::UpToDate) {
+            RenderStatusBadge(
+                ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
+                hdm::Tr(
+                    "Установлена актуальная версия (v1.0.0)",
+                    "Встановлено актуальну версію (v1.0.0)",
+                    "You have the latest version (v1.0.0)"),
+                true);
+        } else if (updState == AppUpdateState::Error) {
+            RenderStatusBadge(
+                ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
+                hdm::Tr(
+                    "Не удалось проверить обновления",
+                    "Не вдалося перевірити оновлення",
+                    "Failed to check for updates"),
+                true);
+        } else {
+            RenderStatusBadge(
+                ImVec4(0.58f, 0.68f, 0.86f, 1.00f),
+                hdm::Tr(
+                    "Автопроверка отключена (текущая: v1.0.0)",
+                    "Автоперевірку вимкнено (поточна: v1.0.0)",
+                    "Auto-check disabled (current: v1.0.0)"),
+                true);
+        }
+
+        const bool busyCheck = checkingAppUpdate_.load();
+        ImGui::BeginDisabled(busyCheck);
+        if (RenderSecondaryButton(hdm::Tr(
+                "Проверить обновления###AboutChkUpd",
+                "Перевірити оновлення###AboutChkUpd",
+                "Check for Updates###AboutChkUpd"))) {
+            StartAppUpdateCheckAsync(true);
+        }
+        ImGui::EndDisabled();
+
+        if (updState == AppUpdateState::UpdateAvailable) {
+            ImGui::SameLine();
+            if (RenderActionButton(
+                    hdm::Tr(
+                        "Скачать новую версию###AboutDlUpd",
+                        "Завантажити нову версію###AboutDlUpd",
+                        "Download Update###AboutDlUpd"),
+                    ImVec2(0.0f, 0.0f),
+                    true)) {
+                OpenUrlInBrowser(releaseUrl);
+            }
+        }
+
+        if (ImGui::Checkbox(
+                hdm::Tr(
+                    "Автоматически проверять обновления при запуске###AboutAutoUpd",
+                    "Автоматично перевіряти оновлення при запуску###AboutAutoUpd",
+                    "Automatically check for updates on startup###AboutAutoUpd"),
+                &g_autoCheckAppUpdates)) {
+            SaveUserPreferences();
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::Spacing();
+    ImGui::TextDisabled("C++20 • Win32 SetupAPI / WUA COM • DirectX 11 • Dear ImGui • Static CRT");
+    ImGui::TextDisabled("MIT License • Copyright (C) 2026 Arvexer");
+    ImGui::Separator();
+
+    const char* closeLbl = hdm::Tr("Закрыть###AboutCloseBtn", "Закрити###AboutCloseBtn", "Close###AboutCloseBtn");
+    const float closeW = CalcButtonWidth(hdm::Tr("Закрыть", "Закрити", "Close")) + 12.0f * uiScale;
+    const float closeX = ImGui::GetWindowContentRegionMax().x - closeW;
+    if (closeX > style.WindowPadding.x) {
+        ImGui::SetCursorPosX(closeX);
+    }
+    if (RenderActionButton(closeLbl, ImVec2(closeW, 0.0f), true) ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+        ImGui::CloseCurrentPopup();
+        aboutModalOpen_ = false;
+    }
+
+    ImGui::EndPopup();
+}
+
 void DriverLoomApp::SameLineWrapIfNeeded(float nextItemWidth) {
     const ImGuiStyle& style = ImGui::GetStyle();
     const float lastX = ImGui::GetItemRectMax().x;
@@ -915,6 +1337,10 @@ void DriverLoomApp::HandleKeyboardShortcuts() {
                 }
             }
         }
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_F1, false)) {
+        openAboutPopupNextFrame_ = true;
     }
 
     if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {

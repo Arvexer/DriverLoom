@@ -11,6 +11,7 @@
 extern std::atomic<bool> g_windowRegainedFocus;
 extern bool g_isLightTheme;
 extern bool g_isAdvancedMode;
+extern bool g_autoCheckAppUpdates;
 extern float g_dpiScale;
 
 extern ImFont* g_fontRegular;
