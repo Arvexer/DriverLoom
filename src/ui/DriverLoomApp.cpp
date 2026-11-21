@@ -531,38 +531,8 @@ void DriverLoomApp::RenderHeaderBar() {
     }
     RenderVerticalDivider(6.0f);
     ImGui::SameLine(0.0f, 2.0f * uiScale);
-    {
-        AppUpdateState updState = AppUpdateState::Idle;
-        std::string latestVer;
-        {
-            std::lock_guard<std::mutex> lock(appUpdateMutex_);
-            updState = appUpdateState_;
-            latestVer = appLatestVersion_;
-        }
-        const bool hasUpdate =
-            (updState == AppUpdateState::UpdateAvailable && !latestVer.empty());
-        char verBtnLbl[96];
-        if (hasUpdate) {
-            std::snprintf(
-                verBtnLbl, sizeof(verBtnLbl), "v1.0.0 -> v%s###AboutVerBtn", latestVer.c_str());
-        } else {
-            std::snprintf(verBtnLbl, sizeof(verBtnLbl), "v1.0.0  ?###AboutVerBtn");
-        }
-        const bool clickedVer =
-            hasUpdate ? RenderPillButton(verBtnLbl, true) : RenderSecondaryButton(verBtnLbl);
-        if (clickedVer) {
-            openAboutPopupNextFrame_ = true;
-            aboutModalOpen_ = true;
-        }
-        if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-            ImGui::SetTooltip(
-                "%s",
-                hdm::Tr(
-                    "О приложении DriverLoom (F1) • Автор: Arvexer • Проверка обновлений",
-                    "Про програму DriverLoom (F1) • Автор: Arvexer • Перевірка оновлень",
-                    "About DriverLoom (F1) • Author: Arvexer • Check for updates"));
-        }
-    }
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("v1.0.0");
 
     ImGui::SameLine(0.0f, 12.0f * uiScale);
     if (isElevated_) {
@@ -636,6 +606,33 @@ void DriverLoomApp::RenderHeaderBar() {
     const float langComboW =
         maxLangLabelW + style.FramePadding.x * 2.0f + baseFrameH + 6.0f * uiScale;
 
+    AppUpdateState updState = AppUpdateState::Idle;
+    std::string latestVer;
+    {
+        std::lock_guard<std::mutex> lock(appUpdateMutex_);
+        updState = appUpdateState_;
+        latestVer = appLatestVersion_;
+    }
+    const bool hasUpdate =
+        (updState == AppUpdateState::UpdateAvailable && !latestVer.empty());
+    char aboutMeasure[96];
+    char aboutLabel[112];
+    if (hasUpdate) {
+        std::snprintf(
+            aboutMeasure,
+            sizeof(aboutMeasure),
+            hdm::Tr("Обновление v%s", "Оновлення v%s", "Update v%s"),
+            latestVer.c_str());
+    } else {
+        std::snprintf(
+            aboutMeasure,
+            sizeof(aboutMeasure),
+            "%s",
+            hdm::Tr("О приложении", "Про програму", "About"));
+    }
+    std::snprintf(aboutLabel, sizeof(aboutLabel), "%s###AboutVerBtn", aboutMeasure);
+    const float aboutBtnW = CalcButtonWidth(aboutMeasure) + 6.0f * uiScale;
+
     const float fullModeBtnW = std::max(
         CalcButtonWidth(hdm::Tr("Режим: Обычный", "Режим: Звичайний", "Mode: Standard")),
         CalcButtonWidth(hdm::Tr("Режим: Расширенный", "Режим: Розширений", "Mode: Advanced")));
@@ -653,9 +650,9 @@ void DriverLoomApp::RenderHeaderBar() {
     const float winContentMaxX = ImGui::GetWindowContentRegionMax().x;
     const float availRightW = winContentMaxX - prevItemEndX - 12.0f * uiScale;
     const float allFullW =
-        fullModeBtnW + hdrGap + fullThemeBtnW + hdrGap + langComboW + hdrGap + btnWidth;
+        fullModeBtnW + hdrGap + fullThemeBtnW + hdrGap + langComboW + hdrGap + btnWidth + hdrGap + aboutBtnW;
     const float modeFullThemeShortW =
-        fullModeBtnW + hdrGap + shortThemeBtnW + hdrGap + langComboW + hdrGap + btnWidth;
+        fullModeBtnW + hdrGap + shortThemeBtnW + hdrGap + langComboW + hdrGap + btnWidth + hdrGap + aboutBtnW;
     const bool useShortThemeLbl = availRightW < allFullW;
     const bool useShortModeLbl = availRightW < modeFullThemeShortW;
 
@@ -680,7 +677,7 @@ void DriverLoomApp::RenderHeaderBar() {
                    : hdm::Tr("Тема: Тёмная###ThemeBtn", "Тема: Темна###ThemeBtn", "Theme: Dark###ThemeBtn"));
 
     const float rightGroupW =
-        modeBtnW + hdrGap + themeBtnW + hdrGap + langComboW + hdrGap + btnWidth;
+        modeBtnW + hdrGap + themeBtnW + hdrGap + langComboW + hdrGap + btnWidth + hdrGap + aboutBtnW;
     const float rightX = winContentMaxX - rightGroupW;
     if (rightX > prevItemEndX + 12.0f * uiScale) {
         ImGui::SameLine(rightX);
@@ -781,6 +778,26 @@ void DriverLoomApp::RenderHeaderBar() {
             });
     }
     ImGui::EndDisabled();
+
+    ImGui::SameLine(0.0f, hdrGap);
+    const bool clickedAbout = hasUpdate
+                                  ? RenderActionButton(aboutLabel, ImVec2(aboutBtnW, 0.0f), true)
+                                  : RenderSecondaryButton(aboutLabel, ImVec2(aboutBtnW, 0.0f));
+    if (clickedAbout) {
+        openAboutPopupNextFrame_ = true;
+        aboutModalOpen_ = true;
+    }
+    if (isAppForeground && ImGui::IsItemHovered()) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+    if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        ImGui::SetTooltip(
+            "%s",
+            hdm::Tr(
+                "Сведения о DriverLoom, автор (Arvexer), GitHub, обратная связь и проверка обновлений (F1)",
+                "Відомості про DriverLoom, автор (Arvexer), GitHub, зворотний зв'язок і перевірка оновлень (F1)",
+                "About DriverLoom, author (Arvexer), GitHub, contact & update checker (F1)"));
+    }
 
     ImGui::EndChild();
     ImGui::PopStyleVar();
