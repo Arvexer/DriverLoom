@@ -33,11 +33,12 @@ BEGIN
     BEGIN
         BLOCK "040904b0"
         BEGIN
-            VALUE "CompanyName", "DriverLoom Project"
+            VALUE "Comments", "Native Windows 10/11 Driver, Runtime & System Diagnostics Manager (RU/UA/EN)"
+            VALUE "CompanyName", "Arvexer"
             VALUE "FileDescription", "DriverLoom — Гибридный менеджер драйверов и игровых компонентов Windows"
             VALUE "FileVersion", "1.0.0.0"
             VALUE "InternalName", "DriverLoom"
-            VALUE "LegalCopyright", "Copyright (C) 2026 DriverLoom Contributors"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Arvexer"
             VALUE "OriginalFilename", "DriverLoom.exe"
             VALUE "ProductName", "DriverLoom"
             VALUE "ProductVersion", "1.0.0.0"
