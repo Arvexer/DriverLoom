@@ -502,109 +502,9 @@ void DriverLoomApp::RenderHeaderBar() {
     const bool isAppForeground = (GetForegroundWindow() == hwnd_);
     const float padY = std::round(9.0f * uiScale);
     const float baseFrameH = ImGui::GetFrameHeight();
-    const float headerHeight = baseFrameH + padY * 2.0f;
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.WindowPadding.x, padY));
-    ImGui::PushStyleColor(
-        ImGuiCol_Border,
-        g_isLightTheme ? ImVec4(0.70f, 0.77f, 0.87f, 0.95f) : ImVec4(0.24f, 0.36f, 0.54f, 0.95f));
-    ImGui::BeginChild(
-        "##HeaderBar",
-        ImVec2(0.0f, headerHeight),
-        true,
-        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    ImGui::PopStyleColor();
-
-    {
-        PushFontSafe(g_fontPrimaryHeader);
-        const ImVec2 titleSize = ImGui::CalcTextSize("DriverLoom");
-        const ImVec2 startScreen = ImGui::GetCursorScreenPos();
-        const float yOff = std::max(0.0f, (baseFrameH - titleSize.y) * 0.5f);
-        const ImVec4 titleCol = g_isLightTheme
-                                    ? ImVec4(0.08f, 0.34f, 0.74f, 1.00f)
-                                    : ImVec4(0.50f, 0.78f, 1.00f, 1.00f);
-        ImGui::GetWindowDrawList()->AddText(
-            ImVec2(startScreen.x, startScreen.y + yOff),
-            ImGui::ColorConvertFloat4ToU32(titleCol),
-            "DriverLoom");
-        ImGui::Dummy(ImVec2(titleSize.x, baseFrameH));
-        PopFontSafe(g_fontPrimaryHeader);
-    }
-    RenderVerticalDivider(6.0f);
-    ImGui::SameLine(0.0f, 2.0f * uiScale);
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("v1.0.0");
-
-    ImGui::SameLine(0.0f, 12.0f * uiScale);
-    if (isElevated_) {
-        RenderStatusBadge(
-            ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
-            hdm::Tr("Администратор", "Адміністратор", "Administrator"),
-            true);
-    } else {
-        RenderStatusBadge(
-            ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
-            hdm::Tr("Без прав админа", "Без прав адміна", "Standard user"),
-            true);
-        ImGui::SameLine(0.0f, 10.0f * uiScale);
-        if (RenderSecondaryButton(hdm::Tr(
-                "Перезапустить как администратор###ElevBtn",
-                "Перезапустити як адміністратор###ElevBtn",
-                "Restart as Administrator###ElevBtn"))) {
-            const hdm::ElevatedRunResult run = hdm::ExecuteElevatedSelf(L"", false);
-            if (run.launched) {
-                exitRequested_ = true;
-            } else if (run.launchError != ERROR_CANCELLED) {
-                logBuffer_.Push(
-                    hdm::LogLevel::Error,
-                    std::string(hdm::Tr(
-                        "Не удалось повысить права: ",
-                        "Не вдалося підвищити права: ",
-                        "Failed to elevate privileges: ")) +
-                        hdm::FormatWin32Error(run.launchError));
-            }
-        }
-    }
-
-    const char* srLabel = systemRestore_.IsBusy()
-                              ? hdm::Tr(
-                                    "Создание точки восстановления...###SrBtn",
-                                    "Створення точки відновлення...###SrBtn",
-                                    "Creating restore point...###SrBtn")
-                              : hdm::Tr(
-                                    "Точка восстановления###SrBtn",
-                                    "Точка відновлення###SrBtn",
-                                    "Restore Point###SrBtn");
-    const char* srMeasure = systemRestore_.IsBusy()
-                                ? hdm::Tr(
-                                      "Создание точки восстановления...",
-                                      "Створення точки відновлення...",
-                                      "Creating restore point...")
-                                : hdm::Tr(
-                                      "Точка восстановления",
-                                      "Точка відновлення",
-                                      "Restore Point");
-    const float btnWidth = CalcButtonWidth(srMeasure) + 6.0f * uiScale;
-
-    struct LangOption {
-        hdm::Lang lang;
-        const char* label;
-    };
-    static constexpr LangOption kLangOptions[] = {
-        {hdm::Lang::Ru, "RU — Русский"},
-        {hdm::Lang::Uk, "UA — Українська"},
-        {hdm::Lang::En, "EN — English"},
-    };
-    const hdm::Lang curLang = hdm::GetLang();
-    const char* curLangLabel = kLangOptions[0].label;
-    float maxLangLabelW = 0.0f;
-    for (const auto& opt : kLangOptions) {
-        maxLangLabelW = std::max(maxLangLabelW, ImGui::CalcTextSize(opt.label).x);
-        if (opt.lang == curLang) {
-            curLangLabel = opt.label;
-        }
-    }
-    const float langComboW =
-        maxLangLabelW + style.FramePadding.x * 2.0f + baseFrameH + 6.0f * uiScale;
+    const float hdrGap = std::round(8.0f * uiScale);
+    const float minSectionGap = 12.0f * uiScale;
+    const float innerAvailW = std::max(280.0f, ImGui::GetContentRegionAvail().x - style.WindowPadding.x * 2.0f);
 
     AppUpdateState updState = AppUpdateState::Idle;
     std::string latestVer;
@@ -633,6 +533,61 @@ void DriverLoomApp::RenderHeaderBar() {
     std::snprintf(aboutLabel, sizeof(aboutLabel), "%s###AboutVerBtn", aboutMeasure);
     const float aboutBtnW = CalcButtonWidth(aboutMeasure) + 6.0f * uiScale;
 
+    const char* srLabel = systemRestore_.IsBusy()
+                              ? hdm::Tr(
+                                    "Создание точки восстановления...###SrBtn",
+                                    "Створення точки відновлення...###SrBtn",
+                                    "Creating restore point...###SrBtn")
+                              : hdm::Tr(
+                                    "Точка восстановления###SrBtn",
+                                    "Точка відновлення###SrBtn",
+                                    "Restore Point###SrBtn");
+    const char* srMeasure = systemRestore_.IsBusy()
+                                ? hdm::Tr(
+                                      "Создание точки восстановления...",
+                                      "Створення точки відновлення...",
+                                      "Creating restore point...")
+                                : hdm::Tr(
+                                      "Точка восстановления",
+                                      "Точка відновлення",
+                                      "Restore Point");
+    const char* srShortLabel = systemRestore_.IsBusy()
+                                   ? hdm::Tr("Точка...###SrBtn", "Точка...###SrBtn", "Restore...###SrBtn")
+                                   : hdm::Tr("Точка восст.###SrBtn", "Точка відн.###SrBtn", "Restore###SrBtn");
+    const char* srShortMeasure = systemRestore_.IsBusy()
+                                     ? hdm::Tr("Точка...", "Точка...", "Restore...")
+                                     : hdm::Tr("Точка восст.", "Точка відн.", "Restore");
+    const float restoreFullW = CalcButtonWidth(srMeasure) + 6.0f * uiScale;
+    const float restoreShortW = CalcButtonWidth(srShortMeasure) + 4.0f * uiScale;
+
+    struct LangOption {
+        hdm::Lang lang;
+        const char* label;
+        const char* shortLabel;
+    };
+    static constexpr LangOption kLangOptions[] = {
+        {hdm::Lang::Ru, "RU — Русский", "RU"},
+        {hdm::Lang::Uk, "UA — Українська", "UA"},
+        {hdm::Lang::En, "EN — English", "EN"},
+    };
+    const hdm::Lang curLang = hdm::GetLang();
+    const char* curLangLabel = kLangOptions[0].label;
+    const char* curLangShortLabel = kLangOptions[0].shortLabel;
+    float maxLangLabelW = 0.0f;
+    float maxLangShortW = 0.0f;
+    for (const auto& opt : kLangOptions) {
+        maxLangLabelW = std::max(maxLangLabelW, ImGui::CalcTextSize(opt.label).x);
+        maxLangShortW = std::max(maxLangShortW, ImGui::CalcTextSize(opt.shortLabel).x);
+        if (opt.lang == curLang) {
+            curLangLabel = opt.label;
+            curLangShortLabel = opt.shortLabel;
+        }
+    }
+    const float fullLangComboW =
+        maxLangLabelW + style.FramePadding.x * 2.0f + baseFrameH + 6.0f * uiScale;
+    const float shortLangComboW =
+        maxLangShortW + style.FramePadding.x * 2.0f + baseFrameH + 4.0f * uiScale;
+
     const float fullModeBtnW = std::max(
         CalcButtonWidth(hdm::Tr("Режим: Обычный", "Режим: Звичайний", "Mode: Standard")),
         CalcButtonWidth(hdm::Tr("Режим: Расширенный", "Режим: Розширений", "Mode: Advanced")));
@@ -645,20 +600,155 @@ void DriverLoomApp::RenderHeaderBar() {
     const float shortThemeBtnW = std::max(
         CalcButtonWidth(hdm::Tr("Светлая", "Світла", "Light")),
         CalcButtonWidth(hdm::Tr("Тёмная", "Темна", "Dark")));
-    const float hdrGap = std::round(8.0f * uiScale);
-    const float prevItemEndX = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
-    const float winContentMaxX = ImGui::GetWindowContentRegionMax().x;
-    const float availRightW = winContentMaxX - prevItemEndX - 12.0f * uiScale;
-    const float allFullW =
-        fullModeBtnW + hdrGap + fullThemeBtnW + hdrGap + langComboW + hdrGap + btnWidth + hdrGap + aboutBtnW;
-    const float modeFullThemeShortW =
-        fullModeBtnW + hdrGap + shortThemeBtnW + hdrGap + langComboW + hdrGap + btnWidth + hdrGap + aboutBtnW;
-    const bool useShortThemeLbl = availRightW < allFullW;
-    const bool useShortModeLbl = availRightW < modeFullThemeShortW;
 
-    const float modeBtnW = useShortModeLbl ? shortModeBtnW : fullModeBtnW;
+    // Measure left group width before creating ##HeaderBar so we know if 2 rows are needed.
+    PushFontSafe(g_fontPrimaryHeader);
+    const ImVec2 titleSize = ImGui::CalcTextSize("DriverLoom");
+    PopFontSafe(g_fontPrimaryHeader);
+    const float divGap = std::round(6.0f * uiScale);
+    const char* privText =
+        isElevated_ ? hdm::Tr("Администратор", "Адміністратор", "Administrator")
+                    : hdm::Tr("Без прав админа", "Без прав адміна", "Standard user");
+    const float textH = ImGui::GetTextLineHeight();
+    const float privBadgeW =
+        std::round(8.0f * uiScale) + std::max(3.2f, textH * 0.21f) * 2.0f +
+        std::round(6.0f * uiScale) + ImGui::CalcTextSize(privText).x + std::round(9.0f * uiScale);
+    const float leftStaticW =
+        titleSize.x + (2.0f + divGap * 2.0f) + (2.0f * uiScale) + ImGui::CalcTextSize("v1.0.0").x +
+        (12.0f * uiScale) + privBadgeW;
+    const float fullElevBtnW =
+        isElevated_ ? 0.0f
+                    : CalcButtonWidth(hdm::Tr(
+                          "Перезапустить как администратор",
+                          "Перезапустити як адміністратор",
+                          "Restart as Administrator"));
+    const float shortElevBtnW =
+        isElevated_ ? 0.0f : CalcButtonWidth(hdm::Tr("Админ-режим", "Права адміна", "Run as Admin"));
+    const float leftFullW = leftStaticW + (isElevated_ ? 0.0f : (10.0f * uiScale + fullElevBtnW));
+    const float leftShortW = leftStaticW + (isElevated_ ? 0.0f : (8.0f * uiScale + shortElevBtnW));
+
+    const float rightFullW =
+        fullModeBtnW + hdrGap + fullThemeBtnW + hdrGap + fullLangComboW + hdrGap + restoreFullW + hdrGap + aboutBtnW;
+    const float rightShortThemeW =
+        fullModeBtnW + hdrGap + shortThemeBtnW + hdrGap + fullLangComboW + hdrGap + restoreFullW + hdrGap + aboutBtnW;
+    const float rightShortModeThemeW =
+        shortModeBtnW + hdrGap + shortThemeBtnW + hdrGap + fullLangComboW + hdrGap + restoreFullW + hdrGap + aboutBtnW;
+    const float rightShortLangW =
+        shortModeBtnW + hdrGap + shortThemeBtnW + hdrGap + shortLangComboW + hdrGap + restoreFullW + hdrGap + aboutBtnW;
+    const float rightMiniW =
+        shortModeBtnW + hdrGap + shortThemeBtnW + hdrGap + shortLangComboW + hdrGap + restoreShortW + hdrGap + aboutBtnW;
+
+    bool twoRows = false;
+    bool useShortElev = false;
+    bool useShortMode = false;
+    bool useShortTheme = false;
+    bool useShortLang = false;
+    bool useShortRestore = false;
+
+    if (leftFullW + minSectionGap + rightFullW <= innerAvailW) {
+        // Fits comfortably on one row with full labels
+    } else if (leftFullW + minSectionGap + rightShortThemeW <= innerAvailW) {
+        useShortTheme = true;
+    } else if (leftFullW + minSectionGap + rightShortModeThemeW <= innerAvailW) {
+        useShortTheme = true;
+        useShortMode = true;
+    } else if (leftShortW + minSectionGap + rightShortLangW <= innerAvailW) {
+        useShortElev = !isElevated_;
+        useShortTheme = true;
+        useShortMode = true;
+        useShortLang = true;
+    } else if (isElevated_ && leftShortW + minSectionGap + rightMiniW <= innerAvailW) {
+        useShortTheme = true;
+        useShortMode = true;
+        useShortLang = true;
+        useShortRestore = true;
+    } else {
+        twoRows = true;
+        useShortElev = (!isElevated_ && leftFullW > innerAvailW);
+        if (rightFullW <= innerAvailW) {
+            // Row 2 fits with full labels
+        } else if (rightShortThemeW <= innerAvailW) {
+            useShortTheme = true;
+        } else if (rightShortModeThemeW <= innerAvailW) {
+            useShortTheme = true;
+            useShortMode = true;
+        } else if (rightShortLangW <= innerAvailW) {
+            useShortTheme = true;
+            useShortMode = true;
+            useShortLang = true;
+        } else {
+            useShortTheme = true;
+            useShortMode = true;
+            useShortLang = true;
+            useShortRestore = true;
+        }
+    }
+
+    const float headerHeight =
+        twoRows ? (baseFrameH * 2.0f + style.ItemSpacing.y + padY * 2.0f)
+                : (baseFrameH + padY * 2.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.WindowPadding.x, padY));
+    ImGui::PushStyleColor(
+        ImGuiCol_Border,
+        g_isLightTheme ? ImVec4(0.70f, 0.77f, 0.87f, 0.95f) : ImVec4(0.24f, 0.36f, 0.54f, 0.95f));
+    ImGui::BeginChild(
+        "##HeaderBar",
+        ImVec2(0.0f, headerHeight),
+        true,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleColor();
+
+    {
+        PushFontSafe(g_fontPrimaryHeader);
+        const ImVec2 startScreen = ImGui::GetCursorScreenPos();
+        const float yOff = std::max(0.0f, (baseFrameH - titleSize.y) * 0.5f);
+        const ImVec4 titleCol = g_isLightTheme
+                                    ? ImVec4(0.08f, 0.34f, 0.74f, 1.00f)
+                                    : ImVec4(0.50f, 0.78f, 1.00f, 1.00f);
+        ImGui::GetWindowDrawList()->AddText(
+            ImVec2(startScreen.x, startScreen.y + yOff),
+            ImGui::ColorConvertFloat4ToU32(titleCol),
+            "DriverLoom");
+        ImGui::Dummy(ImVec2(titleSize.x, baseFrameH));
+        PopFontSafe(g_fontPrimaryHeader);
+    }
+    RenderVerticalDivider(6.0f);
+    ImGui::SameLine(0.0f, 2.0f * uiScale);
+    ImGui::AlignTextToFramePadding();
+    ImGui::TextDisabled("v1.0.0");
+
+    ImGui::SameLine(0.0f, 12.0f * uiScale);
+    if (isElevated_) {
+        RenderStatusBadge(ImVec4(0.20f, 0.83f, 0.60f, 1.00f), privText, true);
+    } else {
+        RenderStatusBadge(ImVec4(0.98f, 0.75f, 0.14f, 1.00f), privText, true);
+        ImGui::SameLine(0.0f, useShortElev ? (8.0f * uiScale) : (10.0f * uiScale));
+        const char* elevLbl =
+            useShortElev
+                ? hdm::Tr("Админ-режим###ElevBtn", "Права адміна###ElevBtn", "Run as Admin###ElevBtn")
+                : hdm::Tr(
+                      "Перезапустить как администратор###ElevBtn",
+                      "Перезапустити як адміністратор###ElevBtn",
+                      "Restart as Administrator###ElevBtn");
+        if (RenderSecondaryButton(elevLbl)) {
+            const hdm::ElevatedRunResult run = hdm::ExecuteElevatedSelf(L"", false);
+            if (run.launched) {
+                exitRequested_ = true;
+            } else if (run.launchError != ERROR_CANCELLED) {
+                logBuffer_.Push(
+                    hdm::LogLevel::Error,
+                    std::string(hdm::Tr(
+                        "Не удалось повысить права: ",
+                        "Не вдалося підвищити права: ",
+                        "Failed to elevate privileges: ")) +
+                        hdm::FormatWin32Error(run.launchError));
+            }
+        }
+    }
+
+    const float modeBtnW = useShortMode ? shortModeBtnW : fullModeBtnW;
     const char* modeBtnLbl =
-        useShortModeLbl
+        useShortMode
             ? (g_isAdvancedMode
                    ? hdm::Tr("Расширенный###ModeBtn", "Розширений###ModeBtn", "Advanced###ModeBtn")
                    : hdm::Tr("Обычный###ModeBtn", "Звичайний###ModeBtn", "Standard###ModeBtn"))
@@ -666,9 +756,9 @@ void DriverLoomApp::RenderHeaderBar() {
                    ? hdm::Tr("Режим: Расширенный###ModeBtn", "Режим: Розширений###ModeBtn", "Mode: Advanced###ModeBtn")
                    : hdm::Tr("Режим: Обычный###ModeBtn", "Режим: Звичайний###ModeBtn", "Mode: Standard###ModeBtn"));
 
-    const float themeBtnW = useShortThemeLbl ? shortThemeBtnW : fullThemeBtnW;
+    const float themeBtnW = useShortTheme ? shortThemeBtnW : fullThemeBtnW;
     const char* themeBtnLbl =
-        useShortThemeLbl
+        useShortTheme
             ? (g_isLightTheme
                    ? hdm::Tr("Светлая###ThemeBtn", "Світла###ThemeBtn", "Light###ThemeBtn")
                    : hdm::Tr("Тёмная###ThemeBtn", "Темна###ThemeBtn", "Dark###ThemeBtn"))
@@ -676,13 +766,27 @@ void DriverLoomApp::RenderHeaderBar() {
                    ? hdm::Tr("Тема: Светлая###ThemeBtn", "Тема: Світла###ThemeBtn", "Theme: Light###ThemeBtn")
                    : hdm::Tr("Тема: Тёмная###ThemeBtn", "Тема: Темна###ThemeBtn", "Theme: Dark###ThemeBtn"));
 
+    const float langComboW = useShortLang ? shortLangComboW : fullLangComboW;
+    const char* shownLangPreview = useShortLang ? curLangShortLabel : curLangLabel;
+    const float restoreBtnW = useShortRestore ? restoreShortW : restoreFullW;
+    const char* shownSrLbl = useShortRestore ? srShortLabel : srLabel;
+
     const float rightGroupW =
-        modeBtnW + hdrGap + themeBtnW + hdrGap + langComboW + hdrGap + btnWidth + hdrGap + aboutBtnW;
-    const float rightX = winContentMaxX - rightGroupW;
-    if (rightX > prevItemEndX + 12.0f * uiScale) {
-        ImGui::SameLine(rightX);
+        modeBtnW + hdrGap + themeBtnW + hdrGap + langComboW + hdrGap + restoreBtnW + hdrGap + aboutBtnW;
+    const float winContentMaxX = ImGui::GetWindowContentRegionMax().x;
+    if (!twoRows) {
+        const float prevItemEndX = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+        const float rightX = winContentMaxX - rightGroupW;
+        if (rightX > prevItemEndX + minSectionGap) {
+            ImGui::SameLine(rightX);
+        } else {
+            ImGui::SameLine(0.0f, hdrGap);
+        }
     } else {
-        ImGui::SameLine();
+        const float rightX = winContentMaxX - rightGroupW;
+        if (rightX > style.WindowPadding.x) {
+            ImGui::SetCursorPosX(rightX);
+        }
     }
 
     if (RenderPillButton(modeBtnLbl, g_isAdvancedMode, ImVec2(modeBtnW, 0.0f))) {
@@ -747,7 +851,10 @@ void DriverLoomApp::RenderHeaderBar() {
         ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.145f, 0.184f, 0.255f, 1.00f));
         ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.169f, 0.216f, 0.298f, 1.00f));
     }
-    if (ImGui::BeginCombo("##LangCombo", curLangLabel, ImGuiComboFlags_HeightSmall)) {
+    if (useShortLang) {
+        ImGui::SetNextWindowSizeConstraints(ImVec2(fullLangComboW, 0.0f), ImVec2(10000.0f, 10000.0f));
+    }
+    if (ImGui::BeginCombo("##LangCombo", shownLangPreview, ImGuiComboFlags_HeightSmall)) {
         for (const auto& opt : kLangOptions) {
             const bool isSelected = (opt.lang == curLang);
             if (ImGui::Selectable(opt.label, isSelected)) {
@@ -764,7 +871,7 @@ void DriverLoomApp::RenderHeaderBar() {
 
     ImGui::SameLine(0.0f, hdrGap);
     ImGui::BeginDisabled(systemRestore_.IsBusy());
-    if (RenderSecondaryButton(srLabel, ImVec2(btnWidth, 0.0f))) {
+    if (RenderSecondaryButton(shownSrLbl, ImVec2(restoreBtnW, 0.0f))) {
         systemRestore_.CreateRestorePointAsync(
             hdm::Tr(
                 "DriverLoom (ручная точка восстановления)",
