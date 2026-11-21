@@ -515,23 +515,20 @@ void DriverLoomApp::RenderHeaderBar() {
     }
     const bool hasUpdate =
         (updState == AppUpdateState::UpdateAvailable && !latestVer.empty());
-    char aboutMeasure[96];
-    char aboutLabel[112];
+    char aboutLabel[112]{};
+    float aboutBtnW = baseFrameH;
     if (hasUpdate) {
+        char aboutMeasure[96];
         std::snprintf(
             aboutMeasure,
             sizeof(aboutMeasure),
             hdm::Tr("Обновление v%s", "Оновлення v%s", "Update v%s"),
             latestVer.c_str());
+        std::snprintf(aboutLabel, sizeof(aboutLabel), "%s###AboutVerBtn", aboutMeasure);
+        aboutBtnW = CalcButtonWidth(aboutMeasure) + 6.0f * uiScale;
     } else {
-        std::snprintf(
-            aboutMeasure,
-            sizeof(aboutMeasure),
-            "%s",
-            hdm::Tr("О приложении", "Про програму", "About"));
+        std::snprintf(aboutLabel, sizeof(aboutLabel), "###AboutVerBtn");
     }
-    std::snprintf(aboutLabel, sizeof(aboutLabel), "%s###AboutVerBtn", aboutMeasure);
-    const float aboutBtnW = CalcButtonWidth(aboutMeasure) + 6.0f * uiScale;
 
     const char* srLabel = systemRestore_.IsBusy()
                               ? hdm::Tr(
@@ -890,6 +887,32 @@ void DriverLoomApp::RenderHeaderBar() {
     const bool clickedAbout = hasUpdate
                                   ? RenderActionButton(aboutLabel, ImVec2(aboutBtnW, 0.0f), true)
                                   : RenderSecondaryButton(aboutLabel, ImVec2(aboutBtnW, 0.0f));
+    if (!hasUpdate && ImGui::IsItemVisible()) {
+        const ImVec2 rMin = ImGui::GetItemRectMin();
+        const ImVec2 rMax = ImGui::GetItemRectMax();
+        const bool hovered = isAppForeground && ImGui::IsItemHovered();
+        const float cx = (rMin.x + rMax.x) * 0.5f;
+        const float cy = (rMin.y + rMax.y) * 0.5f;
+        const float r = std::max(6.5f, std::floor((rMax.y - rMin.y) * 0.30f));
+        const ImVec4 colVec =
+            hovered
+                ? AccentTextColor()
+                : (g_isLightTheme ? ImVec4(0.18f, 0.32f, 0.54f, 1.00f)
+                                  : ImVec4(0.74f, 0.85f, 0.98f, 1.00f));
+        const ImU32 iconCol = ImGui::ColorConvertFloat4ToU32(colVec);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddCircle(ImVec2(cx, cy), r, iconCol, 24, std::max(1.3f, 1.4f * uiScale));
+        dl->AddCircleFilled(
+            ImVec2(cx, cy - r * 0.38f),
+            std::max(1.1f, r * 0.145f),
+            iconCol,
+            12);
+        dl->AddLine(
+            ImVec2(cx, cy - r * 0.08f),
+            ImVec2(cx, cy + r * 0.44f),
+            iconCol,
+            std::max(1.5f, 1.8f * uiScale));
+    }
     if (clickedAbout) {
         openAboutPopupNextFrame_ = true;
         aboutModalOpen_ = true;
@@ -901,9 +924,9 @@ void DriverLoomApp::RenderHeaderBar() {
         ImGui::SetTooltip(
             "%s",
             hdm::Tr(
-                "Сведения о DriverLoom, автор (Arvexer), GitHub, обратная связь и проверка обновлений (F1)",
-                "Відомості про DriverLoom, автор (Arvexer), GitHub, зворотний зв'язок і перевірка оновлень (F1)",
-                "About DriverLoom, author (Arvexer), GitHub, contact & update checker (F1)"));
+                "О приложении DriverLoom • Автор (Arvexer), GitHub, обратная связь и проверка обновлений (F1)",
+                "Про програму DriverLoom • Автор (Arvexer), GitHub, зворотний зв'язок і перевірка оновлень (F1)",
+                "About DriverLoom • Author (Arvexer), GitHub, contact & update checker (F1)"));
     }
 
     ImGui::EndChild();

@@ -72,7 +72,7 @@
 ## Application Overview
 
 ### Top Control Bar (Header)
-- **About & Release Checker (`About`)**: opens the *About DriverLoom* modal with author links, e-mail contact, and non-blocking GitHub Releases update checking via WinHTTP.
+- **About & Release Checker (`ⓘ`)**: opens the *About DriverLoom* modal with author links, e-mail contact, support link, and non-blocking GitHub Releases update checking via WinHTTP.
 - **Privilege Badge**: shows `Administrator` or `Standard user` alongside a one-click `Restart as Administrator` (`UAC`) button.
 - **UI Mode Toggle**: switches between `Mode: Standard` and `Mode: Advanced`.
 - **Theme Toggle**: switches between `Theme: Dark` and `Theme: Light`.
