@@ -2699,6 +2699,62 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
                 ContainsCaseInsensitive(primaryKey, "VEN_1022") ||
                 ContainsCaseInsensitive(primaryKey, "VEN_8086");
             if (isStandardStorageOrChipset) {
+                bool usesOemInf = false;
+                for (const auto& d : devs) {
+                    if (ToLowerAscii(d.searchHardwareKey) == ToLowerAscii(primaryKey) ||
+                        ContainsCaseInsensitive(d.hardwareId, primaryKey)) {
+                        if (ToLowerAscii(d.infName).rfind("oem", 0) == 0) {
+                            usesOemInf = true;
+                            break;
+                        }
+                    }
+                }
+                if (usesOemInf) {
+                    SetPhaseMessage("Восстановление системного драйвера Windows...");
+                    if (log) {
+                        log(LogLevel::Info,
+                            "В Microsoft Update Catalog нет .cab для «" + deviceName +
+                                "» — выполняется переключение на актуальный системный драйвер Windows...");
+                    }
+                    bool inboxOk = false;
+                    bool inboxReboot = false;
+                    if (IsProcessElevated()) {
+                        inboxOk = DeviceScanner::RestoreInboxDriverByHardwareKeySync(
+                            primaryKey, deviceName, log, &inboxReboot);
+                    } else {
+                        std::error_code ec;
+                        const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_inbox");
+                        const std::wstring cliArgs =
+                            L"--cli-restore-inbox \"" + Utf8ToWide(primaryKey) +
+                            L"\" --log \"" + tempLog.wstring() + L"\"";
+                        const ElevatedRunResult run =
+                            ExecuteElevatedSelf(cliArgs, true, &tempLog, log);
+                        std::filesystem::remove(tempLog, ec);
+                        if (!run.launched) {
+                            if (run.launchError == ERROR_CANCELLED) {
+                                cancelInstallRequested_.store(true);
+                                if (log) {
+                                    log(LogLevel::Warning,
+                                        "Восстановление системного драйвера отменено (UAC).");
+                                }
+                            } else if (log) {
+                                log(LogLevel::Error,
+                                    "Ошибка запуска UAC: " + FormatWin32Error(run.launchError));
+                            }
+                        } else {
+                            inboxOk = (run.exitCode == 0 || run.exitCode == 2);
+                            inboxReboot = (run.exitCode == 2);
+                        }
+                    }
+                    if (inboxOk) {
+                        SetPhaseMessage("Восстановлен системный драйвер Windows");
+                        progress_.store(1.0f);
+                        installing_.store(false);
+                        if (cb) cb(true, inboxReboot);
+                        return;
+                    }
+                }
+
                 if (log) {
                     log(LogLevel::Info,
                         "Для «" + deviceName + "» (" + primaryKey +

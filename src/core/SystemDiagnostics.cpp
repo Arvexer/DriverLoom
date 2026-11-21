@@ -894,6 +894,12 @@ std::vector<StorageDiagnosticItem> AnalyzeStorageSubsystem(
             st.hardwareId = d.hardwareId;
             st.searchKey = d.searchHardwareKey;
 
+            const std::string infLower = ToLowerAscii(d.infName);
+            const bool isStandardAhciOrNvme =
+                ContainsCaseInsensitive(d.name, "AHCI") ||
+                infLower == "mshdc.inf" ||
+                infLower == "stornvme.inf";
+
             const int drvYear = ParseDriverYear(d.driverDate);
             const bool isMicrosoftGeneric2006 =
                 (drvYear == 2006) &&
@@ -904,7 +910,8 @@ std::vector<StorageDiagnosticItem> AnalyzeStorageSubsystem(
             if (d.health != DeviceHealth::Ok) {
                 st.health = ControllerHealth::Problem;
                 st.statusText = d.statusText;
-            } else if (drvYear > 0 && !isMicrosoftGeneric2006 && (currentYear - drvYear) >= 5) {
+            } else if (drvYear > 0 && !isMicrosoftGeneric2006 && !isStandardAhciOrNvme &&
+                       (currentYear - drvYear) >= 5) {
                 st.health = ControllerHealth::Attention;
                 st.statusText = "Устаревший драйвер (" + std::to_string(drvYear) + " г.)";
             } else {

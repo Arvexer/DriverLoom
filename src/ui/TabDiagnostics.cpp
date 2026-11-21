@@ -172,16 +172,58 @@ void DriverLoomApp::RenderDiagnosticsTab() {
                 diagCache_.disabledCriticalServices);
             RenderStatusBadge(ImVec4(0.97f, 0.44f, 0.44f, 1.00f), msg, true);
         } else if (diagCache_.attentionControllers > 0) {
-            char msg[96];
-            std::snprintf(
-                msg,
-                sizeof(msg),
-                hdm::Tr(
-                    "Контроллеры требуют внимания: %zu",
-                    "Контролери потребують уваги: %zu",
-                    "Controllers need attention: %zu"),
-                diagCache_.attentionControllers);
+            std::string names;
+            size_t shownNames = 0;
+            for (const auto& ctrl : diagCache_.controllers) {
+                if (ctrl.health == hdm::ControllerHealth::Ok) {
+                    continue;
+                }
+                if (shownNames > 0) {
+                    names += ", ";
+                }
+                names += ctrl.deviceName;
+                ++shownNames;
+                if (shownNames >= 2) {
+                    break;
+                }
+            }
+            if (diagCache_.attentionControllers > shownNames && !names.empty()) {
+                names += ", ...";
+            }
+            char msg[256];
+            if (!names.empty()) {
+                std::snprintf(
+                    msg,
+                    sizeof(msg),
+                    hdm::Tr(
+                        "Контроллеры требуют внимания: %zu (%s)",
+                        "Контролери потребують уваги: %zu (%s)",
+                        "Controllers need attention: %zu (%s)"),
+                    diagCache_.attentionControllers,
+                    names.c_str());
+            } else {
+                std::snprintf(
+                    msg,
+                    sizeof(msg),
+                    hdm::Tr(
+                        "Контроллеры требуют внимания: %zu",
+                        "Контролери потребують уваги: %zu",
+                        "Controllers need attention: %zu"),
+                    diagCache_.attentionControllers);
+            }
             RenderStatusBadge(ImVec4(0.98f, 0.75f, 0.14f, 1.00f), msg, true);
+            if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                ImGui::SetTooltip(
+                    "%s",
+                    hdm::Tr(
+                        "Нажмите, чтобы перейти к списку контроллеров платы.",
+                        "Натисніть, щоб перейти до списку контролерів плати.",
+                        "Click to jump to the Board Controllers list."));
+            }
+            if (ImGui::IsItemClicked()) {
+                diagSectionIndex_ = 0;
+            }
         } else {
             RenderStatusBadge(
                 ImVec4(0.20f, 0.83f, 0.60f, 1.00f),

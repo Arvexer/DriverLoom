@@ -45,7 +45,8 @@ int RunCliModeIfRequested() {
         SfcScan,
         DismCheck,
         DismRestore,
-        DeviceAction
+        DeviceAction,
+        RestoreInboxDriver
     };
     Mode mode = Mode::None;
     std::wstring targetArg;
@@ -82,6 +83,9 @@ int RunCliModeIfRequested() {
             targetArg = argv[++i];
         } else if (arg == L"--cli-device-action" && i + 1 < argc) {
             mode = Mode::DeviceAction;
+            targetArg = argv[++i];
+        } else if (arg == L"--cli-restore-inbox" && i + 1 < argc) {
+            mode = Mode::RestoreInboxDriver;
             targetArg = argv[++i];
         } else if (arg == L"--instance" && i + 1 < argc) {
             instanceArg = argv[++i];
@@ -187,6 +191,17 @@ int RunCliModeIfRequested() {
         bool rebootReq = false;
         const bool ok = hdm::DeviceScanner::RunDeviceActionSync(
             devAct, hdm::WideToUtf8(instanceArg), fileLogger, &rebootReq);
+        if (!ok) {
+            return 1;
+        }
+        return rebootReq ? 2 : 0;
+    }
+
+    if (mode == Mode::RestoreInboxDriver) {
+        bool rebootReq = false;
+        const std::string key = hdm::WideToUtf8(targetArg);
+        const bool ok = hdm::DeviceScanner::RestoreInboxDriverByHardwareKeySync(
+            key, key, fileLogger, &rebootReq);
         if (!ok) {
             return 1;
         }

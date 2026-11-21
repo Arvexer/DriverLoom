@@ -96,6 +96,12 @@ public:
         const LogCallback& onLog,
         bool* outRebootRequired = nullptr);
 
+    static bool RestoreInboxDriverByHardwareKeySync(
+        const std::string& searchKey,
+        const std::string& deviceName,
+        const LogCallback& onLog,
+        bool* outRebootRequired = nullptr);
+
     static std::string DeviceActionToCliVerb(DeviceAction action);
     static bool ParseDeviceActionCliVerb(const std::string& verb, DeviceAction& outAction);
 

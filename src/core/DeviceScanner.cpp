@@ -1025,6 +1025,175 @@ bool DeviceScanner::RunDeviceActionSync(
     return false;
 }
 
+bool DeviceScanner::RestoreInboxDriverByHardwareKeySync(
+    const std::string& searchKey,
+    const std::string& deviceName,
+    const LogCallback& onLog,
+    bool* outRebootRequired) {
+    if (outRebootRequired != nullptr) {
+        *outRebootRequired = false;
+    }
+    if (searchKey.empty()) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Не указан Hardware ID для восстановления системного драйвера Windows.");
+        }
+        return false;
+    }
+
+    DevInfoSetGuard devInfoSet(
+        SetupDiGetClassDevsW(nullptr, nullptr, nullptr, DIGCF_ALLCLASSES | DIGCF_PRESENT));
+    if (!devInfoSet.IsValid()) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Ошибка SetupDiGetClassDevsW: " + FormatWin32Error(GetLastError()));
+        }
+        return false;
+    }
+
+    SP_DEVINFO_DATA devInfoData{};
+    devInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
+    bool foundDevice = false;
+    for (DWORD idx = 0; SetupDiEnumDeviceInfo(devInfoSet.Get(), idx, &devInfoData); ++idx) {
+        const std::string hwId = WideToUtf8(
+            GetDeviceRegistryPropertyString(devInfoSet.Get(), &devInfoData, SPDRP_HARDWAREID));
+        const std::string instId =
+            WideToUtf8(GetDeviceInstanceIdString(devInfoSet.Get(), &devInfoData));
+        if (ContainsCaseInsensitive(hwId, searchKey) ||
+            ContainsCaseInsensitive(instId, searchKey)) {
+            foundDevice = true;
+            break;
+        }
+    }
+    if (!foundDevice) {
+        if (onLog) {
+            onLog(LogLevel::Warning,
+                  "Устройство с ключом «" + searchKey + "» не найдено в PnP.");
+        }
+        return false;
+    }
+
+    if (!SetupDiBuildDriverInfoList(devInfoSet.Get(), &devInfoData, SPDIT_COMPATDRIVER)) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Не удалось построить список совместимых драйверов: " +
+                      FormatWin32Error(GetLastError()));
+        }
+        return false;
+    }
+
+    struct CompatDriverListGuard {
+        HDEVINFO set{INVALID_HANDLE_VALUE};
+        PSP_DEVINFO_DATA dev{nullptr};
+        ~CompatDriverListGuard() {
+            if (set != INVALID_HANDLE_VALUE && dev != nullptr) {
+                SetupDiDestroyDriverInfoList(set, dev, SPDIT_COMPATDRIVER);
+            }
+        }
+    } drvListGuard{devInfoSet.Get(), &devInfoData};
+
+    bool foundInbox = false;
+    SP_DRVINFO_DATA_W bestDrvData{};
+    std::string bestInfBase;
+
+    SP_DRVINFO_DATA_W drvData{};
+    drvData.cbSize = sizeof(SP_DRVINFO_DATA_W);
+    for (DWORD dIdx = 0;
+         SetupDiEnumDriverInfoW(
+             devInfoSet.Get(), &devInfoData, SPDIT_COMPATDRIVER, dIdx, &drvData);
+         ++dIdx) {
+        DWORD reqBytes = 0;
+        SetupDiGetDriverInfoDetailW(devInfoSet.Get(), &devInfoData, &drvData, nullptr, 0, &reqBytes);
+        if (reqBytes < sizeof(SP_DRVINFO_DETAIL_DATA_W)) {
+            continue;
+        }
+        std::vector<BYTE> detailBuf(reqBytes);
+        auto* detail = reinterpret_cast<SP_DRVINFO_DETAIL_DATA_W*>(detailBuf.data());
+        detail->cbSize = sizeof(SP_DRVINFO_DETAIL_DATA_W);
+        if (!SetupDiGetDriverInfoDetailW(
+                devInfoSet.Get(), &devInfoData, &drvData, detail, reqBytes, nullptr)) {
+            continue;
+        }
+
+        const std::string infBase =
+            WideToUtf8(std::filesystem::path(detail->InfFileName).filename().wstring());
+        const std::string infLower = ToLowerAscii(infBase);
+        if (infLower.empty() || infLower.rfind("oem", 0) == 0) {
+            continue;
+        }
+
+        if (!foundInbox || drvData.DriverVersion > bestDrvData.DriverVersion) {
+            foundInbox = true;
+            bestDrvData = drvData;
+            bestInfBase = infBase;
+        }
+    }
+
+    if (!foundInbox) {
+        if (onLog) {
+            onLog(LogLevel::Warning,
+                  "Для «" + deviceName +
+                      "» не найден встроенный системный драйвер Windows в совместимых INF.");
+        }
+        return false;
+    }
+
+    const DWORDLONG v = bestDrvData.DriverVersion;
+    char verBuf[64];
+    std::snprintf(
+        verBuf,
+        sizeof(verBuf),
+        "%u.%u.%u.%u",
+        static_cast<unsigned>((v >> 48) & 0xFFFFu),
+        static_cast<unsigned>((v >> 32) & 0xFFFFu),
+        static_cast<unsigned>((v >> 16) & 0xFFFFu),
+        static_cast<unsigned>(v & 0xFFFFu));
+    const std::string inboxVer = verBuf;
+
+    using DiInstallDeviceFn = BOOL(WINAPI*)(
+        HWND, HDEVINFO, PSP_DEVINFO_DATA, PSP_DRVINFO_DATA_W, DWORD, PBOOL);
+    NewdevModuleGuard newdev{
+        LoadLibraryExW(L"newdev.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+    DiInstallDeviceFn diInstallDevice = nullptr;
+    if (newdev.mod != nullptr) {
+        diInstallDevice = reinterpret_cast<DiInstallDeviceFn>(
+            reinterpret_cast<void*>(GetProcAddress(newdev.mod, "DiInstallDevice")));
+    }
+    if (diInstallDevice == nullptr) {
+        const DWORD err = GetLastError();
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Не удалось загрузить DiInstallDevice из newdev.dll: " +
+                      FormatWin32Error(err));
+        }
+        return false;
+    }
+
+    BOOL needReboot = FALSE;
+    if (!diInstallDevice(nullptr, devInfoSet.Get(), &devInfoData, &bestDrvData, 0, &needReboot)) {
+        const DWORD err = GetLastError();
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Не удалось установить системный драйвер " + bestInfBase +
+                      " для «" + deviceName + "»: " + FormatWin32Error(err));
+        }
+        return false;
+    }
+
+    const bool rebootNeeded =
+        (needReboot != FALSE) || CheckDevNodeNeedsReboot(devInfoSet.Get(), &devInfoData);
+    if (outRebootRequired != nullptr && rebootNeeded) {
+        *outRebootRequired = true;
+    }
+    if (onLog) {
+        onLog(LogLevel::Success,
+              "Для «" + deviceName + "» установлен актуальный системный драйвер Windows (" +
+                  bestInfBase + ", версия " + inboxVer + ")" +
+                  (rebootNeeded ? " — требуется перезагрузка." : "."));
+    }
+    return true;
+}
+
 void DeviceScanner::RunDeviceActionAsync(
     DeviceAction action,
     const std::string& instanceId,
