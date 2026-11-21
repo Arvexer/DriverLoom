@@ -224,5 +224,6 @@ Run [`capture_screenshots.bat`](capture_screenshots.bat) to recapture all 6 PNG 
 - **Developer:** [Arvexer](https://github.com/Arvexer)
 - **Repository:** [github.com/Arvexer/DriverLoom](https://github.com/Arvexer/DriverLoom)
 - **E-mail:** [arvexer.dev@proton.me](mailto:arvexer.dev@proton.me?subject=DriverLoom%20Feedback)
+- **Support (Ko-fi):** [ko-fi.com/arvexer](https://ko-fi.com/arvexer)
 
 Licensed under the **[MIT License](LICENSE)**.

@@ -1096,6 +1096,16 @@ void DriverLoomApp::RenderAboutModal() {
                     "Скопійовано e-mail розробника: arvexer.dev@proton.me",
                     "Developer e-mail copied: arvexer.dev@proton.me"));
         }
+        ImGui::SameLine();
+        if (RenderSecondaryButton(hdm::Tr(
+                "Поддержать (Ko-fi)###AboutKofi",
+                "Підтримати (Ko-fi)###AboutKofi",
+                "Support (Ko-fi)###AboutKofi"))) {
+            OpenUrlInBrowser("https://ko-fi.com/arvexer");
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip("https://ko-fi.com/arvexer");
+        }
     }
     ImGui::EndChild();
 
