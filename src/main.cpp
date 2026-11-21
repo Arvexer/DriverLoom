@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -26,6 +27,7 @@
 #include <sstream>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -590,6 +592,209 @@ void SaveUserPreferences() noexcept {
     writeDword(L"AdvancedMode", g_isAdvancedMode ? 1u : 0u);
     writeDword(L"LightTheme", g_isLightTheme ? 1u : 0u);
     writeDword(L"Language", static_cast<DWORD>(hdm::GetLang()));
+}
+
+constexpr wchar_t kSnapshotRegSubKey[] = L"Software\\DriverLoom\\BaselineSnapshot";
+
+struct DriverBaselineEntry {
+    std::string instanceId;
+    std::string name;
+    std::string deviceClass;
+    std::string driverVersion;
+    std::string driverDate;
+    std::string infName;
+    std::string statusText;
+    int health{0};
+};
+
+enum class SnapshotDiffKind {
+    DriverUpdated,
+    IssueFixed,
+    NewIssue,
+    DeviceAdded,
+    DeviceRemoved,
+    Unchanged
+};
+
+struct DriverSnapshotDiffRow {
+    SnapshotDiffKind kind{SnapshotDiffKind::Unchanged};
+    std::string instanceId;
+    std::string name;
+    std::string deviceClass;
+    std::string beforeSummary;
+    std::string afterSummary;
+    bool canRollback{false};
+};
+
+std::string SanitizeTabField(std::string s) {
+    for (char& ch : s) {
+        if (ch == '\t' || ch == '\r' || ch == '\n') {
+            ch = ' ';
+        }
+    }
+    return s;
+}
+
+std::string FormatSnapshotTimestampNow() {
+    SYSTEMTIME st{};
+    GetLocalTime(&st);
+    char buf[32];
+    std::snprintf(
+        buf,
+        sizeof(buf),
+        "%04u-%02u-%02u %02u:%02u:%02u",
+        static_cast<unsigned>(st.wYear),
+        static_cast<unsigned>(st.wMonth),
+        static_cast<unsigned>(st.wDay),
+        static_cast<unsigned>(st.wHour),
+        static_cast<unsigned>(st.wMinute),
+        static_cast<unsigned>(st.wSecond));
+    return buf;
+}
+
+void SaveBaselineSnapshotToRegistry(
+    const std::string& timestamp,
+    const std::vector<DriverBaselineEntry>& entries) {
+    hdm::RegKeyGuard key;
+    if (RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            kSnapshotRegSubKey,
+            0,
+            nullptr,
+            REG_OPTION_NON_VOLATILE,
+            KEY_WRITE,
+            nullptr,
+            key.Put(),
+            nullptr) != ERROR_SUCCESS) {
+        return;
+    }
+
+    auto writeWideSz = [&key](const wchar_t* name, const std::wstring& val) {
+        const DWORD bytes = static_cast<DWORD>((val.size() + 1) * sizeof(wchar_t));
+        RegSetValueExW(
+            key.Get(),
+            name,
+            0,
+            REG_SZ,
+            reinterpret_cast<const BYTE*>(val.c_str()),
+            bytes);
+    };
+
+    std::string payload;
+    payload.reserve(entries.size() * 140);
+    for (const auto& e : entries) {
+        if (!payload.empty()) {
+            payload.push_back('\n');
+        }
+        payload += SanitizeTabField(e.instanceId);
+        payload.push_back('\t');
+        payload += SanitizeTabField(e.name);
+        payload.push_back('\t');
+        payload += SanitizeTabField(e.deviceClass);
+        payload.push_back('\t');
+        payload += SanitizeTabField(e.driverVersion);
+        payload.push_back('\t');
+        payload += SanitizeTabField(e.driverDate);
+        payload.push_back('\t');
+        payload += SanitizeTabField(e.infName);
+        payload.push_back('\t');
+        payload += SanitizeTabField(e.statusText);
+        payload.push_back('\t');
+        payload += std::to_string(e.health);
+    }
+
+    writeWideSz(L"Timestamp", hdm::Utf8ToWide(timestamp));
+    writeWideSz(L"Payload", hdm::Utf8ToWide(payload));
+}
+
+bool LoadBaselineSnapshotFromRegistry(
+    std::string& outTimestamp,
+    std::vector<DriverBaselineEntry>& outEntries) {
+    outTimestamp.clear();
+    outEntries.clear();
+
+    hdm::RegKeyGuard key;
+    if (RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            kSnapshotRegSubKey,
+            0,
+            KEY_READ,
+            key.Put()) != ERROR_SUCCESS) {
+        return false;
+    }
+
+    auto readUtf8Sz = [&key](const wchar_t* name, std::string& outStr) -> bool {
+        DWORD type = 0;
+        DWORD bytes = 0;
+        if (RegQueryValueExW(key.Get(), name, nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS ||
+            type != REG_SZ || bytes < sizeof(wchar_t)) {
+            return false;
+        }
+        std::vector<wchar_t> buf(bytes / sizeof(wchar_t) + 2, L'\0');
+        if (RegQueryValueExW(
+                key.Get(),
+                name,
+                nullptr,
+                &type,
+                reinterpret_cast<LPBYTE>(buf.data()),
+                &bytes) != ERROR_SUCCESS) {
+            return false;
+        }
+        const size_t maxChars = bytes / sizeof(wchar_t);
+        size_t len = 0;
+        while (len < maxChars && buf[len] != L'\0') {
+            ++len;
+        }
+        outStr = hdm::WideToUtf8(std::wstring_view(buf.data(), len));
+        return true;
+    };
+
+    if (!readUtf8Sz(L"Timestamp", outTimestamp)) {
+        return false;
+    }
+    std::string payload;
+    if (!readUtf8Sz(L"Payload", payload) || payload.empty()) {
+        return false;
+    }
+
+    std::istringstream iss(payload);
+    std::string line;
+    while (std::getline(iss, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        if (line.empty()) {
+            continue;
+        }
+
+        std::string fields[8];
+        size_t fieldIdx = 0;
+        size_t start = 0;
+        while (fieldIdx < 7) {
+            const size_t tabPos = line.find('\t', start);
+            if (tabPos == std::string::npos) {
+                break;
+            }
+            fields[fieldIdx++] = line.substr(start, tabPos - start);
+            start = tabPos + 1;
+        }
+        fields[fieldIdx] = line.substr(start);
+        if (fieldIdx < 7 || fields[0].empty()) {
+            continue;
+        }
+
+        DriverBaselineEntry entry;
+        entry.instanceId = std::move(fields[0]);
+        entry.name = std::move(fields[1]);
+        entry.deviceClass = std::move(fields[2]);
+        entry.driverVersion = std::move(fields[3]);
+        entry.driverDate = std::move(fields[4]);
+        entry.infName = std::move(fields[5]);
+        entry.statusText = std::move(fields[6]);
+        entry.health = std::atoi(fields[7].c_str());
+        outEntries.push_back(std::move(entry));
+    }
+    return !outEntries.empty();
 }
 
 std::string EllipsizeUtf8(const std::string& text, float maxWidth) {
@@ -1377,6 +1582,7 @@ public:
                 (isElevated_
                      ? hdm::Tr("Администратор", "Адміністратор", "Administrator")
                      : hdm::Tr("Обычный (UAC по запросу)", "Звичайний (UAC за запитом)", "Standard (UAC on demand)")));
+        LoadBaselineSnapshot();
         scanner_.StartScanAsync(MakeLogger());
     }
 
@@ -1584,6 +1790,193 @@ private:
         };
     }
 
+    static std::string FormatSnapshotEntrySummary(
+        const std::string& driverVersion,
+        const std::string& driverDate,
+        const std::string& infName,
+        const std::string& statusText) {
+        std::string s;
+        if (!driverVersion.empty()) {
+            s = driverVersion;
+            if (!driverDate.empty()) {
+                s += " (" + driverDate + ")";
+            }
+            if (!infName.empty()) {
+                s += " [" + infName + "]";
+            }
+        } else if (!infName.empty()) {
+            s = "[" + infName + "]";
+        }
+        const std::string st = hdm::TrDyn(statusText);
+        if (!st.empty()) {
+            if (!s.empty()) {
+                s += "  |  ";
+            }
+            s += st;
+        }
+        return s.empty() ? "—" : s;
+    }
+
+    void LoadBaselineSnapshot() {
+        snapshotLoadedFromReg_ =
+            LoadBaselineSnapshotFromRegistry(baselineTimestamp_, baselineEntries_);
+    }
+
+    void CaptureCurrentAsBaseline(bool logNotification) {
+        baselineTimestamp_ = FormatSnapshotTimestampNow();
+        baselineEntries_.clear();
+        baselineEntries_.reserve(devicesCache_.size());
+        for (const auto& d : devicesCache_) {
+            if (d.instanceId.empty()) {
+                continue;
+            }
+            DriverBaselineEntry e;
+            e.instanceId = d.instanceId;
+            e.name = d.name;
+            e.deviceClass = d.deviceClass;
+            e.driverVersion = d.driverVersion;
+            e.driverDate = d.driverDate;
+            e.infName = d.infName;
+            e.statusText = d.statusText;
+            e.health = static_cast<int>(d.health);
+            baselineEntries_.push_back(std::move(e));
+        }
+        snapshotLoadedFromReg_ = true;
+        SaveBaselineSnapshotToRegistry(baselineTimestamp_, baselineEntries_);
+        RebuildSnapshotDiff();
+
+        if (logNotification) {
+            logBuffer_.Push(
+                hdm::LogLevel::Success,
+                std::string(hdm::Tr(
+                    "Снимок состояния драйверов «До» обновлён (",
+                    "Знімок стану драйверів «До» оновлено (",
+                    "Driver baseline snapshot 'Before' updated (")) +
+                    baselineTimestamp_ + ", " +
+                    std::to_string(baselineEntries_.size()) +
+                    hdm::Tr(" устройств).", " пристроїв).", " devices)."));
+        }
+    }
+
+    void RebuildSnapshotDiff() {
+        snapshotDiffRows_.clear();
+        snapshotChangedCount_ = 0;
+        lastSnapshotLang_ = hdm::GetLang();
+
+        if (baselineEntries_.empty() && devicesCache_.empty()) {
+            return;
+        }
+
+        std::unordered_map<std::string, const DriverBaselineEntry*> baseMap;
+        baseMap.reserve(baselineEntries_.size());
+        for (const auto& b : baselineEntries_) {
+            if (!b.instanceId.empty()) {
+                baseMap[hdm::ToLowerAscii(b.instanceId)] = &b;
+            }
+        }
+
+        std::unordered_set<std::string> seenBaseKeys;
+        seenBaseKeys.reserve(devicesCache_.size());
+
+        for (const auto& cur : devicesCache_) {
+            if (cur.instanceId.empty()) {
+                continue;
+            }
+            const std::string key = hdm::ToLowerAscii(cur.instanceId);
+            const auto it = baseMap.find(key);
+
+            DriverSnapshotDiffRow row;
+            row.instanceId = cur.instanceId;
+            row.name = cur.name;
+            row.deviceClass = cur.deviceClass;
+            row.canRollback = cur.hasDriver;
+            row.afterSummary = FormatSnapshotEntrySummary(
+                cur.driverVersion, cur.driverDate, cur.infName, cur.statusText);
+
+            if (it == baseMap.end()) {
+                row.kind = SnapshotDiffKind::DeviceAdded;
+                row.beforeSummary = hdm::Tr("Отсутствовало", "Було відсутнє", "Not present");
+                ++snapshotChangedCount_;
+            } else {
+                seenBaseKeys.insert(key);
+                const DriverBaselineEntry& base = *(it->second);
+                row.beforeSummary = FormatSnapshotEntrySummary(
+                    base.driverVersion, base.driverDate, base.infName, base.statusText);
+
+                const int curHealth = static_cast<int>(cur.health);
+                const bool drvChanged =
+                    (base.driverVersion != cur.driverVersion) ||
+                    (base.driverDate != cur.driverDate) ||
+                    (hdm::ToLowerAscii(base.infName) != hdm::ToLowerAscii(cur.infName));
+                const bool statusChanged =
+                    (base.health != curHealth) || (base.statusText != cur.statusText);
+
+                if (base.health != 0 && curHealth == 0) {
+                    row.kind = SnapshotDiffKind::IssueFixed;
+                    ++snapshotChangedCount_;
+                } else if (base.health == 0 && curHealth != 0) {
+                    row.kind = SnapshotDiffKind::NewIssue;
+                    ++snapshotChangedCount_;
+                } else if (drvChanged) {
+                    row.kind = SnapshotDiffKind::DriverUpdated;
+                    ++snapshotChangedCount_;
+                } else if (statusChanged) {
+                    row.kind = (curHealth > base.health)
+                                   ? SnapshotDiffKind::NewIssue
+                                   : SnapshotDiffKind::IssueFixed;
+                    ++snapshotChangedCount_;
+                } else {
+                    row.kind = SnapshotDiffKind::Unchanged;
+                }
+            }
+            snapshotDiffRows_.push_back(std::move(row));
+        }
+
+        for (const auto& base : baselineEntries_) {
+            if (base.instanceId.empty()) {
+                continue;
+            }
+            const std::string key = hdm::ToLowerAscii(base.instanceId);
+            if (seenBaseKeys.count(key) > 0) {
+                continue;
+            }
+            DriverSnapshotDiffRow row;
+            row.kind = SnapshotDiffKind::DeviceRemoved;
+            row.instanceId = base.instanceId;
+            row.name = base.name;
+            row.deviceClass = base.deviceClass;
+            row.beforeSummary = FormatSnapshotEntrySummary(
+                base.driverVersion, base.driverDate, base.infName, base.statusText);
+            row.afterSummary = hdm::Tr("Устройство удалено / отключено", "Пристрій видалено / відключено", "Device removed / disconnected");
+            row.canRollback = false;
+            ++snapshotChangedCount_;
+            snapshotDiffRows_.push_back(std::move(row));
+        }
+
+        auto kindRank = [](SnapshotDiffKind k) {
+            switch (k) {
+            case SnapshotDiffKind::NewIssue: return 0;
+            case SnapshotDiffKind::IssueFixed: return 1;
+            case SnapshotDiffKind::DriverUpdated: return 2;
+            case SnapshotDiffKind::DeviceAdded: return 3;
+            case SnapshotDiffKind::DeviceRemoved: return 4;
+            case SnapshotDiffKind::Unchanged: return 5;
+            }
+            return 5;
+        };
+        std::sort(
+            snapshotDiffRows_.begin(),
+            snapshotDiffRows_.end(),
+            [&](const DriverSnapshotDiffRow& a, const DriverSnapshotDiffRow& b) {
+                const int ra = kindRank(a.kind);
+                const int rb = kindRank(b.kind);
+                if (ra != rb) {
+                    return ra < rb;
+                }
+                return a.name < b.name;
+            });
+    }
+
     void SyncScannerSnapshots() {
         const uint64_t devGen = scanner_.Generation();
         if (devGen != lastDeviceGen_) {
@@ -1599,6 +1992,12 @@ private:
                 if (d.category == hdm::DeviceCategory::Peripheral) ++peripheralDevicesCount_;
             }
             deviceViewDirty_ = true;
+
+            if (baselineEntries_.empty() && !devicesCache_.empty()) {
+                CaptureCurrentAsBaseline(false);
+            } else {
+                RebuildSnapshotDiff();
+            }
 
             // Automatically refresh gaming runtimes / peripheral software when device list updates.
             if (!componentsScanner_.IsScanning() && !componentsScanner_.IsInstalling()) {
@@ -5145,6 +5544,38 @@ private:
             diagSectionIndex_ = 3;
         }
 
+        if (lastSnapshotLang_ != hdm::GetLang() &&
+            (!baselineEntries_.empty() || !devicesCache_.empty())) {
+            RebuildSnapshotDiff();
+        }
+        char snapPill[96];
+        if (snapshotChangedCount_ > 0) {
+            std::snprintf(
+                snapPill,
+                sizeof(snapPill),
+                hdm::Tr(
+                    "Снимок До/После (%zu изм.)###SnapPill",
+                    "Знімок До/Після (%zu зм.)###SnapPill",
+                    "Before / After (%zu chg.)###SnapPill"),
+                snapshotChangedCount_);
+        } else {
+            std::snprintf(
+                snapPill,
+                sizeof(snapPill),
+                "%s",
+                hdm::Tr(
+                    "Снимок До/После (0)###SnapPill",
+                    "Знімок До/Після (0)###SnapPill",
+                    "Before / After (0)###SnapPill"));
+        }
+        SameLineWrapIfNeeded(CalcSubSectionTabWidth(hdm::Tr(
+            "Снимок До/После (99 изм.)",
+            "Знімок До/Після (99 зм.)",
+            "Before / After (99 chg.)")));
+        if (RenderSubSectionHeaderTab(snapPill, diagSectionIndex_ == 4)) {
+            diagSectionIndex_ = 4;
+        }
+
         ImGui::Separator();
 
         const float footerPadY = std::round(7.0f * uiScale);
@@ -5381,7 +5812,7 @@ private:
                 }
                 ImGui::EndTable();
             }
-        } else {
+        } else if (diagSectionIndex_ == 3) {
             const float instW = CalcButtonWidth(hdm::Tr("Установить", "Встановити", "Install")) + 8.0f * uiScale;
             const float catW = CalcButtonWidth(hdm::Tr("Каталог", "Каталог", "Catalog")) + 8.0f * uiScale;
             const float actionColW = instW + style.ItemSpacing.x + catW + style.CellPadding.x * 2.0f + 4.0f;
@@ -5496,6 +5927,133 @@ private:
                 }
                 ImGui::EndTable();
             }
+        } else {
+            if (ImGui::BeginTable("##DiagSnapshotTable", 5, kDiagTableFlags, ImVec2(0.0f, tableH))) {
+                ImGui::TableSetupScrollFreeze(0, 1);
+                ImGui::TableSetupColumn(
+                    hdm::Tr("Изменение", "Зміна", "Change"),
+                    ImGuiTableColumnFlags_WidthStretch,
+                    0.95f);
+                ImGui::TableSetupColumn(
+                    hdm::Tr("Устройство", "Пристрій", "Device"),
+                    ImGuiTableColumnFlags_WidthStretch,
+                    1.35f);
+                ImGui::TableSetupColumn(
+                    hdm::Tr("Класс", "Клас", "Class"),
+                    ImGuiTableColumnFlags_WidthStretch,
+                    0.65f);
+                ImGui::TableSetupColumn(
+                    hdm::Tr("Было (До снимка)", "Було (До знімка)", "Before (Baseline)"),
+                    ImGuiTableColumnFlags_WidthStretch,
+                    1.30f);
+                ImGui::TableSetupColumn(
+                    hdm::Tr("Стало (Сейчас)", "Стало (Зараз)", "After (Current)"),
+                    ImGuiTableColumnFlags_WidthStretch,
+                    1.30f);
+                RenderTableHeadersRow();
+
+                if (!snapShowAll_ && snapshotChangedCount_ == 0) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0);
+                    RenderStatusBadge(
+                        ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
+                        hdm::Tr("Без изменений", "Без змін", "No changes"),
+                        true);
+                    ImGui::TableSetColumnIndex(1);
+                    const std::string noDiffMsg =
+                        baselineTimestamp_.empty()
+                            ? std::string(hdm::Tr(
+                                  "Базовый снимок будет создан после завершения сканирования.",
+                                  "Базовий знімок буде створено після завершення сканування.",
+                                  "Baseline snapshot will be created when scan completes."))
+                            : (std::string(hdm::Tr(
+                                   "Версии драйверов и статусы устройств не изменились со снимка ",
+                                   "Версії драйверів і статуси пристроїв не змінилися зі знімка ",
+                                   "Driver versions and device statuses have not changed since snapshot ")) +
+                               baselineTimestamp_ + ".");
+                    RenderCellText(noDiffMsg, true, true);
+                } else {
+                    std::vector<size_t> shownIndices;
+                    shownIndices.reserve(snapshotDiffRows_.size());
+                    for (size_t i = 0; i < snapshotDiffRows_.size(); ++i) {
+                        if (snapShowAll_ ||
+                            snapshotDiffRows_[i].kind != SnapshotDiffKind::Unchanged) {
+                            shownIndices.push_back(i);
+                        }
+                    }
+
+                    ImGuiListClipper clipper;
+                    clipper.Begin(static_cast<int>(shownIndices.size()));
+                    while (clipper.Step()) {
+                        for (int r = clipper.DisplayStart; r < clipper.DisplayEnd; ++r) {
+                            const size_t idx = shownIndices[static_cast<size_t>(r)];
+                            const auto& row = snapshotDiffRows_[idx];
+                            ImGui::TableNextRow();
+                            ImGui::PushID(static_cast<int>(idx));
+
+                            ImGui::TableSetColumnIndex(0);
+                            ImVec4 col(0.58f, 0.68f, 0.86f, 1.00f);
+                            const char* badgeTxt = hdm::Tr("Без изменений", "Без змін", "Unchanged");
+                            switch (row.kind) {
+                            case SnapshotDiffKind::DriverUpdated:
+                                col = ImVec4(0.38f, 0.68f, 0.98f, 1.00f);
+                                badgeTxt = hdm::Tr("Обновлён драйвер", "Оновлено драйвер", "Driver Updated");
+                                break;
+                            case SnapshotDiffKind::IssueFixed:
+                                col = ImVec4(0.20f, 0.83f, 0.60f, 1.00f);
+                                badgeTxt = hdm::Tr("Исправлено", "Виправлено", "Issue Fixed");
+                                break;
+                            case SnapshotDiffKind::NewIssue:
+                                col = ImVec4(0.97f, 0.44f, 0.44f, 1.00f);
+                                badgeTxt = hdm::Tr("Новая ошибка", "Нова помилка", "New Issue");
+                                break;
+                            case SnapshotDiffKind::DeviceAdded:
+                                col = ImVec4(0.26f, 0.82f, 0.92f, 1.00f);
+                                badgeTxt = hdm::Tr("Добавлено", "Додано", "Added");
+                                break;
+                            case SnapshotDiffKind::DeviceRemoved:
+                                col = ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
+                                badgeTxt = hdm::Tr("Удалено", "Видалено", "Removed");
+                                break;
+                            case SnapshotDiffKind::Unchanged:
+                            default:
+                                break;
+                            }
+                            RenderStatusBadge(col, badgeTxt, true);
+
+                            ImGui::TableSetColumnIndex(1);
+                            if (RenderCellText(hdm::TrDyn(row.name), false, true) &&
+                                isAppForeground &&
+                                ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                                ImGui::SetTooltip("%s", hdm::TrDyn(row.name).c_str());
+                            }
+
+                            ImGui::TableSetColumnIndex(2);
+                            RenderCellText(row.deviceClass, row.deviceClass.empty(), true);
+
+                            ImGui::TableSetColumnIndex(3);
+                            if (RenderCellText(row.beforeSummary, true, true) &&
+                                isAppForeground &&
+                                ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                                ImGui::SetTooltip("%s", row.beforeSummary.c_str());
+                            }
+
+                            ImGui::TableSetColumnIndex(4);
+                            if (RenderCellText(
+                                    row.afterSummary,
+                                    row.kind == SnapshotDiffKind::DeviceRemoved,
+                                    true) &&
+                                isAppForeground &&
+                                ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+                                ImGui::SetTooltip("%s", row.afterSummary.c_str());
+                            }
+
+                            ImGui::PopID();
+                        }
+                    }
+                }
+                ImGui::EndTable();
+            }
         }
 
         // Bottom Maintenance Dock (bordered card footer aligned symmetrically)
@@ -5602,6 +6160,79 @@ private:
                 ImGui::SameLine(winRight - metaW);
                 ImGui::AlignTextToFramePadding();
                 ImGui::TextDisabled("%s", srMeta);
+            }
+        } else if (diagSectionIndex_ == 4) {
+            ImGui::BeginDisabled(devicesCache_.empty());
+            if (ImGui::Button(hdm::Tr(
+                    "Обновить снимок «До»###SnapSaveBtn",
+                    "Оновити знімок «До»###SnapSaveBtn",
+                    "Capture New 'Before' Baseline###SnapSaveBtn"))) {
+                CaptureCurrentAsBaseline(true);
+            }
+            ImGui::EndDisabled();
+
+            char chgLbl[64], allLbl[64];
+            std::snprintf(
+                chgLbl,
+                sizeof(chgLbl),
+                hdm::Tr("Изменения (%zu)###SnapFiltChg", "Зміни (%zu)###SnapFiltChg", "Changes (%zu)###SnapFiltChg"),
+                snapshotChangedCount_);
+            std::snprintf(
+                allLbl,
+                sizeof(allLbl),
+                hdm::Tr("Все (%zu)###SnapFiltAll", "Усі (%zu)###SnapFiltAll", "All (%zu)###SnapFiltAll"),
+                snapshotDiffRows_.size());
+            ImGui::SameLine();
+            if (RenderPillButton(chgLbl, !snapShowAll_)) {
+                snapShowAll_ = false;
+            }
+            ImGui::SameLine();
+            if (RenderPillButton(allLbl, snapShowAll_)) {
+                snapShowAll_ = true;
+            }
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(snapshotChangedCount_ == 0);
+            if (RenderSecondaryButton(hdm::Tr(
+                    "Копировать изменения###SnapCopyBtn",
+                    "Копіювати зміни###SnapCopyBtn",
+                    "Copy Changes###SnapCopyBtn"))) {
+                std::ostringstream oss;
+                oss << "## DriverLoom Before / After (" << baselineTimestamp_ << ")\n";
+                for (const auto& r : snapshotDiffRows_) {
+                    if (r.kind == SnapshotDiffKind::Unchanged) {
+                        continue;
+                    }
+                    oss << "- **" << r.name << "** (" << r.deviceClass << "): `"
+                        << r.beforeSummary << "` -> `" << r.afterSummary << "`\n";
+                }
+                ImGui::SetClipboardText(oss.str().c_str());
+                logBuffer_.Push(
+                    hdm::LogLevel::Success,
+                    hdm::Tr(
+                        "Список изменений «До / После» скопирован в буфер обмена.",
+                        "Список змін «До / Після» скопійовано до буфера обміну.",
+                        "Before / After changelog copied to clipboard."));
+            }
+            ImGui::EndDisabled();
+
+            char baseMeta[128];
+            std::snprintf(
+                baseMeta,
+                sizeof(baseMeta),
+                hdm::Tr(
+                    "Снимок «До»: %s (%zu устр.)",
+                    "Знімок «До»: %s (%zu пристр.)",
+                    "Baseline: %s (%zu dev.)"),
+                baselineTimestamp_.empty() ? "—" : baselineTimestamp_.c_str(),
+                baselineEntries_.size());
+            const float metaW = ImGui::CalcTextSize(baseMeta).x;
+            const float winRight = ImGui::GetWindowContentRegionMax().x;
+            const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+            if (winRight - metaW > lastEnd + 16.0f) {
+                ImGui::SameLine(winRight - metaW);
+                ImGui::AlignTextToFramePadding();
+                ImGui::TextDisabled("%s", baseMeta);
             }
         } else {
             ImGui::AlignTextToFramePadding();
@@ -5800,6 +6431,15 @@ private:
     hdm::SystemDiagnosticsSnapshot diagCache_;
     uint64_t lastDiagGen_{0};
     int diagSectionIndex_{0};
+
+    // Driver Baseline ("Before / After") snapshot & diff state
+    std::string baselineTimestamp_;
+    std::vector<DriverBaselineEntry> baselineEntries_;
+    std::vector<DriverSnapshotDiffRow> snapshotDiffRows_;
+    size_t snapshotChangedCount_{0};
+    [[maybe_unused]] bool snapshotLoadedFromReg_{false};
+    bool snapShowAll_{false};
+    hdm::Lang lastSnapshotLang_{hdm::Lang::Ru};
 
     // Cached Devices UI state (zero per-frame filtering/sorting allocations)
     std::vector<hdm::DeviceInfo> devicesCache_;
