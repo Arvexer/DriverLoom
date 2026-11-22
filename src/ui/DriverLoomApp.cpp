@@ -1366,15 +1366,15 @@ void DriverLoomApp::RenderAboutModal() {
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
-    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
-    ImGui::SetNextWindowSize(
-        ImVec2(std::min(580.0f * uiScale, vp->WorkSize.x * 0.92f), 0.0f),
-        ImGuiCond_Appearing);
+    const float modalW = std::min(580.0f * uiScale, vp->WorkSize.x * 0.92f);
+    const float maxModalH = std::max(260.0f * uiScale, vp->WorkSize.y * 0.90f);
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(modalW, 0.0f), ImVec2(modalW, maxModalH));
 
     if (!ImGui::BeginPopupModal(
             modalTitle,
             &aboutModalOpen_,
-            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings)) {
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
         return;
     }
 
