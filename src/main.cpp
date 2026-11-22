@@ -392,19 +392,19 @@ void RenderSingleFrame(
             if (phase == 0) {
                 switch (viewIdx) {
                 case 0:
-                    g_appInstance->ConfigureCaptureState(0, 0, 0, false, false, -1);
+                    g_appInstance->ConfigureCaptureState(0, 0, 0, true, false, -1);
                     break;
                 case 1:
-                    g_appInstance->ConfigureCaptureState(1, 0, 0, false, false, -1);
+                    g_appInstance->ConfigureCaptureState(1, 0, 0, true, false, -1);
                     break;
                 case 2:
-                    g_appInstance->ConfigureCaptureState(2, 0, 0, false, false, -1);
+                    g_appInstance->ConfigureCaptureState(2, 0, 0, true, false, -1);
                     break;
                 case 3:
-                    g_appInstance->ConfigureCaptureState(3, 0, 0, false, false, 0);
+                    g_appInstance->ConfigureCaptureState(3, 0, 0, true, false, 0);
                     break;
                 case 4:
-                    g_appInstance->ConfigureCaptureState(4, 0, 0, false, false, -1);
+                    g_appInstance->ConfigureCaptureState(4, 0, 0, true, false, -1);
                     break;
                 case 5:
                     g_appInstance->ConfigureCaptureState(0, 0, 0, false, true, -1);
