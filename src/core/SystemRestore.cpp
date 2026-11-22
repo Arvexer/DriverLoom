@@ -108,6 +108,27 @@ bool SystemRestore::CreateRestorePointSync(
         onLog(LogLevel::Info, "Создание точки восстановления системы: \"" + description + "\"...");
     }
 
+    using SRSetRestorePointWFn = BOOL(WINAPI*)(PRESTOREPOINTINFOW, PSTATEMGRSTATUS);
+    ModuleGuard srclient(
+        LoadLibraryExW(L"srclient.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
+    SRSetRestorePointWFn srSetRestorePointW = nullptr;
+    if (srclient) {
+        srSetRestorePointW = reinterpret_cast<SRSetRestorePointWFn>(
+            reinterpret_cast<void*>(GetProcAddress(srclient.Get(), "SRSetRestorePointW")));
+    }
+    if (srSetRestorePointW == nullptr) {
+        const std::string errMsg =
+            "Не удалось загрузить SRSetRestorePointW из srclient.dll: " +
+            FormatWin32Error(GetLastError());
+        if (onLog) {
+            onLog(LogLevel::Error, errMsg);
+        }
+        if (outMessage != nullptr) {
+            *outMessage = errMsg;
+        }
+        return false;
+    }
+
     RESTOREPOINTINFOW rpInfo{};
     rpInfo.dwEventType = BEGIN_SYSTEM_CHANGE;
     rpInfo.dwRestorePtType = DEVICE_DRIVER_INSTALL;
@@ -121,7 +142,7 @@ bool SystemRestore::CreateRestorePointSync(
     rpInfo.szDescription[wDesc.size()] = L'\0';
 
     STATEMGRSTATUS smgrStatus{};
-    if (!SRSetRestorePointW(&rpInfo, &smgrStatus)) {
+    if (!srSetRestorePointW(&rpInfo, &smgrStatus)) {
         const DWORD err = smgrStatus.nStatus != 0 ? smgrStatus.nStatus : GetLastError();
         std::string errMsg;
         if (err == ERROR_SERVICE_DISABLED) {
@@ -142,7 +163,7 @@ bool SystemRestore::CreateRestorePointSync(
     const INT64 seqNum = smgrStatus.llSequenceNumber;
     rpInfo.dwEventType = END_SYSTEM_CHANGE;
     rpInfo.llSequenceNumber = seqNum;
-    if (!SRSetRestorePointW(&rpInfo, &smgrStatus)) {
+    if (!srSetRestorePointW(&rpInfo, &smgrStatus)) {
         const DWORD err = smgrStatus.nStatus != 0 ? smgrStatus.nStatus : GetLastError();
         if (onLog) {
             onLog(LogLevel::Warning,

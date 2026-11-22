@@ -29,7 +29,7 @@
 
 namespace hdm {
 
-inline constexpr const char* kAppVersion = "1.1.0";
+inline constexpr const char* kAppVersion = "1.1.1";
 
 inline std::wstring Utf8ToWide(std::string_view utf8) {
     if (utf8.empty()) {
@@ -141,7 +141,40 @@ inline std::string FormatWin32Error(DWORD errCode) {
     char codeBuf[32];
     std::snprintf(codeBuf, sizeof(codeBuf), "0x%08lX", static_cast<unsigned long>(errCode));
     if (msg.empty()) {
-        return std::string("Код ошибки ") + codeBuf;
+        switch (errCode) {
+        case 0xE000023Du: // ERROR_INF_IN_USE_BY_DEVICES
+            msg = Tr(
+                "Пакет используется устройством или подсистемой Windows (пропущен для безопасности)",
+                "Пакет використовується пристроєм або підсистемою Windows (пропущено для безпеки)",
+                "Package is in use by a device or Windows subsystem (skipped for safety)");
+            break;
+        case 0xE000022Fu: // ERROR_NO_CATALOG_FOR_OEM_INF
+            msg = Tr(
+                "Отсутствует цифровой каталог подписи (.cat) для INF-пакета",
+                "Відсутній цифровий каталог підпису (.cat) для INF-пакета",
+                "Missing digital signature catalog (.cat) for INF package");
+            break;
+        case 0xE0000247u: // ERROR_AUTHENTICODE_TRUST_NOT_ESTABLISHED
+            msg = Tr(
+                "Не удалось подтвердить цифровую подпись драйвера",
+                "Не вдалося підтвердити цифровий підпис драйвера",
+                "Failed to verify driver digital signature");
+            break;
+        case 0xE0000243u: // ERROR_SIGNATURE_OSATTRIBUTE_MISMATCH
+            msg = Tr(
+                "Цифровая подпись драйвера не соответствует версии Windows",
+                "Цифровий підпис драйвера не відповідає версії Windows",
+                "Driver signature does not match this Windows version");
+            break;
+        case 0xE0000235u: // ERROR_IN_WOW64
+            msg = Tr(
+                "Несовпадение архитектуры (требуется 64-битный процесс)",
+                "Невідповідність архітектури (потрібен 64-бітний процес)",
+                "Architecture mismatch (64-bit process required)");
+            break;
+        default:
+            return std::string("Код ошибки ") + codeBuf;
+        }
     }
     return msg + " (" + codeBuf + ")";
 }

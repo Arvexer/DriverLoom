@@ -690,6 +690,14 @@ DriverStoreSnapshot LocalDriverInstaller::ScanDriverStoreSynchronously(
             pkg.inUse = true;
             pkg.activeDeviceName = devIt->second;
             ++snap.activeCount;
+        } else if (ToLowerAscii(pkg.className) == "printer" &&
+                   ContainsCaseInsensitive(pkg.provider, "Microsoft") &&
+                   ToLowerAscii(pkg.originalInfName).rfind("prnms", 0) == 0) {
+            // Built-in Microsoft Print Subsystem INFs (e.g. Print to PDF / XPS) bind to print queues,
+            // not standard PnP device nodes returned by SetupDiGetClassDevsW.
+            pkg.inUse = true;
+            pkg.activeDeviceName = "Системный драйвер печати Windows";
+            ++snap.activeCount;
         }
 
         snap.totalStoreBytes += pkg.sizeBytes;
@@ -1033,8 +1041,13 @@ bool LocalDriverInstaller::RemoveDriverStorePackagesSync(
             const DWORD err = GetLastError();
             ++failed;
             if (onLog) {
-                onLog(LogLevel::Error,
-                      "Не удалось удалить " + name + ": " + FormatWin32Error(err));
+                if (err == 0xE000023Du) { // ERROR_INF_IN_USE_BY_DEVICES
+                    onLog(LogLevel::Warning,
+                          "Пакет " + name + " пропущен: используется системой или устройством (0xE000023D).");
+                } else {
+                    onLog(LogLevel::Error,
+                          "Не удалось удалить " + name + ": " + FormatWin32Error(err));
+                }
             }
         }
     }

@@ -1,0 +1,101 @@
+name: Build Windows x64 (MSVC)
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build DriverLoom (MSVC x64 /MT + CFG)
+    runs-on: windows-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Configure CMake (MSVC x64)
+        shell: pwsh
+        run: cmake -B build -A x64
+
+      - name: Build Release
+        shell: pwsh
+        run: cmake --build build --config Release --target DriverLoom --parallel
+
+      - name: Verify PE hardening flags & SHA-256
+        shell: pwsh
+        run: |
+          $exe = "build/Release/DriverLoom.exe"
+          if (-not (Test-Path $exe)) { throw "Missing $exe" }
+          $bytes = [IO.File]::ReadAllBytes($exe)
+          $pe = [BitConverter]::ToInt32($bytes, 0x3C)
+          $dllChar = [BitConverter]::ToUInt16($bytes, $pe + 24 + 70)
+          $guardCf = (($dllChar -band 0x4000) -ne 0)
+          $dynBase = (($dllChar -band 0x40) -ne 0)
+          $nxCompat = (($dllChar -band 0x100) -ne 0)
+          $highEntropy = (($dllChar -band 0x20) -ne 0)
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
+          $size = (Get-Item $exe).Length
+          Write-Host "Size: $size bytes"
+          Write-Host "SHA256: $hash"
+          Write-Host "DllCharacteristics: 0x$($dllChar.ToString('X4')) (HIGH_ENTROPY_VA=$highEntropy, DYNAMIC_BASE=$dynBase, NX_COMPAT=$nxCompat, GUARD_CF=$guardCf)"
+          if (-not $guardCf) { throw "Control Flow Guard (GUARD_CF) is not enabled!" }
+
+      - name: Upload DriverLoom.exe artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DriverLoom-windows-x64
+          path: build/Release/DriverLoom.exe
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Attach MSVC binary to GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download MSVC artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: DriverLoom-windows-x64
+
+      - name: Publish or update GitHub Release asset
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          $exe = "DriverLoom.exe"
+          if (-not (Test-Path $exe)) { throw "Missing downloaded $exe" }
+          $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $rel = $env:TAG_NAME
+
+          $null = gh release view $rel 2>&1
+          if ($LASTEXITCODE -eq 0) {
+            Write-Host "Release $rel already exists — uploading MSVC binary (--clobber)..."
+            gh release upload $rel "$exe#DriverLoom.exe" --clobber
+            if ($LASTEXITCODE -ne 0) { throw "gh release upload failed" }
+          } else {
+            Write-Host "Creating Release $rel with MSVC binary..."
+            $notes = @(
+              "## DriverLoom $rel"
+              ""
+              'Built reproducibly via GitHub Actions (**MSVC x64**, static CRT `/MT`, Control Flow Guard `/guard:cf` + `/CETCOMPAT`).'
+              ""
+              "### Checksum (SHA-256)"
+              '```text'
+              "$hash *DriverLoom.exe"
+              '```'
+            ) -join "`n"
+            $notesFile = Join-Path $env:RUNNER_TEMP "release_notes.md"
+            [IO.File]::WriteAllText($notesFile, $notes, (New-Object System.Text.UTF8Encoding($false)))
+            gh release create $rel "$exe#DriverLoom.exe" --title "DriverLoom $rel" --notes-file $notesFile --verify-tag
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+          }

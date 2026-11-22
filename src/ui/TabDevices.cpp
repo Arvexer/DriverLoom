@@ -397,6 +397,13 @@ void DriverLoomApp::RenderDevicesTab() {
                         if (ImGui::MenuItem(hdm::Tr("Удалить устройство (PnP)", "Видалити пристрій (PnP)", "Uninstall device (PnP)"), nullptr, false, canControl)) {
                             triggerAction(hdm::DeviceAction::UninstallDevice);
                         }
+                        if (ImGui::MenuItem(
+                                hdm::Tr("Свойства устройства (Windows)", "Властивості пристрою (Windows)", "Device Properties (Windows)"),
+                                nullptr,
+                                false,
+                                !dev.instanceId.empty())) {
+                            scanner_.OpenDevicePropertiesAsync(dev.instanceId, MakeLogger());
+                        }
                         if (ImGui::MenuItem(hdm::Tr("Диспетчер устройств Windows", "Диспетчер пристроїв Windows", "Windows Device Manager"))) {
                             ShellExecuteW(nullptr, L"open", L"devmgmt.msc", nullptr, nullptr, SW_SHOWNORMAL);
                         }
@@ -657,6 +664,13 @@ void DriverLoomApp::RenderDevicesTab() {
             if (RenderSecondaryButton(hdm::Tr("HWID###DevCpHw", "HWID###DevCpHw", "Copy HWID###DevCpHw"))) {
                 ImGui::SetClipboardText(selectedDev->hardwareId.c_str());
                 logBuffer_.Push(hdm::LogLevel::Info, std::string("Copied Hardware ID: ") + selectedDev->hardwareId);
+            }
+            ImGui::EndDisabled();
+
+            ImGui::SameLine();
+            ImGui::BeginDisabled(selectedDev->instanceId.empty());
+            if (RenderSecondaryButton(hdm::Tr("Свойства###DevProp", "Властивості###DevProp", "Properties###DevProp"))) {
+                scanner_.OpenDevicePropertiesAsync(selectedDev->instanceId, MakeLogger());
             }
             ImGui::EndDisabled();
 

@@ -295,6 +295,9 @@ inline void ReplaceAllInPlace(std::string& s, std::string_view from, std::string
         {"ПО для микрофонов Wave, контроллеров Stream Deck и карт захвата Elgato: микширование звука и профили сцен.",
          "ПЗ для мікрофонів Wave, контролерів Stream Deck і карт захоплення Elgato: мікшування звуку та профілі сцен.",
          "Elgato software for Wave microphones, Stream Deck controllers, and capture cards: audio mixing and scene profiles."},
+        {"Системный драйвер печати Windows",
+         "Системний драйвер друку Windows",
+         "Windows Print Subsystem"},
 
         // Phase messages
         {"Анализ библиотек Windows, мониторов и периферии...",
@@ -488,6 +491,9 @@ inline void ReplaceAllInPlace(std::string& s, std::string_view from, std::string
         {"Установлен драйвер ", "Встановлено драйвер ", "Installed driver "},
         {"Найдено обновлений: ", "Знайдено оновлень: ", "Updates found: "},
         {"Включение службы ", "Увімкнення служби ", "Enabling service "},
+        {" пропущен: используется системой или устройством ",
+         " пропущено: використовується системою або пристроєм ",
+         " skipped: in use by system or device "},
 
         // Monitored service display names & purposes
         {"Центр обновления Windows", "Служба Windows Update", "Windows Update Service"},

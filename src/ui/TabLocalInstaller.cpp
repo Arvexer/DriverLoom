@@ -414,19 +414,20 @@ void DriverLoomApp::RenderDriverStoreSection() {
             RenderCellText(pkg.oemInfName, false, true);
 
             ImGui::TableSetColumnIndex(3);
+            const std::string activeDevShown = hdm::TrDyn(pkg.activeDeviceName);
             const std::string title =
-                pkg.activeDeviceName.empty()
+                activeDevShown.empty()
                     ? pkg.originalInfName
-                    : (pkg.originalInfName + " — " + pkg.activeDeviceName);
+                    : (pkg.originalInfName + " — " + activeDevShown);
             RenderCellText(title, false, true);
             if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                 ImGui::BeginTooltip();
                 ImGui::PushTextWrapPos(460.0f * uiScale);
                 ImGui::TextColored(AccentTextColor(), "%s (%s)", pkg.originalInfName.c_str(), pkg.oemInfName.c_str());
-                if (!pkg.activeDeviceName.empty()) {
+                if (!activeDevShown.empty()) {
                     ImGui::Text(
                         hdm::Tr("Устройство: %s", "Пристрій: %s", "Device: %s"),
-                        pkg.activeDeviceName.c_str());
+                        activeDevShown.c_str());
                 }
                 ImGui::TextDisabled(
                     hdm::Tr(

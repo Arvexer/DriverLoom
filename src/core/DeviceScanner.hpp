@@ -5,6 +5,7 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -82,6 +83,8 @@ public:
         LogCallback onLog,
         ActionCallback onComplete = nullptr);
 
+    void OpenDevicePropertiesAsync(const std::string& instanceId, LogCallback onLog = nullptr);
+
     [[nodiscard]] bool IsScanning() const noexcept { return scanning_.load(); }
     [[nodiscard]] bool IsBusy() const noexcept { return scanning_.load() || runningAction_.load(); }
     [[nodiscard]] uint64_t Generation() const noexcept { return generation_.load(); }
@@ -105,6 +108,12 @@ public:
     static bool ParseDeviceActionCliVerb(const std::string& verb, DeviceAction& outAction);
 
 private:
+    struct PropDialogThread {
+        std::thread thread;
+        std::atomic<unsigned long> tid{0};
+        std::atomic<bool> done{false};
+    };
+
     std::atomic<bool> scanning_{false};
     std::atomic<bool> runningAction_{false};
     std::atomic<bool> stopRequested_{false};
@@ -114,6 +123,7 @@ private:
     std::vector<DeviceInfo> devices_;
     std::thread worker_;
     std::thread actionWorker_;
+    std::vector<std::unique_ptr<PropDialogThread>> propThreads_;
 };
 
 } // namespace hdm

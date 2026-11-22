@@ -6,7 +6,7 @@ endif()
 
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 
-project(DriverLoom VERSION 1.1.0 LANGUAGES CXX RC)
+project(DriverLoom VERSION 1.1.1 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -43,7 +43,7 @@ target_compile_definitions(imgui_lib PUBLIC
 )
 
 if(MSVC)
-    target_compile_options(imgui_lib PRIVATE /utf-8 /W3)
+    target_compile_options(imgui_lib PRIVATE /utf-8 /W3 /guard:cf)
 elseif(MINGW)
     target_compile_options(imgui_lib PRIVATE -finput-charset=UTF-8 -fexec-charset=UTF-8)
 endif()
@@ -91,7 +91,6 @@ target_link_libraries(DriverLoom PRIVATE
     newdev
     ole32
     oleaut32
-    srclient
     cfgmgr32
     winhttp
     wintrust
@@ -104,8 +103,16 @@ target_link_libraries(DriverLoom PRIVATE
 )
 
 if(MSVC)
-    target_compile_options(DriverLoom PRIVATE /utf-8 /W4 /permissive-)
-    target_link_options(DriverLoom PRIVATE /MANIFEST:NO)
+    target_compile_options(DriverLoom PRIVATE /utf-8 /W4 /permissive- /guard:cf)
+    target_link_libraries(DriverLoom PRIVATE wuguid)
+    target_link_options(DriverLoom PRIVATE
+        /MANIFEST:NO
+        /GUARD:CF
+        /DYNAMICBASE
+        /NXCOMPAT
+        /HIGHENTROPYVA
+        /CETCOMPAT
+    )
 elseif(MINGW)
     set(NO_DEFAULT_MANIFEST_SPECS "${CMAKE_CURRENT_BINARY_DIR}/no_default_manifest.specs")
     file(WRITE "${NO_DEFAULT_MANIFEST_SPECS}"
@@ -124,6 +131,5 @@ elseif(MINGW)
         -static
         -static-libgcc
         -static-libstdc++
-        $<$<CONFIG:Release>:-s>
     )
 endif()

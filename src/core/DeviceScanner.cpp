@@ -605,6 +605,7 @@ bool CheckDevNodeNeedsReboot(HDEVINFO devInfoSet, PSP_DEVINFO_DATA devInfoData) 
 
 using DiRollbackDriverFn = BOOL(WINAPI*)(HDEVINFO, PSP_DEVINFO_DATA, HWND, DWORD, PBOOL);
 using DiUninstallDeviceFn = BOOL(WINAPI*)(HWND, HDEVINFO, PSP_DEVINFO_DATA, DWORD, PBOOL);
+using DevicePropertiesWFn = int(WINAPI*)(HWND, LPCWSTR, LPCWSTR, BOOL);
 
 const char* DeviceActionDisplayLabel(DeviceAction action) noexcept {
     switch (action) {
@@ -624,6 +625,7 @@ DeviceScanner::~DeviceScanner() {
     stopRequested_.store(true);
     std::thread w;
     std::thread a;
+    std::vector<std::unique_ptr<PropDialogThread>> props;
     {
         std::lock_guard<std::mutex> lock(threadMutex_);
         if (worker_.joinable()) {
@@ -632,6 +634,21 @@ DeviceScanner::~DeviceScanner() {
         if (actionWorker_.joinable()) {
             a = std::move(actionWorker_);
         }
+        props = std::move(propThreads_);
+    }
+    for (const auto& entry : props) {
+        if (entry != nullptr && !entry->done.load()) {
+            const unsigned long tid = entry->tid.load();
+            if (tid != 0) {
+                EnumThreadWindows(
+                    static_cast<DWORD>(tid),
+                    [](HWND hwnd, LPARAM) -> BOOL {
+                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                        return TRUE;
+                    },
+                    0);
+            }
+        }
     }
     if (w.joinable()) {
         w.join();
@@ -639,6 +656,63 @@ DeviceScanner::~DeviceScanner() {
     if (a.joinable()) {
         a.join();
     }
+    for (auto& entry : props) {
+        if (entry != nullptr && entry->thread.joinable()) {
+            entry->thread.join();
+        }
+    }
+}
+
+void DeviceScanner::OpenDevicePropertiesAsync(const std::string& instanceId, LogCallback onLog) {
+    if (instanceId.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (stopRequested_.load()) {
+        return;
+    }
+    for (auto it = propThreads_.begin(); it != propThreads_.end();) {
+        if ((*it)->done.load()) {
+            if ((*it)->thread.joinable()) {
+                (*it)->thread.join();
+            }
+            it = propThreads_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+
+    auto entry = std::make_unique<PropDialogThread>();
+    PropDialogThread* entryPtr = entry.get();
+    entryPtr->thread = std::thread(
+        [this, entryPtr, instanceId, log = std::move(onLog)]() {
+            entryPtr->tid.store(GetCurrentThreadId());
+            CoInitGuard comInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+            ModuleGuard devmgr(
+                LoadLibraryExW(L"devmgr.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
+            DevicePropertiesWFn devicePropertiesW = nullptr;
+            if (devmgr) {
+                devicePropertiesW = reinterpret_cast<DevicePropertiesWFn>(
+                    reinterpret_cast<void*>(GetProcAddress(devmgr.Get(), "DevicePropertiesW")));
+            }
+            if (devicePropertiesW == nullptr) {
+                if (!stopRequested_.load() && log) {
+                    log(LogLevel::Error,
+                        "Не удалось загрузить DevicePropertiesW из devmgr.dll: " +
+                            FormatWin32Error(GetLastError()));
+                }
+            } else {
+                const std::wstring wInst = Utf8ToWide(instanceId);
+                const int rc = devicePropertiesW(nullptr, nullptr, wInst.c_str(), FALSE);
+                if (rc < 0 && !stopRequested_.load() && log) {
+                    log(LogLevel::Error,
+                        "Не удалось открыть свойства устройства («" + instanceId + "»): " +
+                            FormatWin32Error(GetLastError()));
+                }
+            }
+            entryPtr->done.store(true);
+        });
+    propThreads_.push_back(std::move(entry));
 }
 
 void DeviceScanner::StartScanAsync(LogCallback onLog) {
