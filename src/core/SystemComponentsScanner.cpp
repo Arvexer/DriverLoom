@@ -807,6 +807,12 @@ std::pair<std::string, std::string> ResolveMsCatalogDriverCab(const std::string&
 
         const size_t winStart = (pos > 2000) ? (pos - 2000) : 0;
         const std::string_view rowChunk(html.data() + winStart, pos - winStart);
+        if (rowChunk.find(" - Extension - ") != std::string_view::npos ||
+            rowChunk.find(" - SoftwareComponent - ") != std::string_view::npos ||
+            rowChunk.find(" - Firmware - ") != std::string_view::npos) {
+            pos = endTd + 5;
+            continue;
+        }
 
         std::string ver = TrimCopy(std::string_view(html.data() + tdClose + 1, endTd - tdClose - 1));
         if (!IsValidCatalogVersion(ver)) {
@@ -1947,11 +1953,11 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
 
         // Snapshot distinct (wingetRepoPath, preferredArch) and MS Catalog lookups needed right now.
         std::vector<std::pair<std::string, std::string>> wingetTargets;
-        std::vector<std::string> catalogKeys;
+        std::vector<std::pair<std::string, std::string>> catalogTargets;
         {
             std::lock_guard<std::mutex> lock(dataMutex_);
             std::set<std::pair<std::string, std::string>> seen;
-            std::set<std::string> seenCatalog;
+            std::set<std::pair<std::string, std::string>> seenCatalog;
             for (const auto& it : items_) {
                 if (!it.wingetRepoPath.empty() && it.id != "sw_steelseries") {
                     const std::pair<std::string, std::string> key{
@@ -1960,8 +1966,12 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                         wingetTargets.push_back(key);
                     }
                 }
-                if (!it.catalogSearchKey.empty() && seenCatalog.insert(it.catalogSearchKey).second) {
-                    catalogKeys.push_back(it.catalogSearchKey);
+                if (!it.catalogSearchKey.empty()) {
+                    const std::pair<std::string, std::string> catPair{
+                        it.catalogSearchKey, it.catalogFallbackKey};
+                    if (seenCatalog.insert(catPair).second) {
+                        catalogTargets.push_back(catPair);
+                    }
                 }
             }
         }
@@ -2219,7 +2229,7 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
 
         // Group 5: Parallel Microsoft Update Catalog WHQL lookups (LAN / Wi-Fi / BT / Audio)
         auto fCatalog = std::async(std::launch::async, [&]() {
-            const size_t n = catalogKeys.size();
+            const size_t n = catalogTargets.size();
             if (n == 0 || stopRequested_.load()) return;
             std::vector<std::pair<std::string, std::string>> resolved(n);
             const size_t kWorkers = std::min<size_t>(4, n);
@@ -2232,7 +2242,12 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                         if (stopRequested_.load()) break;
                         const size_t idx = nextIdx.fetch_add(1);
                         if (idx >= n) break;
-                        resolved[idx] = ResolveMsCatalogDriverCab(catalogKeys[idx]);
+                        auto res = ResolveMsCatalogDriverCab(catalogTargets[idx].first);
+                        if (res.second.empty() && !catalogTargets[idx].second.empty() &&
+                            !stopRequested_.load()) {
+                            res = ResolveMsCatalogDriverCab(catalogTargets[idx].second);
+                        }
+                        resolved[idx] = std::move(res);
                     }
                 });
             }
@@ -2243,7 +2258,10 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
             for (auto& item : items_) {
                 if (item.catalogSearchKey.empty()) continue;
                 for (size_t idx = 0; idx < n; ++idx) {
-                    if (catalogKeys[idx] != item.catalogSearchKey) continue;
+                    if (catalogTargets[idx].first != item.catalogSearchKey ||
+                        catalogTargets[idx].second != item.catalogFallbackKey) {
+                        continue;
+                    }
                     const auto& [catVer, cabUrl] = resolved[idx];
                     item.onlineChecked = true;
                     if (!cabUrl.empty()) {
@@ -2383,12 +2401,13 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         progress_.store(std::clamp(baseProgress + progressSpan * 0.94f, 0.0f, 0.99f));
 
         bool cabOk = false;
+        bool cabReboot = false;
         if (IsProcessElevated()) {
             const LocalInstallSummary sum = LocalDriverInstaller::InstallFromFolderSync(
                 cabExtractDir.wstring(), false, false, log);
             cabOk = (sum.failedCount == 0 && (sum.installedCount > 0 || sum.stagedOnlyCount > 0));
-            if (outRebootRequired != nullptr && sum.rebootRequired) {
-                *outRebootRequired = true;
+            if (sum.rebootRequired) {
+                cabReboot = true;
             }
         } else {
             const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_cab_inf");
@@ -2409,16 +2428,33 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
                 }
             } else {
                 cabOk = (run.exitCode == 0 || run.exitCode == 2);
-                if (outRebootRequired != nullptr && run.exitCode == 2) {
-                    *outRebootRequired = true;
+                if (run.exitCode == 2) {
+                    cabReboot = true;
                 }
             }
+        }
+        if (outRebootRequired != nullptr && cabReboot) {
+            *outRebootRequired = true;
         }
         std::filesystem::remove_all(cabExtractDir, ec);
 
         if (!stopRequested_.load()) {
             const auto freshDevs = DeviceScanner::ScanSynchronously();
             auto refreshed = ScanLocalSynchronously(freshDevs);
+            if (cabOk && !cabReboot && !item.installedVersion.empty()) {
+                for (const auto& r : refreshed) {
+                    if (r.id == item.id && r.installedVersion == item.installedVersion) {
+                        if (log) {
+                            log(LogLevel::Warning,
+                                "Пакет .cab добавлен в DriverStore, но Windows оставила текущую версию драйвера (" +
+                                    item.installedVersion +
+                                    ") — пакет не подходит к ревизии устройства или требуется перезагрузка.");
+                        }
+                        cabOk = false;
+                        break;
+                    }
+                }
+            }
             {
                 std::lock_guard<std::mutex> lock(dataMutex_);
                 MergeOnlineMetadataIntoRefreshed(refreshed, items_);
@@ -2915,13 +2951,16 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
         std::string catVer;
         std::string cabUrl;
         const std::string subsysKey = ExtractVenDevSubsysKey(fullHardwareId);
+        const bool isHdaAudio = ContainsCaseInsensitive(fullHardwareId, "HDAUDIO\\") ||
+                                ContainsCaseInsensitive(fullHardwareId, "INTELAUDIO\\");
+        const bool strictSubsysOnly = isHdaAudio && !subsysKey.empty();
         if (!subsysKey.empty() && !stopRequested_.load()) {
             std::tie(catVer, cabUrl) = ResolveMsCatalogDriverCab(subsysKey);
         }
-        if (cabUrl.empty() && !cancelInstallRequested_.load() && !stopRequested_.load()) {
+        if (!strictSubsysOnly && cabUrl.empty() && !cancelInstallRequested_.load() && !stopRequested_.load()) {
             std::tie(catVer, cabUrl) = ResolveMsCatalogDriverCab(primaryKey);
         }
-        if (cabUrl.empty() && !fullHardwareId.empty() && fullHardwareId != primaryKey &&
+        if (!strictSubsysOnly && cabUrl.empty() && !fullHardwareId.empty() && fullHardwareId != primaryKey &&
             fullHardwareId != subsysKey && !cancelInstallRequested_.load() && !stopRequested_.load()) {
             std::tie(catVer, cabUrl) = ResolveMsCatalogDriverCab(fullHardwareId);
         }
@@ -3748,6 +3787,9 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
                 continue;
             }
 
+            const std::string subsysKey = ExtractVenDevSubsysKey(d.hardwareId);
+            const bool isAudio = (idPrefix == "drv_audio_");
+
             SystemComponentItem drv;
             drv.id = itemId;
             drv.category = ComponentCategory::MonitorAndGpu;
@@ -3755,11 +3797,14 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
             drv.vendor = d.manufacturer.empty() ? "OEM / Microsoft Catalog" : d.manufacturer;
             drv.purposeDescription = purpose;
             drv.detectedHardware =
-                d.searchHardwareKey + (d.infName.empty() ? "" : (" (" + d.infName + ")"));
-            drv.catalogSearchKey = d.searchHardwareKey;
+                (!subsysKey.empty() ? subsysKey : d.searchHardwareKey) +
+                (d.infName.empty() ? "" : (" (" + d.infName + ")"));
+            drv.catalogSearchKey = !subsysKey.empty() ? subsysKey : d.searchHardwareKey;
+            drv.catalogFallbackKey =
+                (!subsysKey.empty() && !isAudio) ? d.searchHardwareKey : std::string();
             drv.officialPageUrl =
                 "https://www.catalog.update.microsoft.com/Search.aspx?q=" +
-                UrlEncodeCatalogParam(d.searchHardwareKey);
+                UrlEncodeCatalogParam(drv.catalogSearchKey);
             drv.latestVersion = "Поиск...";
             drv.hardwareConnected = true;
             drv.installed = d.hasDriver && !d.driverVersion.empty();
