@@ -8,6 +8,7 @@
 ![Language](https://img.shields.io/badge/C%2B%2B-20-00599C?style=flat-square&logo=cplusplus)
 ![UI](https://img.shields.io/badge/UI-Dear%20ImGui%20%2B%20DirectX%2011-2E7D32?style=flat-square)
 ![Binary](https://img.shields.io/badge/Build-Standalone%20Static%20EXE-1565C0?style=flat-square)
+[![MSVC CI](https://img.shields.io/github/actions/workflow/status/Arvexer/DriverLoom/build-release.yml?branch=main&style=flat-square&logo=githubactions&label=MSVC%20CI)](https://github.com/Arvexer/DriverLoom/actions/workflows/build-release.yml)
 ![Languages](https://img.shields.io/badge/L10n-RU%20%7C%20UA%20%7C%20EN-6A1B9A?style=flat-square)
 ![Publisher](https://img.shields.io/badge/Publisher-Arvexer-37474F?style=flat-square)
 
@@ -17,7 +18,7 @@
 
 ---
 
-**DriverLoom** — лёгкий автономный `.exe` (~4.0 МБ) без Electron, WebView, .NET-зависимостей и сторонних DLL. Написан на чистом **C++20** с нативными вызовами Win32 API (`SetupAPI`, `CfgMgr32`, `DXGI`, `Windows Update Agent COM`, `WinHTTP`, `WinVerifyTrust`, `SRSetRestorePointW`, `DiInstallDriverW`), аппаратным рендерингом **DirectX 11** и интерфейсом на **Dear ImGui (`docking`)**.
+**DriverLoom** — лёгкий автономный `.exe` (~2.2 МБ) без Electron, WebView, .NET-зависимостей и сторонних DLL. Написан на чистом **C++20** с нативными вызовами Win32 API (`SetupAPI`, `CfgMgr32`, `DXGI`, `Windows Update Agent COM`, `WinHTTP`, `WinVerifyTrust`, `SRSetRestorePointW`, `DiInstallDriverW`), аппаратным рендерингом **DirectX 11** и интерфейсом на **Dear ImGui (`docking`)**.
 
 ---
 
