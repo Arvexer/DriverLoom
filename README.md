@@ -26,32 +26,32 @@
 <table>
   <tr>
     <td width="50%" align="center">
-      <b>1. PnP Devices, EDID Monitors (Hz) & GPU VRAM</b><br><br>
-      <img src="docs/screenshots/01-devices.png" alt="Devices & Monitors" />
+      <b>1. Overview Dashboard &amp; Quick Recommendations</b><br><br>
+      <img src="docs/screenshots/01-overview.png" alt="Overview Dashboard" />
     </td>
     <td width="50%" align="center">
-      <b>2. Gaming Runtimes, Peripherals & GPU Software</b><br><br>
-      <img src="docs/screenshots/02-components.png" alt="Components & Peripherals" />
+      <b>2. Games, Runtimes, Drivers &amp; Optional Apps</b><br><br>
+      <img src="docs/screenshots/02-components.png" alt="Games & Software" />
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
-      <b>3. Windows Update (Drivers, Progress & Hiding)</b><br><br>
+      <b>3. Windows Update (Drivers &amp; System Updates)</b><br><br>
       <img src="docs/screenshots/03-windows-update.png" alt="Windows Update" />
     </td>
     <td width="50%" align="center">
-      <b>4. Local .inf Installer & DriverStore Management</b><br><br>
-      <img src="docs/screenshots/04-driverstore.png" alt="Local .inf & DriverStore" />
+      <b>4. PnP Devices, EDID Monitors (Hz) &amp; GPU VRAM</b><br><br>
+      <img src="docs/screenshots/04-devices.png" alt="Devices & Monitors" />
     </td>
   </tr>
   <tr>
     <td width="50%" align="center">
-      <b>5. System Diagnostics, Storage & Before/After Diff</b><br><br>
-      <img src="docs/screenshots/05-diagnostics.png" alt="System & Diagnostics" />
+      <b>5. System Protection, Board Drivers &amp; Diagnostics</b><br><br>
+      <img src="docs/screenshots/05-diagnostics.png" alt="System & Protection" />
     </td>
     <td width="50%" align="center">
-      <b>6. Light Theme & Standard (Safe) UI Mode</b><br><br>
-      <img src="docs/screenshots/06-light-theme.png" alt="Light Theme & Standard Mode" />
+      <b>6. Light Theme &amp; Simple (Safe) Mode</b><br><br>
+      <img src="docs/screenshots/06-light-theme.png" alt="Light Theme & Simple Mode" />
     </td>
   </tr>
 </table>
@@ -61,9 +61,9 @@
 ## Key Features
 
 - **Zero Runtime Dependencies**: statically linked CRT (`/MT` on MSVC, `-static -static-libgcc -static-libstdc++` on MinGW-w64) — ships as a single portable executable.
-- **Instant `EN / RU / UA` Localization**: auto-detects Windows UI language on first launch and switches live from the header dropdown.
-- **Dark & Light Themes**: toggles in one click together with the native Windows DWM title bar.
-- **Standard vs Advanced UI Modes**: keeps daily driver updates safe for casual users while unlocking full low-level PnP and `DriverStore` controls for power users.
+- **Instant `EN / RU / UA` Localization**: auto-detects Windows UI language on first launch and switches live from **Settings**.
+- **Dark & Light Themes**: toggles in one click from the sidebar footer or Settings together with the native Windows DWM title bar.
+- **Simple vs Expert UI Modes**: keeps everyday driver and runtime updates effortless for casual users while unlocking full low-level PnP and `DriverStore` controls in **Expert** mode.
 - **Persistent Preferences**: UI mode, theme, language, update auto-check, and driver baseline snapshots persist cleanly in `HKEY_CURRENT_USER\Software\DriverLoom`.
 - **Non-Blocking Multithreaded UI**: hardware enumeration, WinHTTP version checks, downloads, and WUA/INF installations run strictly in background worker threads with progress bars and cancellation support.
 
@@ -71,60 +71,66 @@
 
 ## Application Overview
 
-### Top Control Bar (Header)
-- **About & Release Checker (`ⓘ`)**: opens the *About DriverLoom* modal with author links, e-mail contact, support link, and non-blocking GitHub Releases update checking via WinHTTP.
-- **Privilege Badge**: shows `Administrator` or `Standard user` alongside a one-click `Restart as Administrator` (`UAC`) button.
-- **UI Mode Toggle**: switches between `Mode: Standard` and `Mode: Advanced`.
-- **Theme Toggle**: switches between `Theme: Dark` and `Theme: Light`.
-- **Language Selector**: live `EN — English` / `RU — Русский` / `UA — Українська` dropdown.
-- **Quick Restore Point**: creates a Windows System Restore Point in one click from anywhere in the app.
+### Left Sidebar, Settings & Bottom Status Bar
+- **Left Sidebar**: switches cleanly between **Overview**, **Games & Software**, **Windows Update**, **Devices**, **System & Protection**, **Local (.inf)** *(Expert mode only)*, and **Settings**, showing live attention badges directly on items.
+- **Sidebar Footer**:
+  - **Mode Toggle**: switches between `Simple` and `Expert`.
+  - **Theme Toggle**: switches between Dark and Light themes (with matching native Windows title bar).
+  - **About & Release Checker (`ⓘ`)**: opens the *About DriverLoom* modal with author links, e-mail contact, support link, and non-blocking GitHub Releases checking via WinHTTP.
+- **Settings Page**: language selector (`EN / RU / UA`), Dark/Light theme, `Simple / Expert` mode, quick `Restart as Administrator` (`UAC`), one-click Restore Point creation, and startup update-check preferences.
+- **Bottom Status Bar & Collapsible Log (`Ctrl+L`)**: shows the current operation status and expands a live color-coded log drawer on demand.
 
-### Standard (Safe) vs Advanced Mode
+### Simple (Safe) vs Expert Mode
 
-| Capability | Standard Mode *(Default)* | Advanced Mode |
+| Capability | Simple Mode *(Default)* | Expert Mode |
 | :--- | :---: | :---: |
+| **Overview** health dashboard & recommended 1-click updates | ✅ | ✅ |
+| Gaming runtimes, GPU/chipset drivers & optional vendor suites | ✅ *(Clean card layout)* | ✅ |
 | One-click WHQL driver install from **Microsoft Update Catalog** | ✅ | ✅ |
-| Gaming runtimes, peripheral apps & monitor utility updates | ✅ | ✅ |
+| Noise suppression (ignores disabled `Code 22` / `BTHENUM\COMx` ports) | ✅ | ⚙️ Shows all PnP details |
 | System Restore Point before driver/component installs | 🔒 Enforced ON | ⚙️ Toggleable checkbox |
-| Safe third-party driver backup export | ✅ In System & Diagnostics | ✅ In `DriverStore` |
-| `Hardware ID`, `INF`, `Instance ID` details | 🚫 Hidden for a clean UI | ✅ Full details |
-| PnP context actions (`Restart / Disable / Rollback / Uninstall`) | 🚫 Destructive actions hidden | ✅ Full access |
-| **Local (.inf)** tab & `DriverStore` package cleanup | 🚫 Hidden | ✅ Full access |
+| `Hardware ID`, `INF`, `Instance ID` & PnP actions (`Restart / Disable / Rollback`) | 🚫 Hidden for a clean UI | ✅ Full details & actions |
+| **Local (.inf)** tab, `DriverStore` cleanup, `Services` & `Before/After Diff` | 🚫 Hidden | ✅ Full access |
 | Hide / restore Windows Update items (`IUpdate::put_IsHidden`) | 🚫 Hidden | ✅ Full access |
 
 ---
 
-### Tab 1 — Devices & Monitors
-- **Native PnP Enumeration**: uses `SetupAPI` and `CfgMgr32` with color-coded health badges (`Working`, `No Driver`, `Disabled`, Win32 error codes) and a compact summary chip (`Total | Monitors | Issues`).
+### Page 1 — Overview
+- **Hero Health Card**: summarizes recommended runtime/hardware updates or confirms everything is up to date, with one-click `Install Recommended (N)`, `Rescan PC`, and `Check Windows Update`.
+- **4 Status Tiles**: live counts and quick jumps to **Games & Software**, **Windows Update**, **Devices & Monitors**, and **Protection & System**.
+- **Quick Recommendations**: lists top actionable updates and onboard driver updates without cluttering the screen with optional bloatware.
+
+### Page 2 — Games & Software
+- **Gaming & System Runtimes**: `Visual C++ Redistributable (2010–2022)`, `DirectX End-User Runtime`, `.NET Desktop Runtime 8 / 9 / 10`, `.NET Framework 4.8.1`, `Edge WebView2`, `Vulkan Runtime`, and `OpenAL`.
+- **Drivers & GPU / Chipset**: detects NVIDIA, AMD, Intel GPUs, AMD/Intel chipsets, onboard audio, LAN, Wi-Fi, and Bluetooth adapters and resolves WHQL/vendor updates.
+- **Optional Third-Party Software (`Optional Apps`)**: detects connected peripherals (mice, keyboards), motherboards (e.g., ASUS Armoury Crate), and monitor companion tools, clearly marking them **Optional** and excluding them from recommended automatic batch installs.
+- **Verified Installation**: card-based layout with `All`, `Gaming`, `Drivers & GPU`, and `Optional Apps` filters, Authenticode (`WinVerifyTrust`) checks before launch, and automatic Restore Point protection.
+
+### Page 3 — Windows Update
+- **Windows Update Agent (WUA COM API)**: welcoming scan prompt on entry, asynchronous driver and optional Windows system update discovery (`IUpdateSession`), download, and installation with live progress (`BeginDownload` / `BeginInstall`).
+- **Update Hiding** *(Expert Mode)*: hide or restore unwanted driver updates (`IUpdate::put_IsHidden`), filter `Show hidden (N)`, and guard installs with System Restore Points.
+
+### Page 4 — Devices & Monitors
+- **Native PnP Enumeration**: uses `SetupAPI` and `CfgMgr32` with color-coded health badges (`Running / OK`, `No driver`, `Disabled`, Win32 error codes) and a compact summary badge (`Total | Monitors | Attention`).
 - **Monitor Inspection (EDID + GDI)**: extracts the physical monitor model, manufacturer, diagonal screen size, and native resolution from EDID alongside the active display mode (`Resolution @ Hz`) and connected GPU.
 - **GPU Dedicated VRAM (DXGI)**: displays dedicated video memory per graphics adapter.
-- **Category Filters & Search (`Ctrl+F`)**: `All`, `Issues`, `Monitors`, `Peripherals`, `Display & Chipset`.
-- **One-Click Microsoft Update Catalog Install**: searches WHQL `.cab` packages by `Hardware ID` (`SUBSYS` first, then `VEN/DEV`), downloads via WinHTTP, verifies the Authenticode signature, extracts cleanly, and installs via `DiInstallDriverW`.
-- **Device Details Card**: displays full hardware metadata and quick actions (WHQL install, restart, driver rollback, copy IDs, and jump directly to `oem*.inf` in `DriverStore`).
+- **Filters & Instant Search (`Ctrl+F`)**: `All`, `Attention`, `Monitors`, `Peripherals`, `GPU & Chipset`.
+- **One-Click Microsoft Update Catalog Install**: searches WHQL `.cab` packages by `Hardware ID` (`SUBSYS` first, then `VEN/DEV`), verifies Authenticode signature, extracts cleanly, and installs via `DiInstallDriverW`.
+- **Device Details Card**: displays human-friendly device explanations and quick actions (and full PnP context menu + `oem*.inf` jump in Expert mode).
 
-### Tab 2 — Components & Peripherals
-- **Gaming & System Runtimes**: `Visual C++ Redistributable (2010–2022)`, `DirectX End-User Runtime`, `.NET Desktop Runtime 8 / 9 / 10`, `.NET Framework 4.8.1`, `Edge WebView2`, `Vulkan Runtime`, and `OpenAL`.
-- **Peripheral, Monitor & Chipset Software**: detects connected brands/hardware (monitors, mice, keyboards, audio devices, LAN/Wi-Fi, AMD Chipset & GPU, Intel DSA) and checks current versions locally and online.
-- **Batch & Selective Updates**: `Update All Available (N)` and `Update Selected (N)` with per-row checkboxes, Authenticode signature checks (`WinVerifyTrust`), and automatic System Restore Point creation before installation.
-
-### Tab 3 — Windows Update
-- **Windows Update Agent (WUA COM API)**: asynchronous driver and OS update discovery (`IUpdateSession`), download, and installation with live progress (`BeginDownload` / `BeginInstall`).
-- **Update Hiding** *(Advanced Mode)*: hide or restore unwanted driver updates (`IUpdate::put_IsHidden`), filter `Show hidden (N)`, and guard installs with System Restore Points.
-
-### Tab 4 — Local (.inf) *(Advanced Mode)*
-Split into two sub-sections:
-1. **Install from Folder (.inf)**: recursively scans a chosen directory for `.inf` packages and installs via native `DiInstallDriverW` (`newdev.dll`) with optional `DIIRFLAG_FORCE_INF` and Restore Point protection.
-2. **DriverStore Backup & Cleanup**: analyzes third-party `oem*.inf` packages (`Active`, `Old Duplicate`, `In Store`), filters by `.inf`/device/vendor/version, exports clean driver backups, and safely removes old duplicates.
-
-### Tab 5 — System & Diagnostics
+### Page 5 — System & Protection
 - **Motherboard & Windows Readiness Cards**: reads board model and BIOS version from `SMBIOS` (generating a vendor support link), checks pending reboot flags (`CBS / WU`), System Protection policy, and `NTFS TRIM`.
-- **Privacy-Clean PC Report Export**: saves or copies a **Markdown (`.md`)**, **TXT**, or **JSON** summary report with automatic sanitization of personal paths and usernames.
-- **5 Built-in Diagnostic Views**:
-  1. **Board Controllers**: audits GPU (`[VRAM]`), chipset, LAN, Wi-Fi, audio, and Bluetooth drivers with one-click Microsoft Update Catalog WHQL installation (or inbox Windows driver restoration when applicable).
-  2. **Services & Updates**: checks critical services (`wuauserv`, `BITS`, `TrustedInstaller`, `CryptSvc`, `PlugPlay`, `VSS`, `UsoSvc`, etc.), enables disabled services, and provides system repair shortcuts (`SFC /scannow`, `DISM CheckHealth`, `DISM RestoreHealth`).
-  3. **Restore Points**: lists recent System Restore points from the Windows Event Log with shortcuts to `rstrui.exe` and System Protection settings.
-  4. **Storage & Power**: displays `NVMe` / `SATA AHCI` controller and disk status, `NTFS TRIM` state, and a live Windows power plan switcher (`powrprof.dll`).
-  5. **Before / After Snapshot**: compares current driver versions and device health against a saved baseline (`Driver Updated`, `Issue Fixed`, `New Issue`, `Added`, `Removed`), saves a new baseline, and copies the diff summary.
+- **Driver Backup & Clean PC Report**: exports third-party drivers or saves/copies a **Markdown (`.md`)**, **TXT**, or **JSON** summary report with automatic sanitization of personal paths and usernames.
+- **Built-in Diagnostic Views**:
+  1. **Board Drivers**: audits GPU (`[VRAM]`), chipset, LAN, Wi-Fi, audio, and Bluetooth drivers with one-click Microsoft Update Catalog WHQL installation (or inbox Windows driver restoration when applicable).
+  2. **Restore Points**: lists recent System Restore points from the Windows Event Log with shortcuts to `rstrui.exe` and System Protection settings.
+  3. **Storage & Power**: displays `NVMe` / `SATA AHCI` controller and disk status, `NTFS TRIM` state, and a live Windows power plan switcher (`powrprof.dll`).
+  4. **Services & Updates** *(Expert Mode)*: audits critical services (`wuauserv`, `BITS`, `TrustedInstaller`, `CryptSvc`, `PlugPlay`, `VSS`, `UsoSvc`, etc.), enables disabled services, and runs `SFC /scannow`, `DISM CheckHealth`, and `DISM RestoreHealth`.
+  5. **Before / After Diff** *(Expert Mode)*: compares current driver versions and device health against a saved baseline (`Driver Updated`, `Issue Fixed`, `New Issue`, `Added`, `Removed`).
+
+### Page 6 — Local (.inf) *(Expert Mode)*
+1. **Install from Folder (.inf)**: recursively scans a chosen directory for `.inf` packages and installs via native `DiInstallDriverW` (`newdev.dll`) with optional `DIIRFLAG_FORCE_INF` and Restore Point protection.
+2. **DriverStore Backup & Cleanup**: analyzes third-party `oem*.inf` packages (`In Use`, `Old duplicate`, `Stored`), filters by `.inf`/device/vendor/version, exports driver backups, and safely removes old duplicates.
 
 ---
 
@@ -133,10 +139,11 @@ Split into two sub-sections:
 | Shortcut | Action |
 | :--- | :--- |
 | `F1` | Open *About DriverLoom* & update checker |
-| `F5` | Rescan / refresh the active tab |
+| `F5` | Rescan / refresh the active view |
 | `Ctrl+F` | Focus device search bar |
+| `Ctrl+L` | Expand / collapse the bottom event log drawer |
 | `Ctrl+C` | Copy `Hardware ID` or name of the selected device / WU item |
-| `Esc` | Clear selection / close details card |
+| `Esc` | Clear selection / close details card or log drawer |
 
 ---
 
@@ -145,7 +152,7 @@ Split into two sub-sections:
 - **Least Privilege (`asInvoker`)**: [`resources/app.manifest`](resources/app.manifest) avoids forced startup elevation; UAC (`ShellExecuteExW` with `"runas"`) is requested on demand only for actual driver installation, `DriverStore` cleanup, or system repair actions.
 - **Complete PE Metadata**: [`resources/version.rc`](resources/version.rc) provides full `VERSIONINFO` metadata (`DriverLoom v1.0.0.0`, publisher `Arvexer`).
 - **Authenticode Verification**: downloaded `.cab` packages and vendor installers are verified using Windows `WinVerifyTrust` before execution.
-- **Clean Native Code**: prioritizes Win32/COM APIs (`DiInstallDriverW`), uses strict RAII guards for `HDEVINFO` and COM interfaces, and uses no executable packers (no UPX or similar).
+- **Clean Native Code**: prioritizes Win32/COM APIs (`DiInstallDriverW`), uses strict RAII guards for `HDEVINFO` and COM interfaces, safely quotes elevated worker CLI arguments, and uses no executable packers (no UPX or similar).
 
 ---
 
@@ -161,19 +168,20 @@ Split into two sub-sections:
 │   ├── app.manifest                   # Win32 manifest (asInvoker, PerMonitorV2 DPI, Win10/11)
 │   └── version.rc                     # PE VERSIONINFO (DriverLoom v1.0.0.0, Arvexer)
 └── src/
-    ├── main.cpp                       # WinMain entry point, DirectX 11 swapchain, WndProc, render loop
+    ├── main.cpp                       # WinMain entry point, DX11 swapchain, logo texture, WndProc
     ├── app/
     │   └── CliWorker.hpp/.cpp         # Elevated UAC CLI worker (INF, WUA, services, DriverStore, inbox)
     ├── ui/
     │   ├── AppWidgets.hpp/.cpp        # Dark/Light themes, fonts, DWM, registry prefs & custom widgets
-    │   ├── DriverLoomApp.hpp/.cpp     # UI controller: header, About/updater, log panel, baseline diff
-    │   ├── TabDevices.cpp             # Tab 1: Devices & Monitors
-    │   ├── TabComponents.cpp          # Tab 2: Components & Peripherals
-    │   ├── TabWindowsUpdate.cpp       # Tab 3: Windows Update
-    │   ├── TabLocalInstaller.cpp      # Tab 4: Local (.inf) & DriverStore
-    │   └── TabDiagnostics.cpp         # Tab 5: System, Diagnostics, Storage/Power & Before/After
+    │   ├── DriverLoomApp.hpp/.cpp     # UI controller: sidebar, settings, status/log drawer, About/updater
+    │   ├── TabOverview.cpp            # Page 0: Overview dashboard & Quick Recommendations
+    │   ├── TabComponents.cpp          # Page 1: Games, Runtimes, Drivers & Optional Apps
+    │   ├── TabWindowsUpdate.cpp       # Page 2: Windows Update
+    │   ├── TabDevices.cpp             # Page 3: Devices & Monitors
+    │   ├── TabDiagnostics.cpp         # Page 4: System, Protection, Storage/Power & Diff
+    │   └── TabLocalInstaller.cpp      # Page 5: Local (.inf) & DriverStore
     ├── common/
-    │   ├── AppCommon.hpp              # UTF-8/UTF-16, RAII guards, logger, UAC runas, Authenticode
+    │   ├── AppCommon.hpp              # UTF-8/UTF-16, RAII guards, CLI quoting, logger, UAC runas
     │   └── Localization.hpp           # EN / RU / UA localization (static UI & dynamic logs/statuses)
     └── core/
         ├── DeviceScanner.hpp/.cpp     # PnP SetupAPI/CfgMgr32, monitor EDID, display modes, DXGI VRAM
@@ -204,7 +212,7 @@ Standalone output binary: `build/DriverLoom.exe`.
 --lang ru|uk|en
 --mode standard|advanced
 --theme dark|light
---start-tab 0..4
+--start-tab 0..6
 --diag-section 0..4
 --local-section 0..1
 --select-device-row <index>
