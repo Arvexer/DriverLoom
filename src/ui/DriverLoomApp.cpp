@@ -1904,29 +1904,31 @@ void DriverLoomApp::RenderStatusBarAndLogDrawer() {
     ImGui::Separator();
 
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
-    ImGui::BeginChild("##LogScroll", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::BeginChild("##LogScroll", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None, ImGuiWindowFlags_None);
     ImGui::PopStyleColor();
-    ImGuiListClipper clipper;
-    clipper.Begin(static_cast<int>(entries.size()));
-    while (clipper.Step()) {
-        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-            const auto& entry = entries[static_cast<size_t>(i)];
-            ImVec4 col = g_isLightTheme
-                             ? ImVec4(0.16f, 0.21f, 0.30f, 1.00f)
-                             : ImVec4(0.84f, 0.89f, 0.96f, 1.00f);
-            if (entry.level == hdm::LogLevel::Success) {
-                col = g_isLightTheme ? ImVec4(0.05f, 0.48f, 0.30f, 1.00f) : HealthyColor();
-            } else if (entry.level == hdm::LogLevel::Warning) {
-                col = WarningTextColor();
-            } else if (entry.level == hdm::LogLevel::Error) {
-                col = g_isLightTheme ? ImVec4(0.76f, 0.14f, 0.14f, 1.00f) : DangerColor();
-            }
-            const std::string msgShown = hdm::TrDyn(entry.message);
-            ImGui::TextDisabled("[%s]", entry.timestamp.c_str());
-            ImGui::SameLine(0.0f, 8.0f);
-            ImGui::TextColored(col, "%s", msgShown.c_str());
+
+    const float wrapRightX =
+        std::max(140.0f, ImGui::GetWindowContentRegionMax().x - std::round(12.0f * uiScale));
+    ImGui::PushTextWrapPos(wrapRightX);
+    for (const auto& entry : entries) {
+        ImVec4 col = g_isLightTheme
+                         ? ImVec4(0.16f, 0.21f, 0.30f, 1.00f)
+                         : ImVec4(0.84f, 0.89f, 0.96f, 1.00f);
+        if (entry.level == hdm::LogLevel::Success) {
+            col = g_isLightTheme ? ImVec4(0.05f, 0.48f, 0.30f, 1.00f) : HealthyColor();
+        } else if (entry.level == hdm::LogLevel::Warning) {
+            col = WarningTextColor();
+        } else if (entry.level == hdm::LogLevel::Error) {
+            col = g_isLightTheme ? ImVec4(0.76f, 0.14f, 0.14f, 1.00f) : DangerColor();
         }
+        const std::string msgShown = hdm::TrDyn(entry.message);
+        ImGui::TextDisabled("[%s]", entry.timestamp.c_str());
+        ImGui::SameLine(0.0f, std::round(8.0f * uiScale));
+        ImGui::BeginGroup();
+        ImGui::TextColored(col, "%s", msgShown.c_str());
+        ImGui::EndGroup();
     }
+    ImGui::PopTextWrapPos();
     if (logAutoScroll_ && wasDirty) {
         ImGui::SetScrollHereY(1.0f);
     }
