@@ -30,3 +30,8 @@ Makefile
 /.idea/
 *.user
 *.suo
+
+# Local assistant instructions & screenshot helper
+AGENTS.md
+capture_screenshots.bat
+

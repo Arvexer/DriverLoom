@@ -156,7 +156,6 @@ Split into two sub-sections:
 ├── LICENSE                            # MIT License (Arvexer)
 ├── README.md                          # Documentation (EN)
 ├── README.ru.md                       # Documentation (RU)
-├── capture_screenshots.bat            # Automated 6-screenshot PNG capture script
 ├── resources/
 │   ├── app.ico                        # Application icon
 │   ├── app.manifest                   # Win32 manifest (asInvoker, PerMonitorV2 DPI, Win10/11)
@@ -200,8 +199,6 @@ Standalone output binary: `build/DriverLoom.exe`.
 
 <details>
 <summary>CLI Arguments for Automation, UI Testing & Screenshot Capture</summary>
-
-Run [`capture_screenshots.bat`](capture_screenshots.bat) to recapture all 6 PNG screenshots in `docs/screenshots/` (`en` by default, or pass a language code such as `capture_screenshots.bat ru`).
 
 ```text
 --lang ru|uk|en

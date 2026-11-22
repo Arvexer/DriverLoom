@@ -156,7 +156,6 @@
 ├── LICENSE                            # Лицензия MIT (Arvexer)
 ├── README.md                          # Документация (EN)
 ├── README.ru.md                       # Документация (RU)
-├── capture_screenshots.bat            # Автоматическое снятие всех 6 PNG-скриншотов в docs/screenshots/
 ├── resources/
 │   ├── app.ico                        # Иконка приложения
 │   ├── app.manifest                   # Манифест (asInvoker, PerMonitorV2 DPI, Win10/11)
@@ -200,8 +199,6 @@ cmake --build build -j 8
 
 <details>
 <summary>CLI-аргументы для автоматизации, отладки интерфейса и снятия скриншотов</summary>
-
-Для автоматического переснятия всех 6 PNG-скриншотов в `docs/screenshots/` можно запустить [`capture_screenshots.bat`](capture_screenshots.bat) (по умолчанию снимает на английском, для русского используйте `capture_screenshots.bat ru`).
 
 ```text
 --lang ru|uk|en
