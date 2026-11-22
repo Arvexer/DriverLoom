@@ -109,6 +109,21 @@ void DriverLoomApp::RenderOverviewTab() {
                     "Виявлено вимкнених служб: %zu. Через це драйвери та оновлення можуть не встановлюватися.",
                     "%zu critical services are turned off. Drivers and updates may fail to install until enabled."),
                 disabledSvcs);
+        } else if (criticalDeviceErrorCount_ > 0) {
+            heroAccent = DangerColor();
+            heroIcon = AppIcon::AlertTriangle;
+            heroTitle = hdm::Tr(
+                "Обнаружены критичные ошибки драйверов",
+                "Виявлено критичні помилки драйверів",
+                "Critical driver errors detected");
+            std::snprintf(
+                heroSub,
+                sizeof(heroSub),
+                hdm::Tr(
+                    "Устройств с ошибкой драйвера: %zu. Рекомендуется открыть список устройств и установить официальный драйвер.",
+                    "Пристроїв з помилкою драйвера: %zu. Рекомендується відкрити список пристроїв і встановити офіційний драйвер.",
+                    "%zu device(s) have driver errors. Open Devices to inspect and install an official driver."),
+                criticalDeviceErrorCount_);
         } else if (!batchTargets.empty() || attnCtrls > 0 || userRelevantIssueCount_ > 0) {
             heroAccent = WarningColor();
             heroIcon = AppIcon::Updates;
@@ -210,6 +225,33 @@ void DriverLoomApp::RenderOverviewTab() {
                 NavigateTo(PageDiagnostics);
             }
             ImGui::SameLine();
+        } else if (criticalDeviceErrorCount_ > 0) {
+            if (RenderPrimaryButton(
+                    hdm::Tr("Открыть проблемные устройства###HeroFixDev", "Відкрити проблемні пристрої###HeroFixDev", "View Failing Devices###HeroFixDev"),
+                    ImVec2(0.0f, btnH))) {
+                deviceFilterMode_ = DeviceFilterMode::ProblemOnly;
+                deviceViewDirty_ = true;
+                NavigateTo(PageDevices);
+            }
+            ImGui::SameLine();
+            if (!batchTargets.empty()) {
+                char instAllLbl[96];
+                std::snprintf(
+                    instAllLbl,
+                    sizeof(instAllLbl),
+                    hdm::Tr(
+                        "Установить рекомендуемое (%zu)###HeroInstAll",
+                        "Встановити рекомендоване (%zu)###HeroInstAll",
+                        "Install Recommended (%zu)###HeroInstAll"),
+                    batchTargets.size());
+                ImGui::BeginDisabled(anyBusy);
+                if (RenderSecondaryButton(instAllLbl, ImVec2(0.0f, btnH))) {
+                    componentsScanner_.DownloadAndInstallBatchAsync(
+                        std::move(batchTargets), devicesCache_, MakeLogger(), true);
+                }
+                ImGui::EndDisabled();
+                ImGui::SameLine();
+            }
         } else if (!batchTargets.empty()) {
             char instAllLbl[96];
             std::snprintf(
@@ -238,7 +280,7 @@ void DriverLoomApp::RenderOverviewTab() {
             ImGui::SameLine();
         }
 
-        if (!batchTargets.empty() || disabledSvcs > 0) {
+        if (!batchTargets.empty() || disabledSvcs > 0 || criticalDeviceErrorCount_ > 0) {
             ImGui::BeginDisabled(anyBusy);
             if (RenderSecondaryButton(
                     hdm::Tr("Проверить снова###HeroRescan", "Перевірити знову###HeroRescan", "Rescan PC###HeroRescan"),

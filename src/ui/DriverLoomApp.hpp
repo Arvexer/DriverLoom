@@ -160,6 +160,7 @@ private:
     size_t totalDevicesCount_{0};
     size_t problemDevicesCount_{0};
     size_t userRelevantIssueCount_{0};
+    size_t criticalDeviceErrorCount_{0};
     size_t monitorDevicesCount_{0};
     size_t peripheralDevicesCount_{0};
     char deviceFilterBuf_[256]{};
@@ -213,6 +214,7 @@ private:
     bool logPanelExpanded_{false};
     bool logAutoScroll_{true};
     int pendingThemeChange_{-1}; // -1 = none, 0 = dark, 1 = light
+    TaskbarOverlayState lastTaskbarOverlay_{TaskbarOverlayState::None};
 
     // About dialog & GitHub Releases update checker
     bool openAboutPopupNextFrame_{false};

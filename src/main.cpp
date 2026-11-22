@@ -639,6 +639,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
 
+    hdm::CoInitGuard mainComInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     {
         DriverLoomApp app(hwnd, initialTab);
         app.SetInitialDiagSection(initialDiagSection);

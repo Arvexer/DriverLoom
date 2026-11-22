@@ -1,6 +1,7 @@
 #include "ui/AppWidgets.hpp"
 
 #include <shellapi.h>
+#include <shobjidl.h>
 
 #include <algorithm>
 #include <cmath>
@@ -895,6 +896,214 @@ bool RenderActionButton(const char* label, const ImVec2& size, bool primary) {
     return RenderSecondaryButton(label, size);
 }
 
+bool RenderSecondaryButtonWithIcon(
+    const char* label,
+    AppIcon icon,
+    const ImVec4& iconColor,
+    const ImVec2& size) {
+    if (label == nullptr) {
+        return false;
+    }
+    const std::string_view full(label);
+    const size_t hashPos = full.find("##");
+    const std::string_view displayPart =
+        (hashPos != std::string_view::npos) ? full.substr(0, hashPos) : full;
+    const std::string hiddenId =
+        (hashPos != std::string_view::npos) ? std::string(full.substr(hashPos))
+                                            : (std::string("##") + std::string(full));
+
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float iconSz = std::round(13.5f * uiScale);
+    const float iconGap = std::round(7.0f * uiScale);
+    const ImVec2 txtSz =
+        displayPart.empty()
+            ? ImVec2(0.0f, ImGui::GetFontSize())
+            : ImGui::CalcTextSize(displayPart.data(), displayPart.data() + displayPart.size());
+    const float contentW = iconSz + (displayPart.empty() ? 0.0f : (iconGap + txtSz.x));
+    const float autoW = style.FramePadding.x * 2.0f + contentW;
+    const float btnW = (size.x > 0.0f) ? size.x : autoW;
+    const float btnH = (size.y > 0.0f) ? size.y : ImGui::GetFrameHeight();
+
+    const bool clicked = RenderSecondaryButton(hiddenId.c_str(), ImVec2(btnW, btnH));
+    if (ImGui::IsItemVisible()) {
+        const ImVec2 rMin = ImGui::GetItemRectMin();
+        const ImVec2 rMax = ImGui::GetItemRectMax();
+        const float startX =
+            rMin.x + std::max(style.FramePadding.x, (rMax.x - rMin.x - contentW) * 0.5f);
+        const float centerY = (rMin.y + rMax.y) * 0.5f;
+
+        const float alpha = style.Alpha;
+        ImVec4 icCol = iconColor;
+        icCol.w *= alpha;
+        const ImVec4 txtCol = g_isLightTheme ? ImVec4(0.10f, 0.14f, 0.21f, alpha)
+                                             : ImVec4(0.89f, 0.93f, 0.98f, alpha);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        DrawAppIcon(
+            dl,
+            ImVec2(startX + iconSz * 0.5f, centerY),
+            iconSz,
+            icon,
+            ImGui::ColorConvertFloat4ToU32(icCol));
+        if (!displayPart.empty()) {
+            dl->AddText(
+                ImVec2(startX + iconSz + iconGap, centerY - txtSz.y * 0.5f),
+                ImGui::ColorConvertFloat4ToU32(txtCol),
+                displayPart.data(),
+                displayPart.data() + displayPart.size());
+        }
+    }
+    return clicked;
+}
+
+namespace {
+
+HICON CreateTaskbarBadgeIcon(bool critical) {
+    constexpr int kSize = 16;
+    BITMAPV5HEADER bi{};
+    bi.bV5Size = sizeof(BITMAPV5HEADER);
+    bi.bV5Width = kSize;
+    bi.bV5Height = -kSize;
+    bi.bV5Planes = 1;
+    bi.bV5BitCount = 32;
+    bi.bV5Compression = BI_BITFIELDS;
+    bi.bV5RedMask = 0x00FF0000u;
+    bi.bV5GreenMask = 0x0000FF00u;
+    bi.bV5BlueMask = 0x000000FFu;
+    bi.bV5AlphaMask = 0xFF000000u;
+
+    void* bits = nullptr;
+    HDC screenDc = GetDC(nullptr);
+    HBITMAP colorBmp = CreateDIBSection(
+        screenDc, reinterpret_cast<const BITMAPINFO*>(&bi), DIB_RGB_COLORS, &bits, nullptr, 0);
+    ReleaseDC(nullptr, screenDc);
+    if (colorBmp == nullptr || bits == nullptr) {
+        if (colorBmp != nullptr) DeleteObject(colorBmp);
+        return nullptr;
+    }
+
+    auto premulPixel = [](uint8_t r, uint8_t g, uint8_t b, float aFrac) -> uint32_t {
+        const float a = std::clamp(aFrac, 0.0f, 1.0f);
+        const auto au = static_cast<uint32_t>(std::lround(a * 255.0f));
+        const auto ru = static_cast<uint32_t>(std::lround(static_cast<float>(r) * a));
+        const auto gu = static_cast<uint32_t>(std::lround(static_cast<float>(g) * a));
+        const auto bu = static_cast<uint32_t>(std::lround(static_cast<float>(b) * a));
+        return (au << 24) | (ru << 16) | (gu << 8) | bu;
+    };
+
+    const uint8_t fillR = critical ? 239 : 245;
+    const uint8_t fillG = critical ? 68 : 158;
+    const uint8_t fillB = critical ? 68 : 11;
+
+    auto* px = static_cast<uint32_t*>(bits);
+    constexpr float cx = 7.5f;
+    constexpr float cy = 7.5f;
+    for (int y = 0; y < kSize; ++y) {
+        for (int x = 0; x < kSize; ++x) {
+            const float dx = static_cast<float>(x) - cx;
+            const float dy = static_cast<float>(y) - cy;
+            const float dist = std::sqrt(dx * dx + dy * dy);
+            uint32_t col = 0;
+            if (dist <= 7.3f) {
+                const float edgeAlpha = std::clamp(7.3f - dist, 0.0f, 1.0f);
+                if (dist > 6.1f) {
+                    // Dark translucent rim so badge stands out on both light and dark taskbars.
+                    col = premulPixel(16, 20, 28, edgeAlpha * 0.90f);
+                } else {
+                    const bool drawExclamation =
+                        critical && (x == 7 || x == 8) && ((y >= 3 && y <= 9) || (y >= 11 && y <= 12));
+                    col = drawExclamation ? premulPixel(255, 255, 255, 1.0f)
+                                          : premulPixel(fillR, fillG, fillB, 1.0f);
+                }
+            }
+            px[y * kSize + x] = col;
+        }
+    }
+
+    HBITMAP maskBmp = CreateBitmap(kSize, kSize, 1, 1, nullptr);
+    if (maskBmp == nullptr) {
+        DeleteObject(colorBmp);
+        return nullptr;
+    }
+
+    ICONINFO ii{};
+    ii.fIcon = TRUE;
+    ii.hbmMask = maskBmp;
+    ii.hbmColor = colorBmp;
+    HICON icon = CreateIconIndirect(&ii);
+    DeleteObject(colorBmp);
+    DeleteObject(maskBmp);
+    return icon;
+}
+
+struct TaskbarOverlayCache {
+    hdm::ComPtr<ITaskbarList3> taskbar;
+    bool initAttempted{false};
+    HICON attentionIcon{nullptr};
+    HICON criticalIcon{nullptr};
+    HWND lastHwnd{nullptr};
+} g_taskbarCache;
+
+} // namespace
+
+void SetTaskbarOverlayBadge(HWND hwnd, TaskbarOverlayState state) {
+    if (hwnd == nullptr) {
+        return;
+    }
+    if (!g_taskbarCache.initAttempted) {
+        g_taskbarCache.initAttempted = true;
+        if (SUCCEEDED(CoCreateInstance(
+                CLSID_TaskbarList,
+                nullptr,
+                CLSCTX_INPROC_SERVER,
+                IID_ITaskbarList3,
+                reinterpret_cast<void**>(g_taskbarCache.taskbar.Put()))) &&
+            g_taskbarCache.taskbar) {
+            if (FAILED(g_taskbarCache.taskbar->HrInit())) {
+                g_taskbarCache.taskbar.Reset();
+            }
+        }
+    }
+    if (!g_taskbarCache.taskbar) {
+        return;
+    }
+
+    g_taskbarCache.lastHwnd = hwnd;
+    HICON icon = nullptr;
+    const wchar_t* desc = nullptr;
+    if (state == TaskbarOverlayState::Critical) {
+        if (g_taskbarCache.criticalIcon == nullptr) {
+            g_taskbarCache.criticalIcon = CreateTaskbarBadgeIcon(true);
+        }
+        icon = g_taskbarCache.criticalIcon;
+        desc = L"Critical driver or service issue";
+    } else if (state == TaskbarOverlayState::Attention) {
+        if (g_taskbarCache.attentionIcon == nullptr) {
+            g_taskbarCache.attentionIcon = CreateTaskbarBadgeIcon(false);
+        }
+        icon = g_taskbarCache.attentionIcon;
+        desc = L"Updates available";
+    }
+    g_taskbarCache.taskbar->SetOverlayIcon(hwnd, icon, desc);
+}
+
+void ShutdownTaskbarOverlay() {
+    if (g_taskbarCache.taskbar && g_taskbarCache.lastHwnd != nullptr && IsWindow(g_taskbarCache.lastHwnd)) {
+        g_taskbarCache.taskbar->SetOverlayIcon(g_taskbarCache.lastHwnd, nullptr, nullptr);
+    }
+    if (g_taskbarCache.attentionIcon != nullptr) {
+        DestroyIcon(g_taskbarCache.attentionIcon);
+        g_taskbarCache.attentionIcon = nullptr;
+    }
+    if (g_taskbarCache.criticalIcon != nullptr) {
+        DestroyIcon(g_taskbarCache.criticalIcon);
+        g_taskbarCache.criticalIcon = nullptr;
+    }
+    g_taskbarCache.taskbar.Reset();
+    g_taskbarCache.lastHwnd = nullptr;
+    g_taskbarCache.initAttempted = false;
+}
+
 float CalcSummaryInfoBadgeWidth(const SummaryBadgeSegment* segments, size_t count) {
     if (segments == nullptr || count == 0) {
         return 0.0f;
@@ -1197,6 +1406,20 @@ void DrawAppIcon(ImDrawList* dl, ImVec2 c, float s, AppIcon icon, ImU32 col) {
         dl->AddPolyline(tri, 3, col, ImDrawFlags_Closed, t);
         dl->AddLine(ImVec2(c.x, c.y - r * 0.26f), ImVec2(c.x, c.y + r * 0.22f), col, t * 1.05f);
         dl->AddCircleFilled(ImVec2(c.x, c.y + r * 0.46f), std::max(1.2f, r * 0.12f), col, 12);
+        break;
+    }
+    case AppIcon::Heart: {
+        const float rad = r * 0.38f;
+        const float topY = c.y - r * 0.22f;
+        const ImVec2 lc(c.x - rad, topY);
+        const ImVec2 rc(c.x + rad, topY);
+        dl->PathClear();
+        dl->PathLineTo(ImVec2(c.x, c.y + r * 0.74f));
+        dl->PathLineTo(ImVec2(c.x - rad * 2.0f, topY + r * 0.14f));
+        dl->PathArcTo(lc, rad, 3.05f, 6.28f, 12);
+        dl->PathArcTo(rc, rad, 3.14f, 6.37f, 12);
+        dl->PathLineTo(ImVec2(c.x + rad * 2.0f, topY + r * 0.14f));
+        dl->PathStroke(col, ImDrawFlags_Closed, t);
         break;
     }
     case AppIcon::ChevronUp: {

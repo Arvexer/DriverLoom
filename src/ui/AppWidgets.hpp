@@ -37,6 +37,7 @@ enum class AppIcon {
     CheckCircle,
     AlertTriangle,
     Refresh,
+    Heart,
     ChevronUp
 };
 
@@ -126,7 +127,20 @@ void RenderSecondaryGroupLabel(const char* text);
 void RenderTableHeadersRow();
 bool RenderPrimaryButton(const char* label, const ImVec2& size = ImVec2(0.0f, 0.0f));
 bool RenderSecondaryButton(const char* label, const ImVec2& size = ImVec2(0.0f, 0.0f));
+bool RenderSecondaryButtonWithIcon(
+    const char* label,
+    AppIcon icon,
+    const ImVec4& iconColor,
+    const ImVec2& size = ImVec2(0.0f, 0.0f));
 bool RenderActionButton(const char* label, const ImVec2& size, bool primary);
+
+enum class TaskbarOverlayState {
+    None,
+    Attention,
+    Critical
+};
+void SetTaskbarOverlayBadge(HWND hwnd, TaskbarOverlayState state);
+void ShutdownTaskbarOverlay();
 float CalcSummaryInfoBadgeWidth(const SummaryBadgeSegment* segments, size_t count);
 void RenderSummaryInfoBadge(const SummaryBadgeSegment* segments, size_t count);
 

@@ -41,6 +41,7 @@ DriverLoomApp::~DriverLoomApp() {
     if (appUpdateThread_.joinable()) {
         appUpdateThread_.join();
     }
+    ShutdownTaskbarOverlay();
 }
 
 void DriverLoomApp::NavigateTo(int pageIndex) {
@@ -112,6 +113,25 @@ void DriverLoomApp::RenderFrame() {
     }
 
     SyncScannerSnapshots();
+
+    bool appHasUpdate = false;
+    {
+        std::lock_guard<std::mutex> lock(appUpdateMutex_);
+        appHasUpdate = (appUpdateState_ == AppUpdateState::UpdateAvailable);
+    }
+    TaskbarOverlayState desiredOverlay = TaskbarOverlayState::None;
+    if ((diagCache_.valid && diagCache_.disabledCriticalServices > 0) ||
+        criticalDeviceErrorCount_ > 0) {
+        desiredOverlay = TaskbarOverlayState::Critical;
+    } else if (actionableComponentsCount_ > 0 || appHasUpdate ||
+               (diagCache_.valid && diagCache_.attentionControllers > 0) ||
+               userRelevantIssueCount_ > 0) {
+        desiredOverlay = TaskbarOverlayState::Attention;
+    }
+    if (desiredOverlay != lastTaskbarOverlay_) {
+        SetTaskbarOverlayBadge(hwnd_, desiredOverlay);
+        lastTaskbarOverlay_ = desiredOverlay;
+    }
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
@@ -362,7 +382,7 @@ void DriverLoomApp::RenderSidebar() {
             hdm::Tr("Устройства", "Пристрої", "Devices"),
             activeTabIndex_ == PageDevices,
             devBadgeCount,
-            WarningColor())) {
+            (criticalDeviceErrorCount_ > 0) ? DangerColor() : WarningColor())) {
         NavigateTo(PageDevices);
     }
 
@@ -1080,6 +1100,7 @@ void DriverLoomApp::SyncScannerSnapshots() {
         totalDevicesCount_ = devicesCache_.size();
         problemDevicesCount_ = 0;
         userRelevantIssueCount_ = 0;
+        criticalDeviceErrorCount_ = 0;
         monitorDevicesCount_ = 0;
         peripheralDevicesCount_ = 0;
         for (const auto& d : devicesCache_) {
@@ -1088,6 +1109,9 @@ void DriverLoomApp::SyncScannerSnapshots() {
             }
             if (IsUserRelevantDeviceIssue(d)) {
                 ++userRelevantIssueCount_;
+            }
+            if (d.health == hdm::DeviceHealth::Error && d.problemCode != CM_PROB_DISABLED) {
+                ++criticalDeviceErrorCount_;
             }
             if (d.category == hdm::DeviceCategory::Monitor) ++monitorDevicesCount_;
             if (d.category == hdm::DeviceCategory::Peripheral) ++peripheralDevicesCount_;
@@ -1387,6 +1411,19 @@ void DriverLoomApp::RenderAboutModal() {
     const ImGuiStyle& style = ImGui::GetStyle();
     {
         PushFontSafe(g_fontMainTab);
+        const float logoSz = std::round(28.0f * uiScale);
+        const float txtH = ImGui::GetTextLineHeight();
+        const float rowH = std::max(logoSz, txtH);
+        const ImVec2 p0 = ImGui::GetCursorScreenPos();
+        ImGui::Dummy(ImVec2(logoSz, rowH));
+        DrawAppIcon(
+            ImGui::GetWindowDrawList(),
+            ImVec2(p0.x + logoSz * 0.5f, p0.y + rowH * 0.5f),
+            logoSz,
+            AppIcon::BrandLogo,
+            ImGui::ColorConvertFloat4ToU32(AccentTextColor()));
+        ImGui::SameLine(0.0f, std::round(10.0f * uiScale));
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (rowH - txtH) * 0.5f);
         ImGui::TextColored(AccentTextColor(), "DriverLoom v%s (x64)", hdm::kAppVersion);
         PopFontSafe(g_fontMainTab);
     }
@@ -1444,7 +1481,10 @@ void DriverLoomApp::RenderAboutModal() {
                     "Developer e-mail copied: arvexer.dev@proton.me"));
         }
         ImGui::SameLine();
-        if (RenderSecondaryButton(hdm::Tr("Поддержать (Ko-fi)###AboutKofi", "Підтримати (Ko-fi)###AboutKofi", "Support (Ko-fi)###AboutKofi"))) {
+        if (RenderSecondaryButtonWithIcon(
+                hdm::Tr("Поддержать (Ko-fi)###AboutKofi", "Підтримати (Ko-fi)###AboutKofi", "Support (Ko-fi)###AboutKofi"),
+                AppIcon::Heart,
+                ImVec4(0.95f, 0.36f, 0.45f, 1.00f))) {
             OpenUrlInBrowser("https://ko-fi.com/arvexer");
         }
     }
@@ -1493,7 +1533,10 @@ void DriverLoomApp::RenderAboutModal() {
 
         const bool busyCheck = checkingAppUpdate_.load();
         ImGui::BeginDisabled(busyCheck);
-        if (RenderSecondaryButton(hdm::Tr("Проверить обновления###AboutChkUpd", "Перевірити оновлення###AboutChkUpd", "Check for Updates###AboutChkUpd"))) {
+        if (RenderSecondaryButtonWithIcon(
+                hdm::Tr("Проверить обновления###AboutChkUpd", "Перевірити оновлення###AboutChkUpd", "Check for Updates###AboutChkUpd"),
+                AppIcon::Refresh,
+                AccentTextColor())) {
             StartAppUpdateCheckAsync(true);
         }
         ImGui::EndDisabled();
