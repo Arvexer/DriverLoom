@@ -105,6 +105,12 @@ bool DriverLoomApp::IsUserRelevantDeviceIssue(const hdm::DeviceInfo& d) {
 }
 
 void DriverLoomApp::RenderFrame() {
+    if (pendingThemeChange_ >= 0) {
+        ApplyAppTheme(hwnd_, g_dpiScale, pendingThemeChange_ != 0);
+        SaveUserPreferences();
+        pendingThemeChange_ = -1;
+    }
+
     SyncScannerSnapshots();
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -138,10 +144,10 @@ void DriverLoomApp::RenderFrame() {
         ImVec2(sidebarW, totalH),
         ImGuiChildFlags_AlwaysUseWindowPadding,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    RenderSidebar();
-    ImGui::EndChild();
     ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
+    RenderSidebar();
+    ImGui::EndChild();
 
     // Subtle vertical divider between sidebar and main content
     {
@@ -284,7 +290,7 @@ void DriverLoomApp::RenderSidebar() {
 
         // Compact subtle subtitle row: version + optional Admin badge or Update pill
         PushFontSafe(g_fontSmall);
-        ImGui::TextColored(MutedTextColor(), "v1.0.0");
+        ImGui::TextColored(MutedTextColor(), "v%s", hdm::kAppVersion);
         if (isElevated_) {
             ImGui::SameLine(0.0f, 8.0f * uiScale);
             ImGui::TextColored(
@@ -463,8 +469,7 @@ void DriverLoomApp::RenderSidebar() {
             isAppForeground
                 ? hdm::Tr("Переключить тему (Тёмная / Светлая)", "Перемкнути тему (Темна / Світла)", "Toggle Theme (Dark / Light)")
                 : nullptr)) {
-        ApplyAppTheme(hwnd_, g_dpiScale, !g_isLightTheme);
-        SaveUserPreferences();
+        pendingThemeChange_ = g_isLightTheme ? 0 : 1;
     }
 
     ImGui::SameLine(0.0f, gap);
@@ -652,15 +657,13 @@ void DriverLoomApp::RenderSettingsTab() {
         ImGui::SameLine(0.0f, 12.0f * uiScale);
         if (RenderPillButton(hdm::Tr("Тёмная###SetDark", "Темна###SetDark", "Dark###SetDark"), !g_isLightTheme)) {
             if (g_isLightTheme) {
-                ApplyAppTheme(hwnd_, g_dpiScale, false);
-                SaveUserPreferences();
+                pendingThemeChange_ = 0;
             }
         }
         ImGui::SameLine();
         if (RenderPillButton(hdm::Tr("Светлая###SetLight", "Світла###SetLight", "Light###SetLight"), g_isLightTheme)) {
             if (!g_isLightTheme) {
-                ApplyAppTheme(hwnd_, g_dpiScale, true);
-                SaveUserPreferences();
+                pendingThemeChange_ = 1;
             }
         }
 
@@ -797,9 +800,11 @@ void DriverLoomApp::RenderSettingsTab() {
         ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleColor();
     {
+        const std::string settingsVerMeta =
+            std::string("v") + hdm::kAppVersion + " • MIT License";
         RenderSecondaryCardHeader(
             hdm::Tr("О программе DriverLoom", "Про програму DriverLoom", "About DriverLoom"),
-            "v1.0.0 • MIT License");
+            settingsVerMeta.c_str());
         ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
         ImGui::TextWrapped(
             "%s",
@@ -1220,13 +1225,13 @@ void DriverLoomApp::StartAppUpdateCheckAsync(bool manual) {
             }
         };
 
-        constexpr const char* kCurrentVersion = "1.0.0";
         AppUpdateState resultState = AppUpdateState::Error;
-        std::string foundVer = kCurrentVersion;
+        std::string foundVer = hdm::kAppVersion;
         std::string foundUrl = "https://github.com/Arvexer/DriverLoom/releases";
 
+        const std::wstring userAgent = L"DriverLoom/" + hdm::Utf8ToWide(hdm::kAppVersion);
         WinHttpHandleGuard session{WinHttpOpen(
-            L"DriverLoom/1.0",
+            userAgent.c_str(),
             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
             WINHTTP_NO_PROXY_NAME,
             WINHTTP_NO_PROXY_BYPASS,
@@ -1296,7 +1301,7 @@ void DriverLoomApp::StartAppUpdateCheckAsync(bool manual) {
                         }
 
                         if (!tagVer.empty() &&
-                            CompareVersionOrString(tagVer, kCurrentVersion) > 0) {
+                            CompareVersionOrString(tagVer, hdm::kAppVersion) > 0) {
                             resultState = AppUpdateState::UpdateAvailable;
                             foundVer = tagVer;
                             if (!locationUrl.empty()) {
@@ -1337,10 +1342,11 @@ void DriverLoomApp::StartAppUpdateCheckAsync(bool manual) {
         } else if (manual && resultState == AppUpdateState::UpToDate) {
             logBuffer_.Push(
                 hdm::LogLevel::Info,
-                hdm::Tr(
-                    "Установлена актуальная версия DriverLoom (v1.0.0).",
-                    "Встановлено актуальну версію DriverLoom (v1.0.0).",
-                    "DriverLoom is up to date (v1.0.0)."));
+                std::string(hdm::Tr(
+                    "Установлена актуальная версия DriverLoom (v",
+                    "Встановлено актуальну версію DriverLoom (v",
+                    "DriverLoom is up to date (v")) +
+                    hdm::kAppVersion + ").");
         } else if (manual && resultState == AppUpdateState::Error) {
             logBuffer_.Push(
                 hdm::LogLevel::Warning,
@@ -1381,7 +1387,7 @@ void DriverLoomApp::RenderAboutModal() {
     const ImGuiStyle& style = ImGui::GetStyle();
     {
         PushFontSafe(g_fontMainTab);
-        ImGui::TextColored(AccentTextColor(), "DriverLoom v1.0.0 (x64)");
+        ImGui::TextColored(AccentTextColor(), "DriverLoom v%s (x64)", hdm::kAppVersion);
         PopFontSafe(g_fontMainTab);
     }
     ImGui::TextWrapped(
@@ -1472,11 +1478,17 @@ void DriverLoomApp::RenderAboutModal() {
                 std::string(hdm::Tr("Доступна новая версия: v", "Доступна нова версія: v", "New version available: v")) + latestVer;
             RenderStatusBadge(HealthyColor(), updMsg.c_str(), true);
         } else if (updState == AppUpdateState::UpToDate) {
-            RenderStatusBadge(HealthyColor(), hdm::Tr("Установлена актуальная версия (v1.0.0)", "Встановлено актуальну версію (v1.0.0)", "You have the latest version (v1.0.0)"), true);
+            const std::string upToDateMsg =
+                std::string(hdm::Tr("Установлена актуальная версия (v", "Встановлено актуальну версію (v", "You have the latest version (v")) +
+                hdm::kAppVersion + ")";
+            RenderStatusBadge(HealthyColor(), upToDateMsg.c_str(), true);
         } else if (updState == AppUpdateState::Error) {
             RenderStatusBadge(WarningColor(), hdm::Tr("Не удалось проверить обновления", "Не вдалося перевірити оновлення", "Failed to check for updates"), true);
         } else {
-            RenderStatusBadge(MutedTextColor(), hdm::Tr("Текущая версия: v1.0.0", "Поточна версія: v1.0.0", "Current version: v1.0.0"), true);
+            const std::string curVerMsg =
+                std::string(hdm::Tr("Текущая версия: v", "Поточна версія: v", "Current version: v")) +
+                hdm::kAppVersion;
+            RenderStatusBadge(MutedTextColor(), curVerMsg.c_str(), true);
         }
 
         const bool busyCheck = checkingAppUpdate_.load();

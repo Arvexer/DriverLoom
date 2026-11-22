@@ -150,7 +150,7 @@
 ## Security & Anti-Cheat Compatibility
 
 - **Least Privilege (`asInvoker`)**: [`resources/app.manifest`](resources/app.manifest) avoids forced startup elevation; UAC (`ShellExecuteExW` with `"runas"`) is requested on demand only for actual driver installation, `DriverStore` cleanup, or system repair actions.
-- **Complete PE Metadata**: [`resources/version.rc`](resources/version.rc) provides full `VERSIONINFO` metadata (`DriverLoom v1.0.0.0`, publisher `Arvexer`).
+- **Complete PE Metadata**: [`resources/version.rc`](resources/version.rc) provides full `VERSIONINFO` metadata (`DriverLoom v1.1.0.0`, publisher `Arvexer`).
 - **Authenticode Verification**: downloaded `.cab` packages and vendor installers are verified using Windows `WinVerifyTrust` before execution.
 - **Clean Native Code**: prioritizes Win32/COM APIs (`DiInstallDriverW`), uses strict RAII guards for `HDEVINFO` and COM interfaces, safely quotes elevated worker CLI arguments, and uses no executable packers (no UPX or similar).
 
@@ -166,7 +166,7 @@
 ├── resources/
 │   ├── app.ico                        # Application icon
 │   ├── app.manifest                   # Win32 manifest (asInvoker, PerMonitorV2 DPI, Win10/11)
-│   └── version.rc                     # PE VERSIONINFO (DriverLoom v1.0.0.0, Arvexer)
+│   └── version.rc                     # PE VERSIONINFO (DriverLoom v1.1.0.0, Arvexer)
 └── src/
     ├── main.cpp                       # WinMain entry point, DX11 swapchain, logo texture, WndProc
     ├── app/

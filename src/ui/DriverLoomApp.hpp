@@ -212,6 +212,7 @@ private:
     // Status bar & collapsible log drawer state
     bool logPanelExpanded_{false};
     bool logAutoScroll_{true};
+    int pendingThemeChange_{-1}; // -1 = none, 0 = dark, 1 = light
 
     // About dialog & GitHub Releases update checker
     bool openAboutPopupNextFrame_{false};
@@ -219,7 +220,7 @@ private:
     std::atomic<bool> checkingAppUpdate_{false};
     mutable std::mutex appUpdateMutex_;
     AppUpdateState appUpdateState_{AppUpdateState::Idle};
-    std::string appLatestVersion_{"1.0.0"};
+    std::string appLatestVersion_{hdm::kAppVersion};
     std::string appReleaseUrl_{"https://github.com/Arvexer/DriverLoom/releases"};
     std::thread appUpdateThread_;
 };

@@ -34,4 +34,5 @@ Makefile
 # Local assistant instructions & screenshot helper
 AGENTS.md
 capture_screenshots.bat
+resources/app_icon.png
 
