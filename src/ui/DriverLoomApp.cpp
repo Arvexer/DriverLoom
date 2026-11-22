@@ -65,8 +65,17 @@ bool DriverLoomApp::IsOptionalVendorSoftware(const hdm::SystemComponentItem& ite
     return false;
 }
 
+bool DriverLoomApp::IsOptionalLegacyRuntime(const hdm::SystemComponentItem& item) {
+    return item.id == "rt_openal" || item.id == "rt_vc2010" ||
+           item.id == "rt_vc2012" || item.id == "rt_vc2013";
+}
+
+bool DriverLoomApp::IsOptionalComponent(const hdm::SystemComponentItem& item) {
+    return IsOptionalVendorSoftware(item) || IsOptionalLegacyRuntime(item);
+}
+
 bool DriverLoomApp::IsComponentRecommendedAction(const hdm::SystemComponentItem& item) {
-    if (IsOptionalVendorSoftware(item)) {
+    if (IsOptionalComponent(item)) {
         return false;
     }
     return (!item.installed || item.updateAvailable) && !item.directInstallerUrl.empty();

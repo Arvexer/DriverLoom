@@ -34,7 +34,7 @@ void DriverLoomApp::RebuildComponentsViewCache(ImGuiTableSortSpecs* sortSpecs) {
             const auto& a = componentsCache_[ia];
             const auto& b = componentsCache_[ib];
             auto rank = [](const hdm::SystemComponentItem& x) {
-                const bool isOpt = IsOptionalVendorSoftware(x);
+                const bool isOpt = IsOptionalComponent(x);
                 if (!isOpt) {
                     if (!x.installed && !x.directInstallerUrl.empty()) return 0;
                     if (x.updateAvailable && !x.directInstallerUrl.empty()) return 1;
@@ -256,7 +256,7 @@ void DriverLoomApp::RenderComponentsTab() {
         const size_t origIdx = visibleComponentIndices_[viewIdx];
         const auto& item = componentsCache_[origIdx];
         const bool canInstallDirectly = !item.directInstallerUrl.empty();
-        const bool isOptional = IsOptionalVendorSoftware(item);
+        const bool isOptional = IsOptionalComponent(item);
         const bool needAction = !isOptional && (!item.installed || item.updateAvailable);
         const bool optionalUpdate = isOptional && item.installed && item.updateAvailable;
         const bool optionalInstall = isOptional && !item.installed;

@@ -81,6 +81,8 @@ private:
         const std::string& statusText);
     static bool IsUserRelevantDeviceIssue(const hdm::DeviceInfo& d);
     static bool IsOptionalVendorSoftware(const hdm::SystemComponentItem& item);
+    static bool IsOptionalLegacyRuntime(const hdm::SystemComponentItem& item);
+    static bool IsOptionalComponent(const hdm::SystemComponentItem& item);
     static bool IsComponentRecommendedAction(const hdm::SystemComponentItem& item);
 
     void LoadBaselineSnapshot();
