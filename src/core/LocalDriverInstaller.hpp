@@ -94,10 +94,6 @@ public:
     [[nodiscard]] bool IsScanningStore() const noexcept { return scanningStore_.load(); }
     [[nodiscard]] bool IsExportingBackup() const noexcept { return exportingBackup_.load(); }
     [[nodiscard]] bool IsRemovingStorePackages() const noexcept { return removingPackages_.load(); }
-    [[nodiscard]] bool IsStoreBusy() const noexcept {
-        return scanningStore_.load() || exportingBackup_.load() || removingPackages_.load() ||
-               picking_.load();
-    }
     [[nodiscard]] float Progress() const noexcept { return progress_.load(); }
     [[nodiscard]] uint64_t StoreGeneration() const noexcept { return storeGeneration_.load(); }
     [[nodiscard]] std::string StatusMessage() const;
@@ -135,10 +131,12 @@ private:
     std::atomic<bool> scanningStore_{false};
     std::atomic<bool> exportingBackup_{false};
     std::atomic<bool> removingPackages_{false};
+    std::atomic<bool> shuttingDown_{false};
     std::atomic<float> progress_{0.0f};
     std::atomic<uint64_t> storeGeneration_{0};
 
     mutable std::mutex dataMutex_;
+    std::mutex threadMutex_;
     std::vector<InfFileEntry> infFiles_;
     DriverStoreSnapshot storeSnapshot_;
     std::string statusMessage_;

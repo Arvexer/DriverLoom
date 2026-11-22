@@ -12,12 +12,33 @@ extern std::atomic<bool> g_windowRegainedFocus;
 extern bool g_isLightTheme;
 extern bool g_isAdvancedMode;
 extern bool g_autoCheckAppUpdates;
+extern bool g_pinLogPanel;
 extern float g_dpiScale;
 
+extern ImFont* g_fontSmall;
 extern ImFont* g_fontRegular;
 extern ImFont* g_fontSecondaryHeader;
 extern ImFont* g_fontMainTab;
 extern ImFont* g_fontPrimaryHeader;
+extern ImTextureID g_appLogoTexture;
+
+enum class AppIcon {
+    BrandLogo,
+    Home,
+    Apps,
+    Updates,
+    Devices,
+    Shield,
+    Folder,
+    Settings,
+    Info,
+    Sun,
+    Moon,
+    CheckCircle,
+    AlertTriangle,
+    Refresh,
+    ChevronUp
+};
 
 struct DriverBaselineEntry {
     std::string instanceId;
@@ -46,7 +67,6 @@ struct DriverSnapshotDiffRow {
     std::string deviceClass;
     std::string beforeSummary;
     std::string afterSummary;
-    bool canRollback{false};
 };
 
 struct SummaryBadgeSegment {
@@ -63,11 +83,21 @@ void SetWindowTitleBarDark(HWND hwnd, bool useDark);
 std::string UrlEncode(const std::string& value);
 void OpenUrlInBrowser(const std::string& url);
 
+// Semantic theme colors
+ImVec4 SidebarBgColor();
+ImVec4 CanvasBgColor();
+ImVec4 CardBgColor();
+ImVec4 CardElevatedBgColor();
+ImVec4 MutedTextColor();
 ImVec4 AccentTextColor();
 ImVec4 WarningTextColor();
 ImVec4 PanelBorderColor();
 ImVec4 AccentBarColor();
 ImVec4 CardHeaderTextColor();
+ImVec4 HealthyColor();
+ImVec4 WarningColor();
+ImVec4 DangerColor();
+ImVec4 InfoAccentColor();
 
 void ApplyBaseLayoutStyle(ImGuiStyle& style, float scale);
 void ApplyModernDarkThemeColors(ImGuiStyle& style);
@@ -92,12 +122,30 @@ bool RenderPillButton(const char* label, bool active, const ImVec2& size = ImVec
 float CalcSubSectionTabWidth(const char* label);
 bool RenderSubSectionHeaderTab(const char* label, bool active);
 void RenderSecondaryCardHeader(const char* title, const char* rightMeta = nullptr);
-void RenderVerticalDivider(float padX = 4.0f);
 void RenderSecondaryGroupLabel(const char* text);
 void RenderTableHeadersRow();
+bool RenderPrimaryButton(const char* label, const ImVec2& size = ImVec2(0.0f, 0.0f));
 bool RenderSecondaryButton(const char* label, const ImVec2& size = ImVec2(0.0f, 0.0f));
 bool RenderActionButton(const char* label, const ImVec2& size, bool primary);
 float CalcSummaryInfoBadgeWidth(const SummaryBadgeSegment* segments, size_t count);
 void RenderSummaryInfoBadge(const SummaryBadgeSegment* segments, size_t count);
+
+// Vector icons & modern layout widgets
+void DrawAppIcon(ImDrawList* dl, ImVec2 center, float size, AppIcon icon, ImU32 color);
+bool RenderSidebarNavItem(
+    const char* id,
+    AppIcon icon,
+    const char* label,
+    bool active,
+    size_t badgeCount = 0,
+    const ImVec4& badgeColor = ImVec4(0.96f, 0.65f, 0.14f, 1.00f),
+    float width = 0.0f);
+bool RenderIconButton(
+    const char* id,
+    AppIcon icon,
+    const ImVec2& size,
+    const char* tooltip = nullptr,
+    bool active = false);
+void RenderPageHeader(const char* title, const char* subtitle = nullptr);
 
 int CompareVersionOrString(const std::string& a, const std::string& b);

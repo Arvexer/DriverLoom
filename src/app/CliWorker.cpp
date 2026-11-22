@@ -144,7 +144,7 @@ int RunCliModeIfRequested() {
         const hdm::LocalInstallSummary summary =
             hdm::LocalDriverInstaller::InstallFromFolderSync(
                 targetArg, forceInf, restoreBefore, fileLogger);
-        if (summary.failedCount > 0) {
+        if (summary.totalFiles == 0 || summary.failedCount > 0) {
             return 1;
         }
         return summary.rebootRequired ? 2 : 0;
@@ -164,7 +164,7 @@ int RunCliModeIfRequested() {
         bool rebootReq = false;
         hdm::LocalDriverInstaller::RemoveDriverStorePackagesSync(
             names, restoreBefore, fileLogger, &removed, &failed, &rebootReq);
-        if (failed > 0 && removed == 0) {
+        if (names.empty() || (failed > 0 && removed == 0)) {
             return 1;
         }
         return rebootReq ? 2 : 0;
@@ -256,7 +256,7 @@ int RunCliModeIfRequested() {
         }
         return hdm::SystemDiagnostics::RunSystemToolSync(
                    L"dism.exe",
-                   L"/Online /Cleanup-Image /RestoreHealth",
+                   L"/Online /Cleanup-Image /RestoreHealth /NoRestart",
                    "DISM /RestoreHealth",
                    fileLogger,
                    &cancelGuard.cancel)
@@ -274,7 +274,7 @@ int RunCliModeIfRequested() {
             }
         }
         const bool ok = hdm::WindowsUpdateManager::SetUpdatesHiddenSync(
-            ids, mode == Mode::WuHide, fileLogger, driversOnly);
+            ids, mode == Mode::WuHide, fileLogger);
         return ok ? 0 : 1;
     }
 
@@ -325,6 +325,9 @@ int RunCliModeIfRequested() {
                 },
                 driversOnly);
 
+        if (summary.cancelled) {
+            return 3;
+        }
         if (summary.failedCount > 0 && summary.installedCount == 0) {
             return 1;
         }

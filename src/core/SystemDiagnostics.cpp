@@ -237,22 +237,6 @@ WindowsReadinessInfo ReadWindowsReadiness() {
             if (ReadRegDwordVal(srKey.Get(), L"RPSessionInterval", rpInterval)) {
                 r.systemRestoreEnabled = (rpInterval != 0);
             }
-            DWORD lastIdx = 0;
-            if (ReadRegDwordVal(srKey.Get(), L"LastIndex", lastIdx)) {
-                r.restoreLastIndex = lastIdx;
-            }
-        }
-        RegKeyGuard cfgKey;
-        if (RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore\\cfg",
-                0,
-                KEY_READ,
-                cfgKey.Put()) == ERROR_SUCCESS) {
-            DWORD diskPct = 0;
-            if (ReadRegDwordVal(cfgKey.Get(), L"DiskPercent", diskPct)) {
-                r.restoreDiskPercent = diskPct;
-            }
         }
         RegKeyGuard polKey;
         if (RegOpenKeyExW(
@@ -579,38 +563,61 @@ std::vector<ControllerDiagnosticItem> AnalyzeKeyControllers(
     return list;
 }
 
-std::string DecodeConsoleChunk(const std::string& raw) {
-    if (raw.empty()) return {};
+std::string DecodeConsoleChunk(
+    const std::string& raw,
+    bool& isUtf16Mode,
+    std::string& byteCarry,
+    bool flush = false) {
+    if (raw.empty() && byteCarry.empty()) {
+        return {};
+    }
 
-    // Check for UTF-16LE output (common for sfc.exe when redirected to a pipe).
-    if (raw.size() >= 4 && (raw.size() % 2) == 0) {
+    std::string data;
+    data.reserve(byteCarry.size() + raw.size());
+    data.append(byteCarry);
+    data.append(raw);
+    byteCarry.clear();
+
+    if (!isUtf16Mode && data.size() >= 4) {
         size_t evenZeros = 0;
         size_t oddZeros = 0;
-        const size_t pairs = std::min<size_t>(raw.size() / 2, 64);
+        const size_t pairs = std::min<size_t>(data.size() / 2, 64);
         for (size_t i = 0; i < pairs; ++i) {
-            if (raw[i * 2] == '\0') ++evenZeros;
-            if (raw[i * 2 + 1] == '\0') ++oddZeros;
+            if (data[i * 2] == '\0') ++evenZeros;
+            if (data[i * 2 + 1] == '\0') ++oddZeros;
         }
-        if (oddZeros >= pairs / 3 && evenZeros == 0) {
-            std::wstring wide(raw.size() / 2, L'\0');
-            std::memcpy(wide.data(), raw.data(), raw.size());
-            return WideToUtf8(wide);
+        if (pairs >= 2 && oddZeros >= pairs / 3 && evenZeros == 0) {
+            isUtf16Mode = true;
         }
+    }
+
+    if (isUtf16Mode) {
+        if (!flush && (data.size() % 2) != 0) {
+            byteCarry.assign(1, data.back());
+            data.pop_back();
+        }
+        const size_t wcharCount = data.size() / sizeof(wchar_t);
+        if (wcharCount == 0) {
+            return {};
+        }
+        std::wstring wide(wcharCount, L'\0');
+        std::memcpy(wide.data(), data.data(), wcharCount * sizeof(wchar_t));
+        return WideToUtf8(wide);
     }
 
     const int utf8Chars = MultiByteToWideChar(
-        CP_UTF8, MB_ERR_INVALID_CHARS, raw.data(), static_cast<int>(raw.size()), nullptr, 0);
+        CP_UTF8, MB_ERR_INVALID_CHARS, data.data(), static_cast<int>(data.size()), nullptr, 0);
     if (utf8Chars > 0) {
-        return raw;
+        return data;
     }
 
     const int oemChars = MultiByteToWideChar(
-        CP_OEMCP, 0, raw.data(), static_cast<int>(raw.size()), nullptr, 0);
+        CP_OEMCP, 0, data.data(), static_cast<int>(data.size()), nullptr, 0);
     if (oemChars <= 0) {
-        return raw;
+        return data;
     }
     std::wstring wide(static_cast<size_t>(oemChars), L'\0');
-    MultiByteToWideChar(CP_OEMCP, 0, raw.data(), static_cast<int>(raw.size()), wide.data(), oemChars);
+    MultiByteToWideChar(CP_OEMCP, 0, data.data(), static_cast<int>(data.size()), wide.data(), oemChars);
     return WideToUtf8(wide);
 }
 
@@ -726,11 +733,15 @@ std::string SanitizePersonalPaths(std::string text) {
 
 struct EventLogGuard {
     HANDLE handle{nullptr};
+    EventLogGuard() noexcept = default;
+    explicit EventLogGuard(HANDLE h) noexcept : handle(h) {}
     ~EventLogGuard() {
         if (handle != nullptr) {
             CloseEventLog(handle);
         }
     }
+    EventLogGuard(const EventLogGuard&) = delete;
+    EventLogGuard& operator=(const EventLogGuard&) = delete;
 };
 
 std::string ExtractExecutableBasename(std::string rawCmd) {
@@ -762,20 +773,35 @@ std::vector<RestorePointItem> QueryRecentRestorePoints() {
     DWORD bytesRead = 0;
     DWORD minBytes = 0;
     constexpr size_t kMaxPoints = 25;
+    constexpr DWORD kMaxEventBuf = 1024u * 1024u;
 
-    while (items.size() < kMaxPoints &&
-           ReadEventLogW(
-               log.handle,
-               EVENTLOG_BACKWARDS_READ | EVENTLOG_SEQUENTIAL_READ,
-               0,
-               buf.data(),
-               static_cast<DWORD>(buf.size()),
-               &bytesRead,
-               &minBytes)) {
+    while (items.size() < kMaxPoints) {
+        bytesRead = 0;
+        minBytes = 0;
+        if (!ReadEventLogW(
+                log.handle,
+                EVENTLOG_BACKWARDS_READ | EVENTLOG_SEQUENTIAL_READ,
+                0,
+                buf.data(),
+                static_cast<DWORD>(buf.size()),
+                &bytesRead,
+                &minBytes)) {
+            if (GetLastError() == ERROR_INSUFFICIENT_BUFFER &&
+                minBytes > buf.size() &&
+                minBytes <= kMaxEventBuf) {
+                buf.resize(minBytes);
+                continue;
+            }
+            break;
+        }
+        if (bytesRead == 0) {
+            break;
+        }
+
         DWORD off = 0;
-        while (off + sizeof(EVENTLOGRECORD) <= bytesRead && items.size() < kMaxPoints) {
+        while (bytesRead - off >= sizeof(EVENTLOGRECORD) && items.size() < kMaxPoints) {
             const auto* rec = reinterpret_cast<const EVENTLOGRECORD*>(buf.data() + off);
-            if (rec->Length < sizeof(EVENTLOGRECORD) || off + rec->Length > bytesRead) {
+            if (rec->Length < sizeof(EVENTLOGRECORD) || rec->Length > bytesRead - off) {
                 break;
             }
             const DWORD evId = rec->EventID & 0xFFFFu;
@@ -785,8 +811,12 @@ std::vector<RestorePointItem> QueryRecentRestorePoints() {
             const size_t maxSrcChars =
                 static_cast<size_t>(recEnd - reinterpret_cast<const BYTE*>(srcStart)) / sizeof(wchar_t);
             const size_t srcLen = wcsnlen(srcStart, maxSrcChars);
-            if (evId == 8194 && srcLen > 0 && _wcsicmp(srcStart, L"System Restore") == 0 &&
-                rec->NumStrings >= 2 && rec->StringOffset < rec->Length) {
+            if (evId == 8194 && srcLen > 0 && srcLen < maxSrcChars &&
+                _wcsicmp(srcStart, L"System Restore") == 0 &&
+                rec->NumStrings >= 2 &&
+                rec->StringOffset >= sizeof(EVENTLOGRECORD) &&
+                rec->StringOffset < rec->Length &&
+                (rec->StringOffset % sizeof(wchar_t)) == 0) {
                 const auto* strCursor = reinterpret_cast<const wchar_t*>(
                     reinterpret_cast<const BYTE*>(rec) + rec->StringOffset);
                 const auto* wEnd = reinterpret_cast<const wchar_t*>(recEnd);
@@ -794,12 +824,15 @@ std::vector<RestorePointItem> QueryRecentRestorePoints() {
                 std::wstring rawProcW;
                 std::wstring descW;
                 if (strCursor < wEnd) {
-                    const size_t n0 = wcsnlen(strCursor, static_cast<size_t>(wEnd - strCursor));
+                    const size_t avail0 = static_cast<size_t>(wEnd - strCursor);
+                    const size_t n0 = wcsnlen(strCursor, avail0);
                     rawProcW.assign(strCursor, n0);
-                    strCursor += n0 + 1;
-                    if (strCursor < wEnd) {
-                        const size_t n1 = wcsnlen(strCursor, static_cast<size_t>(wEnd - strCursor));
-                        descW.assign(strCursor, n1);
+                    if (n0 < avail0) {
+                        strCursor += n0 + 1;
+                        if (strCursor < wEnd) {
+                            const size_t n1 = wcsnlen(strCursor, static_cast<size_t>(wEnd - strCursor));
+                            descW.assign(strCursor, n1);
+                        }
                     }
                 }
 
@@ -961,15 +994,6 @@ std::vector<StorageDiagnosticItem> AnalyzeStorageSubsystem(
     return items;
 }
 
-struct PowrprofGuard {
-    HMODULE mod{nullptr};
-    ~PowrprofGuard() {
-        if (mod != nullptr) {
-            FreeLibrary(mod);
-        }
-    }
-};
-
 using PowerGetActiveSchemeFn = DWORD(WINAPI*)(HKEY, GUID**);
 using PowerEnumerateFn = DWORD(WINAPI*)(HKEY, const GUID*, const GUID*, ULONG, ULONG, UCHAR*, DWORD*);
 using PowerReadFriendlyNameFn =
@@ -980,23 +1004,24 @@ std::vector<PowerSchemeItem> QueryPowerSchemes(std::string& outActiveName) {
     outActiveName.clear();
     std::vector<PowerSchemeItem> schemes;
 
-    PowrprofGuard pwr{LoadLibraryExW(L"powrprof.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
-    if (pwr.mod == nullptr) {
+    hdm::ModuleGuard pwr(LoadLibraryExW(L"powrprof.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
+    if (!pwr) {
         return schemes;
     }
 
     auto getActive = reinterpret_cast<PowerGetActiveSchemeFn>(
-        reinterpret_cast<void*>(GetProcAddress(pwr.mod, "PowerGetActiveScheme")));
+        reinterpret_cast<void*>(GetProcAddress(pwr.Get(), "PowerGetActiveScheme")));
     auto enumerate = reinterpret_cast<PowerEnumerateFn>(
-        reinterpret_cast<void*>(GetProcAddress(pwr.mod, "PowerEnumerate")));
+        reinterpret_cast<void*>(GetProcAddress(pwr.Get(), "PowerEnumerate")));
     auto readName = reinterpret_cast<PowerReadFriendlyNameFn>(
-        reinterpret_cast<void*>(GetProcAddress(pwr.mod, "PowerReadFriendlyName")));
+        reinterpret_cast<void*>(GetProcAddress(pwr.Get(), "PowerReadFriendlyName")));
     if (getActive == nullptr || enumerate == nullptr || readName == nullptr) {
         return schemes;
     }
 
     GUID* activeGuid = nullptr;
     const bool hasActive = (getActive(nullptr, &activeGuid) == ERROR_SUCCESS && activeGuid != nullptr);
+    hdm::LocalFreeGuard activeGuard(activeGuid);
 
     constexpr ULONG kAccessScheme = 16;
     for (ULONG idx = 0; idx < 32; ++idx) {
@@ -1022,10 +1047,16 @@ std::vector<PowerSchemeItem> QueryPowerSchemes(std::string& outActiveName) {
         DWORD nameBytes = 0;
         readName(nullptr, &schemeGuid, nullptr, nullptr, nullptr, &nameBytes);
         if (nameBytes > 0 && nameBytes < 4096) {
-            std::vector<BYTE> nameBuf(nameBytes + 2, 0);
-            if (readName(nullptr, &schemeGuid, nullptr, nullptr, nameBuf.data(), &nameBytes) ==
-                ERROR_SUCCESS) {
-                item.friendlyName = WideToUtf8(reinterpret_cast<const wchar_t*>(nameBuf.data()));
+            std::vector<wchar_t> nameBuf(nameBytes / sizeof(wchar_t) + 2, L'\0');
+            DWORD bufBytes = static_cast<DWORD>(nameBuf.size() * sizeof(wchar_t));
+            if (readName(
+                    nullptr,
+                    &schemeGuid,
+                    nullptr,
+                    nullptr,
+                    reinterpret_cast<UCHAR*>(nameBuf.data()),
+                    &bufBytes) == ERROR_SUCCESS) {
+                item.friendlyName = WideToUtf8(nameBuf.data());
             }
         }
         if (item.friendlyName.empty()) {
@@ -1039,24 +1070,31 @@ std::vector<PowerSchemeItem> QueryPowerSchemes(std::string& outActiveName) {
         schemes.push_back(std::move(item));
     }
 
-    if (activeGuid != nullptr) {
-        LocalFree(activeGuid);
-    }
     return schemes;
 }
 
 } // namespace
 
 SystemDiagnostics::~SystemDiagnostics() {
+    stopRequested_.store(true);
     cancelRequested_.store(true);
-    if (scanThread_.joinable()) {
-        scanThread_.join();
+    std::thread scanT;
+    std::thread actionT;
+    std::thread exportT;
+    {
+        std::lock_guard<std::mutex> lock(threadMutex_);
+        scanT = std::move(scanThread_);
+        actionT = std::move(actionThread_);
+        exportT = std::move(exportThread_);
     }
-    if (actionThread_.joinable()) {
-        actionThread_.join();
+    if (exportT.joinable()) {
+        exportT.join();
     }
-    if (exportThread_.joinable()) {
-        exportThread_.join();
+    if (actionT.joinable()) {
+        actionT.join();
+    }
+    if (scanT.joinable()) {
+        scanT.join();
     }
 }
 
@@ -1092,7 +1130,8 @@ SystemDiagnosticsSnapshot SystemDiagnostics::CollectSynchronously(
 void SystemDiagnostics::StartScanAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog) {
-    if (scanning_.exchange(true)) {
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (stopRequested_.load() || scanning_.exchange(true)) {
         return;
     }
     if (scanThread_.joinable()) {
@@ -1103,13 +1142,15 @@ void SystemDiagnostics::StartScanAsync(
         auto snap = CollectSynchronously(devs);
         const size_t disabledSvc = snap.disabledCriticalServices;
         const size_t attCtrl = snap.attentionControllers;
-        {
-            std::lock_guard<std::mutex> lock(dataMutex_);
-            snapshot_ = std::move(snap);
+        if (!stopRequested_.load()) {
+            {
+                std::lock_guard<std::mutex> dataLock(dataMutex_);
+                snapshot_ = std::move(snap);
+            }
+            generation_.fetch_add(1);
         }
-        generation_.fetch_add(1);
         scanning_.store(false);
-        if (log && (disabledSvc > 0 || attCtrl > 0)) {
+        if (!stopRequested_.load() && log && (disabledSvc > 0 || attCtrl > 0)) {
             log(LogLevel::Warning,
                 "Диагностика системы: отключённых критических служб — " +
                     std::to_string(disabledSvc) + ", контроллеров с замечаниями — " +
@@ -1124,6 +1165,10 @@ void SystemDiagnostics::RunMaintenanceAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog,
     ActionDoneCallback onComplete) {
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (stopRequested_.load()) {
+        return;
+    }
     if (runningAction_.exchange(true)) {
         if (onLog) {
             onLog(LogLevel::Warning, "Операция обслуживания уже выполняется.");
@@ -1143,6 +1188,19 @@ void SystemDiagnostics::RunMaintenanceAsync(
                                  complete = std::move(onComplete)]() {
         bool ok = false;
         auto setPhase = [&](const std::string& m) { SetActionPhase(m); };
+        auto logUacFailure = [&](const ElevatedRunResult& run, const char* opLabel) {
+            if (run.launched || stopRequested_.load() || !log) {
+                return;
+            }
+            if (run.launchError == ERROR_CANCELLED) {
+                log(LogLevel::Warning,
+                    std::string("Операция «") + opLabel + "» отменена в окне UAC.");
+            } else {
+                log(LogLevel::Error,
+                    std::string("Ошибка запуска UAC (") + opLabel + "): " +
+                        FormatWin32Error(run.launchError));
+            }
+        };
 
         if (action == MaintenanceAction::EnableService) {
             setPhase("Включение службы " + targetArg + "...");
@@ -1157,13 +1215,14 @@ void SystemDiagnostics::RunMaintenanceAsync(
                 ok = EnableServiceSync(targetArg, preferAuto, log);
             } else {
                 const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_svc");
-                std::wstring args = L"--cli-enable-service \"" + Utf8ToWide(targetArg) + L"\"";
+                std::wstring args = L"--cli-enable-service " + QuoteWin32Arg(Utf8ToWide(targetArg));
                 if (preferAuto) args += L" --auto-start";
-                args += L" --log \"" + tempLog.wstring() + L"\"";
+                args += L" --log " + QuoteWin32Arg(tempLog.wstring());
                 const ElevatedRunResult run = ExecuteElevatedSelf(
                     args, true, &tempLog, log, nullptr, &cancelRequested_, nullptr);
                 std::error_code ec;
                 std::filesystem::remove(tempLog, ec);
+                logUacFailure(run, "Включение службы");
                 ok = run.launched && run.exitCode == 0;
             }
         } else if (action == MaintenanceAction::ResetWuDownloadCache) {
@@ -1172,11 +1231,13 @@ void SystemDiagnostics::RunMaintenanceAsync(
                 ok = ResetWuDownloadCacheSync(log);
             } else {
                 const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_wuc");
-                const std::wstring args = L"--cli-reset-wucache --log \"" + tempLog.wstring() + L"\"";
+                const std::wstring args =
+                    L"--cli-reset-wucache --log " + QuoteWin32Arg(tempLog.wstring());
                 const ElevatedRunResult run = ExecuteElevatedSelf(
                     args, true, &tempLog, log, nullptr, &cancelRequested_, nullptr);
                 std::error_code ec;
                 std::filesystem::remove(tempLog, ec);
+                logUacFailure(run, "Очистка кэша Windows Update");
                 ok = run.launched && run.exitCode == 0;
             }
         } else {
@@ -1210,25 +1271,28 @@ void SystemDiagnostics::RunMaintenanceAsync(
                 std::error_code ec;
                 std::filesystem::remove(cancelMarker, ec);
                 const std::wstring args = std::wstring(cliSwitch) +
-                                          L" --log \"" + tempLog.wstring() +
-                                          L"\" --cancel-file \"" + cancelMarker.wstring() + L"\"";
+                                          L" --log " + QuoteWin32Arg(tempLog.wstring()) +
+                                          L" --cancel-file " + QuoteWin32Arg(cancelMarker.wstring());
                 const ElevatedRunResult run = ExecuteElevatedSelf(
                     args, true, &tempLog, log, nullptr, &cancelRequested_, &cancelMarker);
                 std::filesystem::remove(tempLog, ec);
                 std::filesystem::remove(cancelMarker, ec);
+                logUacFailure(run, label.c_str());
                 ok = run.launched && run.exitCode == 0;
             }
         }
 
-        auto refreshed = CollectSynchronously(devs);
-        {
-            std::lock_guard<std::mutex> lock(dataMutex_);
-            snapshot_ = std::move(refreshed);
+        if (!stopRequested_.load()) {
+            auto refreshed = CollectSynchronously(devs);
+            {
+                std::lock_guard<std::mutex> dataLock(dataMutex_);
+                snapshot_ = std::move(refreshed);
+            }
+            generation_.fetch_add(1);
+            setPhase(ok ? "Операция завершена" : "Операция завершена с предупреждениями");
         }
-        generation_.fetch_add(1);
-        setPhase(ok ? "Операция завершена" : "Операция завершена с предупреждениями");
         runningAction_.store(false);
-        if (complete) {
+        if (!stopRequested_.load() && complete) {
             complete(ok);
         }
     });
@@ -1304,18 +1368,33 @@ bool SystemDiagnostics::ResetWuDownloadCacheSync(const LogCallback& onLog) {
     }
 
     wchar_t winDir[MAX_PATH]{};
-    GetWindowsDirectoryW(winDir, MAX_PATH);
+    const UINT winLen = GetWindowsDirectoryW(winDir, MAX_PATH);
+    if (winLen == 0 || winLen >= MAX_PATH) {
+        if (onLog) {
+            onLog(LogLevel::Error, "Не удалось определить папку Windows.");
+        }
+        return false;
+    }
     const std::filesystem::path dlDir =
         std::filesystem::path(winDir) / L"SoftwareDistribution" / L"Download";
 
+    std::vector<std::filesystem::path> entriesToRemove;
     std::error_code ec;
-    size_t removedCount = 0;
     if (std::filesystem::exists(dlDir, ec)) {
-        for (const auto& entry : std::filesystem::directory_iterator(dlDir, ec)) {
-            std::filesystem::remove_all(entry.path(), ec);
-            if (!ec) {
-                ++removedCount;
-            }
+        for (std::filesystem::directory_iterator it(
+                 dlDir, std::filesystem::directory_options::skip_permission_denied, ec);
+             !ec && it != std::filesystem::directory_iterator();
+             it.increment(ec)) {
+            entriesToRemove.push_back(it->path());
+        }
+    }
+
+    size_t removedCount = 0;
+    for (const auto& entryPath : entriesToRemove) {
+        std::error_code rmEc;
+        std::filesystem::remove_all(entryPath, rmEc);
+        if (!rmEc) {
+            ++removedCount;
         }
     }
 
@@ -1341,7 +1420,13 @@ bool SystemDiagnostics::RunSystemToolSync(
     const LogCallback& onLog,
     const std::atomic<bool>* cancelFlag) {
     wchar_t sysDir[MAX_PATH]{};
-    GetSystemDirectoryW(sysDir, MAX_PATH);
+    const UINT sysLen = GetSystemDirectoryW(sysDir, MAX_PATH);
+    if (sysLen == 0 || sysLen >= MAX_PATH) {
+        if (onLog) {
+            onLog(LogLevel::Error, "Не удалось определить системную папку System32.");
+        }
+        return false;
+    }
     const std::filesystem::path toolPath = std::filesystem::path(sysDir) / exeName;
 
     SECURITY_ATTRIBUTES sa{};
@@ -1394,6 +1479,8 @@ bool SystemDiagnostics::RunSystemToolSync(
         onLog(LogLevel::Info, "Запущена утилита: " + title + "...");
     }
 
+    bool isUtf16Mode = false;
+    std::string utf16Carry;
     std::string carry;
     std::string lastPctLine;
     bool cancelled = false;
@@ -1416,7 +1503,8 @@ bool SystemDiagnostics::RunSystemToolSync(
                     &readBytes,
                     nullptr) &&
                 readBytes > 0) {
-                const std::string decoded = DecodeConsoleChunk(std::string(buf, readBytes));
+                const std::string decoded =
+                    DecodeConsoleChunk(std::string(buf, readBytes), isUtf16Mode, utf16Carry, false);
                 EmitDecodedLines(carry, decoded, onLog, lastPctLine);
             }
             continue;
@@ -1434,13 +1522,20 @@ bool SystemDiagnostics::RunSystemToolSync(
                     readBytes == 0) {
                     break;
                 }
-                const std::string decoded = DecodeConsoleChunk(std::string(buf, readBytes));
+                const std::string decoded =
+                    DecodeConsoleChunk(std::string(buf, readBytes), isUtf16Mode, utf16Carry, false);
                 EmitDecodedLines(carry, decoded, onLog, lastPctLine);
             }
             break;
         }
     }
 
+    if (!utf16Carry.empty()) {
+        const std::string tailDecoded = DecodeConsoleChunk({}, isUtf16Mode, utf16Carry, true);
+        if (!tailDecoded.empty()) {
+            EmitDecodedLines(carry, tailDecoded, onLog, lastPctLine);
+        }
+    }
     if (!carry.empty() && onLog) {
         onLog(LogLevel::Info, carry);
     }
@@ -1477,11 +1572,11 @@ bool SystemDiagnostics::SetActivePowerSchemeSync(
         return false;
     }
 
-    PowrprofGuard pwr{LoadLibraryExW(L"powrprof.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+    hdm::ModuleGuard pwr(LoadLibraryExW(L"powrprof.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
     PowerSetActiveSchemeFn setScheme = nullptr;
-    if (pwr.mod != nullptr) {
+    if (pwr) {
         setScheme = reinterpret_cast<PowerSetActiveSchemeFn>(
-            reinterpret_cast<void*>(GetProcAddress(pwr.mod, "PowerSetActiveScheme")));
+            reinterpret_cast<void*>(GetProcAddress(pwr.Get(), "PowerSetActiveScheme")));
     }
     if (setScheme == nullptr) {
         if (onLog) {
@@ -1512,10 +1607,9 @@ bool SystemDiagnostics::SetActivePowerSchemeSync(
 
 void SystemDiagnostics::SetActivePowerSchemeAsync(
     const std::string& schemeGuidStr,
-    std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog) {
-    (void)devicesSnapshot;
-    if (IsBusy() || schemeGuidStr.empty()) {
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (stopRequested_.load() || IsBusy() || schemeGuidStr.empty()) {
         return;
     }
     runningAction_.store(true);
@@ -1526,15 +1620,17 @@ void SystemDiagnostics::SetActivePowerSchemeAsync(
 
     actionThread_ = std::thread([this, schemeGuidStr, log = std::move(onLog)]() {
         (void)SetActivePowerSchemeSync(schemeGuidStr, log);
-        std::string activeName;
-        auto refreshedSchemes = QueryPowerSchemes(activeName);
-        {
-            std::lock_guard<std::mutex> lock(dataMutex_);
-            snapshot_.powerSchemes = std::move(refreshedSchemes);
-            snapshot_.activePowerSchemeName = std::move(activeName);
+        if (!stopRequested_.load()) {
+            std::string activeName;
+            auto refreshedSchemes = QueryPowerSchemes(activeName);
+            {
+                std::lock_guard<std::mutex> dataLock(dataMutex_);
+                snapshot_.powerSchemes = std::move(refreshedSchemes);
+                snapshot_.activePowerSchemeName = std::move(activeName);
+            }
+            generation_.fetch_add(1);
+            SetActionPhase("");
         }
-        generation_.fetch_add(1);
-        SetActionPhase("");
         runningAction_.store(false);
     });
 }
@@ -2172,7 +2268,8 @@ void SystemDiagnostics::ExportReportInteractiveAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     std::vector<SystemComponentItem> componentsSnapshot,
     LogCallback onLog) {
-    if (exportingReport_.exchange(true)) {
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (stopRequested_.load() || exportingReport_.exchange(true)) {
         return;
     }
     if (exportThread_.joinable()) {
@@ -2186,9 +2283,14 @@ void SystemDiagnostics::ExportReportInteractiveAsync(
          devices = std::move(devicesSnapshot),
          components = std::move(componentsSnapshot),
          log = std::move(onLog)]() {
+            (void)ownerWindow;
+            if (stopRequested_.load()) {
+                exportingReport_.store(false);
+                return;
+            }
             CoInitGuard comInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
             if (!comInit.Succeeded()) {
-                if (log) {
+                if (!stopRequested_.load() && log) {
                     log(LogLevel::Error,
                         "Не удалось инициализировать COM STA для сохранения отчёта: " +
                             FormatHResult(comInit.Result()));
@@ -2206,7 +2308,7 @@ void SystemDiagnostics::ExportReportInteractiveAsync(
                     IID_IFileSaveDialog,
                     reinterpret_cast<void**>(dialog.Put()));
                 if (FAILED(hr) || !dialog) {
-                    if (log) {
+                    if (!stopRequested_.load() && log) {
                         log(LogLevel::Error,
                             "Не удалось создать диалог сохранения файла: " +
                                 FormatHResult(hr));
@@ -2230,8 +2332,8 @@ void SystemDiagnostics::ExportReportInteractiveAsync(
                         "Save System Report (Privacy Clean)"));
                     dialog->SetTitle(dlgTitle.c_str());
 
-                    hr = dialog->Show(ownerWindow);
-                    if (SUCCEEDED(hr)) {
+                    hr = dialog->Show(nullptr);
+                    if (SUCCEEDED(hr) && !stopRequested_.load()) {
                         ComPtr<IShellItem> item;
                         if (SUCCEEDED(dialog->GetResult(item.Put())) && item) {
                             CoTaskMemGuard<wchar_t> rawPath;
@@ -2260,7 +2362,8 @@ void SystemDiagnostics::ExportReportInteractiveAsync(
                                     outPath, fmt, diag, devices, components, log);
                             }
                         }
-                    } else if (hr != HRESULT_FROM_WIN32(ERROR_CANCELLED) && log) {
+                    } else if (hr != HRESULT_FROM_WIN32(ERROR_CANCELLED) &&
+                               !stopRequested_.load() && log) {
                         log(LogLevel::Warning,
                             "Ошибка диалога сохранения отчёта: " + FormatHResult(hr));
                     }

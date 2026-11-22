@@ -12,12 +12,15 @@ std::atomic<bool> g_windowRegainedFocus{false};
 bool g_isLightTheme = false;
 bool g_isAdvancedMode = false;
 bool g_autoCheckAppUpdates = true;
+bool g_pinLogPanel = false;
 float g_dpiScale = 1.0f;
 
+ImFont* g_fontSmall = nullptr;
 ImFont* g_fontRegular = nullptr;
 ImFont* g_fontSecondaryHeader = nullptr;
 ImFont* g_fontMainTab = nullptr;
 ImFont* g_fontPrimaryHeader = nullptr;
+ImTextureID g_appLogoTexture = 0;
 
 void PushFontSafe(ImFont* font) {
     if (font != nullptr) {
@@ -46,11 +49,27 @@ void SetWindowTitleBarDark(HWND hwnd, bool useDark) {
         const BOOL mode = useDark ? TRUE : FALSE;
         constexpr DWORD kDwmwaUseImmersiveDarkMode = 20;
         constexpr DWORD kDwmwaUseImmersiveDarkModeOld = 19;
+        constexpr DWORD kDwmwaCaptionColor = 35;
+        constexpr DWORD kDwmwaTextColor = 36;
         if (FAILED(fn(hwnd, kDwmwaUseImmersiveDarkMode, &mode, sizeof(mode)))) {
             fn(hwnd, kDwmwaUseImmersiveDarkModeOld, &mode, sizeof(mode));
         }
+        // Windows 11 instant caption repaint matching the active theme
+        const COLORREF captionCol = useDark ? RGB(12, 15, 22) : RGB(236, 240, 246);
+        const COLORREF textCol = useDark ? RGB(238, 243, 250) : RGB(18, 25, 38);
+        fn(hwnd, kDwmwaCaptionColor, &captionCol, sizeof(captionCol));
+        fn(hwnd, kDwmwaTextColor, &textCol, sizeof(textCol));
     }
     FreeLibrary(dwm);
+    SetWindowPos(
+        hwnd,
+        nullptr,
+        0,
+        0,
+        0,
+        0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+    RedrawWindow(hwnd, nullptr, nullptr, RDW_INVALIDATE | RDW_FRAME);
 }
 
 std::string UrlEncode(const std::string& value) {
@@ -77,46 +96,94 @@ void OpenUrlInBrowser(const std::string& url) {
     ShellExecuteW(nullptr, L"open", wUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
-// --- Theme & Typography Helpers ---
+// --- Semantic Theme & Typography Helpers ---
+ImVec4 SidebarBgColor() {
+    return g_isLightTheme
+               ? ImVec4(0.925f, 0.941f, 0.965f, 1.00f)
+               : ImVec4(0.047f, 0.060f, 0.088f, 1.00f);
+}
+
+ImVec4 CanvasBgColor() {
+    return g_isLightTheme
+               ? ImVec4(0.961f, 0.969f, 0.984f, 1.00f)
+               : ImVec4(0.063f, 0.080f, 0.118f, 1.00f);
+}
+
+ImVec4 CardBgColor() {
+    return g_isLightTheme
+               ? ImVec4(1.000f, 1.000f, 1.000f, 1.00f)
+               : ImVec4(0.090f, 0.114f, 0.165f, 1.00f);
+}
+
+ImVec4 CardElevatedBgColor() {
+    return g_isLightTheme
+               ? ImVec4(0.969f, 0.978f, 0.992f, 1.00f)
+               : ImVec4(0.114f, 0.145f, 0.208f, 1.00f);
+}
+
+ImVec4 MutedTextColor() {
+    return g_isLightTheme
+               ? ImVec4(0.37f, 0.43f, 0.53f, 1.00f)
+               : ImVec4(0.58f, 0.65f, 0.76f, 1.00f);
+}
+
 ImVec4 AccentTextColor() {
     return g_isLightTheme
-               ? ImVec4(0.11f, 0.38f, 0.78f, 1.00f)
-               : ImVec4(0.48f, 0.76f, 1.00f, 1.00f);
+               ? ImVec4(0.09f, 0.38f, 0.80f, 1.00f)
+               : ImVec4(0.42f, 0.73f, 1.00f, 1.00f);
 }
 
 ImVec4 WarningTextColor() {
     return g_isLightTheme
                ? ImVec4(0.68f, 0.42f, 0.02f, 1.00f)
-               : ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
+               : ImVec4(0.98f, 0.74f, 0.18f, 1.00f);
 }
 
 ImVec4 PanelBorderColor() {
     return g_isLightTheme
-               ? ImVec4(0.72f, 0.78f, 0.87f, 0.95f)
-               : ImVec4(0.20f, 0.27f, 0.38f, 0.95f);
+               ? ImVec4(0.83f, 0.87f, 0.92f, 1.00f)
+               : ImVec4(0.16f, 0.21f, 0.30f, 0.95f);
 }
 
 ImVec4 AccentBarColor() {
     return g_isLightTheme
-               ? ImVec4(0.14f, 0.48f, 0.82f, 1.00f)
-               : ImVec4(0.36f, 0.74f, 0.96f, 1.00f);
+               ? ImVec4(0.10f, 0.43f, 0.85f, 1.00f)
+               : ImVec4(0.28f, 0.66f, 1.00f, 1.00f);
 }
 
 ImVec4 CardHeaderTextColor() {
     return g_isLightTheme
-               ? ImVec4(0.09f, 0.20f, 0.38f, 1.00f)
-               : ImVec4(0.80f, 0.90f, 1.00f, 1.00f);
+               ? ImVec4(0.09f, 0.16f, 0.28f, 1.00f)
+               : ImVec4(0.90f, 0.94f, 1.00f, 1.00f);
+}
+
+ImVec4 HealthyColor() {
+    return ImVec4(0.16f, 0.78f, 0.56f, 1.00f);
+}
+
+ImVec4 WarningColor() {
+    return ImVec4(0.96f, 0.68f, 0.14f, 1.00f);
+}
+
+ImVec4 DangerColor() {
+    return ImVec4(0.94f, 0.37f, 0.41f, 1.00f);
+}
+
+ImVec4 InfoAccentColor() {
+    return g_isLightTheme
+               ? ImVec4(0.10f, 0.43f, 0.85f, 1.00f)
+               : ImVec4(0.32f, 0.68f, 1.00f, 1.00f);
 }
 
 void ApplyBaseLayoutStyle(ImGuiStyle& style, float scale) {
     style = ImGuiStyle();
 
     style.WindowPadding = ImVec2(14.0f, 12.0f);
-    style.FramePadding = ImVec2(11.0f, 5.0f);
-    style.CellPadding = ImVec2(10.0f, 6.0f);
+    style.FramePadding = ImVec2(12.0f, 6.0f);
+    style.CellPadding = ImVec2(10.0f, 7.0f);
     style.ItemSpacing = ImVec2(8.0f, 8.0f);
     style.ItemInnerSpacing = ImVec2(6.0f, 4.0f);
-    style.ScrollbarSize = 11.0f;
+    style.ScrollbarSize = 10.0f;
     style.GrabMinSize = 10.0f;
 
     style.WindowBorderSize = 0.0f;
@@ -126,9 +193,9 @@ void ApplyBaseLayoutStyle(ImGuiStyle& style, float scale) {
     style.TabBorderSize = 1.0f;
 
     style.WindowRounding = 0.0f;
-    style.ChildRounding = 8.0f;
-    style.FrameRounding = 6.0f;
-    style.PopupRounding = 6.0f;
+    style.ChildRounding = 10.0f;
+    style.FrameRounding = 7.0f;
+    style.PopupRounding = 8.0f;
     style.ScrollbarRounding = 6.0f;
     style.GrabRounding = 6.0f;
     style.TabRounding = 7.0f;
@@ -141,101 +208,104 @@ void ApplyBaseLayoutStyle(ImGuiStyle& style, float scale) {
 void ApplyModernDarkThemeColors(ImGuiStyle& style) {
     ImGui::StyleColorsDark(&style);
     ImVec4* c = style.Colors;
-    c[ImGuiCol_Text] = ImVec4(0.93f, 0.95f, 0.98f, 1.00f);
-    c[ImGuiCol_TextDisabled] = ImVec4(0.56f, 0.62f, 0.72f, 1.00f);
-    c[ImGuiCol_WindowBg] = ImVec4(0.059f, 0.071f, 0.098f, 1.00f);
-    c[ImGuiCol_ChildBg] = ImVec4(0.082f, 0.098f, 0.133f, 1.00f);
-    c[ImGuiCol_PopupBg] = ImVec4(0.098f, 0.118f, 0.161f, 0.98f);
-    c[ImGuiCol_Border] = ImVec4(0.176f, 0.216f, 0.290f, 0.90f);
+    c[ImGuiCol_Text] = ImVec4(0.94f, 0.96f, 0.99f, 1.00f);
+    c[ImGuiCol_TextDisabled] = ImVec4(0.58f, 0.65f, 0.76f, 1.00f);
+    c[ImGuiCol_WindowBg] = CanvasBgColor();
+    c[ImGuiCol_ChildBg] = CardBgColor();
+    c[ImGuiCol_PopupBg] = ImVec4(0.102f, 0.129f, 0.184f, 0.99f);
+    c[ImGuiCol_Border] = PanelBorderColor();
     c[ImGuiCol_BorderShadow] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
 
-    c[ImGuiCol_FrameBg] = ImVec4(0.110f, 0.133f, 0.180f, 1.00f);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(0.145f, 0.176f, 0.239f, 1.00f);
-    c[ImGuiCol_FrameBgActive] = ImVec4(0.180f, 0.220f, 0.298f, 1.00f);
+    c[ImGuiCol_FrameBg] = ImVec4(0.118f, 0.145f, 0.204f, 1.00f);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(0.153f, 0.188f, 0.263f, 1.00f);
+    c[ImGuiCol_FrameBgActive] = ImVec4(0.188f, 0.231f, 0.322f, 1.00f);
 
-    c[ImGuiCol_TitleBg] = ImVec4(0.059f, 0.071f, 0.098f, 1.00f);
-    c[ImGuiCol_TitleBgActive] = ImVec4(0.082f, 0.098f, 0.133f, 1.00f);
-    c[ImGuiCol_MenuBarBg] = ImVec4(0.075f, 0.090f, 0.125f, 1.00f);
+    c[ImGuiCol_TitleBg] = SidebarBgColor();
+    c[ImGuiCol_TitleBgActive] = CardBgColor();
+    c[ImGuiCol_MenuBarBg] = SidebarBgColor();
 
-    c[ImGuiCol_ScrollbarBg] = ImVec4(0.059f, 0.071f, 0.098f, 0.45f);
-    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.22f, 0.27f, 0.36f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.30f, 0.36f, 0.47f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.36f, 0.44f, 0.58f, 1.00f);
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0.05f, 0.07f, 0.10f, 0.35f);
+    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.22f, 0.28f, 0.38f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.30f, 0.38f, 0.50f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.38f, 0.47f, 0.62f, 1.00f);
 
-    c[ImGuiCol_CheckMark] = ImVec4(0.38f, 0.66f, 1.00f, 1.00f);
-    c[ImGuiCol_SliderGrab] = ImVec4(0.38f, 0.66f, 1.00f, 1.00f);
-    c[ImGuiCol_SliderGrabActive] = ImVec4(0.50f, 0.74f, 1.00f, 1.00f);
+    c[ImGuiCol_CheckMark] = ImVec4(0.36f, 0.68f, 1.00f, 1.00f);
+    c[ImGuiCol_SliderGrab] = ImVec4(0.36f, 0.68f, 1.00f, 1.00f);
+    c[ImGuiCol_SliderGrabActive] = ImVec4(0.48f, 0.76f, 1.00f, 1.00f);
 
-    c[ImGuiCol_Button] = ImVec4(0.20f, 0.45f, 0.86f, 0.95f);
-    c[ImGuiCol_ButtonHovered] = ImVec4(0.27f, 0.54f, 0.96f, 1.00f);
-    c[ImGuiCol_ButtonActive] = ImVec4(0.16f, 0.37f, 0.73f, 1.00f);
+    c[ImGuiCol_Button] = ImVec4(0.18f, 0.47f, 0.92f, 1.00f);
+    c[ImGuiCol_ButtonHovered] = ImVec4(0.25f, 0.54f, 0.98f, 1.00f);
+    c[ImGuiCol_ButtonActive] = ImVec4(0.14f, 0.39f, 0.78f, 1.00f);
 
-    c[ImGuiCol_Header] = ImVec4(0.22f, 0.46f, 0.84f, 0.30f);
-    c[ImGuiCol_HeaderHovered] = ImVec4(0.25f, 0.50f, 0.90f, 0.44f);
-    c[ImGuiCol_HeaderActive] = ImVec4(0.25f, 0.50f, 0.90f, 0.60f);
+    c[ImGuiCol_Header] = ImVec4(0.20f, 0.47f, 0.88f, 0.28f);
+    c[ImGuiCol_HeaderHovered] = ImVec4(0.24f, 0.52f, 0.92f, 0.40f);
+    c[ImGuiCol_HeaderActive] = ImVec4(0.24f, 0.52f, 0.92f, 0.54f);
 
-    c[ImGuiCol_Separator] = ImVec4(0.176f, 0.216f, 0.290f, 0.90f);
-    c[ImGuiCol_Tab] = ImVec4(0.094f, 0.114f, 0.157f, 1.00f);
-    c[ImGuiCol_TabHovered] = ImVec4(0.22f, 0.46f, 0.85f, 0.88f);
-    c[ImGuiCol_TabSelected] = ImVec4(0.19f, 0.43f, 0.82f, 1.00f);
+    c[ImGuiCol_Separator] = ImVec4(0.16f, 0.21f, 0.30f, 0.85f);
+    c[ImGuiCol_Tab] = ImVec4(0.094f, 0.118f, 0.169f, 1.00f);
+    c[ImGuiCol_TabHovered] = ImVec4(0.20f, 0.46f, 0.85f, 0.88f);
+    c[ImGuiCol_TabSelected] = ImVec4(0.18f, 0.44f, 0.84f, 1.00f);
 
-    c[ImGuiCol_TableHeaderBg] = ImVec4(0.125f, 0.155f, 0.215f, 1.00f);
-    c[ImGuiCol_TableBorderStrong] = ImVec4(0.23f, 0.31f, 0.45f, 1.00f);
-    c[ImGuiCol_TableBorderLight] = ImVec4(0.133f, 0.165f, 0.224f, 0.85f);
+    c[ImGuiCol_TableHeaderBg] = ImVec4(0.114f, 0.145f, 0.208f, 1.00f);
+    c[ImGuiCol_TableBorderStrong] = ImVec4(0.19f, 0.25f, 0.36f, 1.00f);
+    c[ImGuiCol_TableBorderLight] = ImVec4(0.13f, 0.17f, 0.24f, 0.80f);
     c[ImGuiCol_TableRowBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
-    c[ImGuiCol_TableRowBgAlt] = ImVec4(1.0f, 1.0f, 1.0f, 0.026f);
+    c[ImGuiCol_TableRowBgAlt] = ImVec4(1.0f, 1.0f, 1.0f, 0.022f);
 
-    c[ImGuiCol_PlotHistogram] = ImVec4(0.27f, 0.56f, 0.96f, 1.00f);
+    c[ImGuiCol_PlotHistogram] = ImVec4(0.24f, 0.56f, 0.98f, 1.00f);
 }
 
 void ApplyModernLightThemeColors(ImGuiStyle& style) {
     ImGui::StyleColorsLight(&style);
     ImVec4* c = style.Colors;
-    c[ImGuiCol_Text] = ImVec4(0.08f, 0.11f, 0.18f, 1.00f);
-    c[ImGuiCol_TextDisabled] = ImVec4(0.41f, 0.47f, 0.57f, 1.00f);
-    c[ImGuiCol_WindowBg] = ImVec4(0.941f, 0.953f, 0.973f, 1.00f);
-    c[ImGuiCol_ChildBg] = ImVec4(0.988f, 0.992f, 1.000f, 1.00f);
-    c[ImGuiCol_PopupBg] = ImVec4(0.992f, 0.996f, 1.000f, 0.99f);
-    c[ImGuiCol_Border] = ImVec4(0.75f, 0.80f, 0.87f, 1.00f);
+    c[ImGuiCol_Text] = ImVec4(0.07f, 0.10f, 0.16f, 1.00f);
+    c[ImGuiCol_TextDisabled] = ImVec4(0.39f, 0.45f, 0.55f, 1.00f);
+    c[ImGuiCol_WindowBg] = CanvasBgColor();
+    c[ImGuiCol_ChildBg] = CardBgColor();
+    c[ImGuiCol_PopupBg] = ImVec4(1.000f, 1.000f, 1.000f, 0.99f);
+    c[ImGuiCol_Border] = PanelBorderColor();
     c[ImGuiCol_BorderShadow] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
 
-    c[ImGuiCol_FrameBg] = ImVec4(0.92f, 0.94f, 0.97f, 1.00f);
-    c[ImGuiCol_FrameBgHovered] = ImVec4(0.87f, 0.90f, 0.95f, 1.00f);
-    c[ImGuiCol_FrameBgActive] = ImVec4(0.82f, 0.87f, 0.94f, 1.00f);
+    c[ImGuiCol_FrameBg] = ImVec4(0.95f, 0.965f, 0.985f, 1.00f);
+    c[ImGuiCol_FrameBgHovered] = ImVec4(0.90f, 0.93f, 0.97f, 1.00f);
+    c[ImGuiCol_FrameBgActive] = ImVec4(0.85f, 0.89f, 0.95f, 1.00f);
 
-    c[ImGuiCol_TitleBg] = ImVec4(0.92f, 0.94f, 0.97f, 1.00f);
-    c[ImGuiCol_TitleBgActive] = ImVec4(0.96f, 0.97f, 0.99f, 1.00f);
-    c[ImGuiCol_MenuBarBg] = ImVec4(0.93f, 0.95f, 0.98f, 1.00f);
+    c[ImGuiCol_TitleBg] = SidebarBgColor();
+    c[ImGuiCol_TitleBgActive] = CardBgColor();
+    c[ImGuiCol_MenuBarBg] = SidebarBgColor();
 
-    c[ImGuiCol_ScrollbarBg] = ImVec4(0.93f, 0.95f, 0.98f, 0.70f);
-    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.72f, 0.77f, 0.85f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.58f, 0.65f, 0.76f, 1.00f);
-    c[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.44f, 0.53f, 0.68f, 1.00f);
+    c[ImGuiCol_ScrollbarBg] = ImVec4(0.93f, 0.95f, 0.98f, 0.65f);
+    c[ImGuiCol_ScrollbarGrab] = ImVec4(0.74f, 0.79f, 0.86f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.60f, 0.67f, 0.77f, 1.00f);
+    c[ImGuiCol_ScrollbarGrabActive] = ImVec4(0.46f, 0.55f, 0.68f, 1.00f);
 
-    c[ImGuiCol_CheckMark] = ImVec4(0.14f, 0.45f, 0.88f, 1.00f);
-    c[ImGuiCol_SliderGrab] = ImVec4(0.16f, 0.48f, 0.90f, 1.00f);
-    c[ImGuiCol_SliderGrabActive] = ImVec4(0.11f, 0.39f, 0.80f, 1.00f);
+    c[ImGuiCol_CheckMark] = ImVec4(0.10f, 0.42f, 0.85f, 1.00f);
+    c[ImGuiCol_SliderGrab] = ImVec4(0.10f, 0.42f, 0.85f, 1.00f);
+    c[ImGuiCol_SliderGrabActive] = ImVec4(0.07f, 0.34f, 0.72f, 1.00f);
 
-    c[ImGuiCol_Button] = ImVec4(0.74f, 0.85f, 0.99f, 1.00f);
-    c[ImGuiCol_ButtonHovered] = ImVec4(0.65f, 0.80f, 0.98f, 1.00f);
-    c[ImGuiCol_ButtonActive] = ImVec4(0.57f, 0.74f, 0.96f, 1.00f);
+    // Default ImGui button stays light-neutral so dark ImGuiCol_Text always contrasts cleanly;
+    // primary CTAs explicitly use RenderPrimaryButton() with crisp white text.
+    c[ImGuiCol_Button] = ImVec4(0.94f, 0.96f, 0.98f, 1.00f);
+    c[ImGuiCol_ButtonHovered] = ImVec4(0.88f, 0.92f, 0.97f, 1.00f);
+    c[ImGuiCol_ButtonActive] = ImVec4(0.82f, 0.87f, 0.95f, 1.00f);
+    c[ImGuiCol_ModalWindowDimBg] = ImVec4(0.06f, 0.09f, 0.16f, 0.38f);
 
-    c[ImGuiCol_Header] = ImVec4(0.18f, 0.48f, 0.88f, 0.16f);
-    c[ImGuiCol_HeaderHovered] = ImVec4(0.18f, 0.48f, 0.88f, 0.26f);
-    c[ImGuiCol_HeaderActive] = ImVec4(0.18f, 0.48f, 0.88f, 0.38f);
+    c[ImGuiCol_Header] = ImVec4(0.10f, 0.43f, 0.85f, 0.14f);
+    c[ImGuiCol_HeaderHovered] = ImVec4(0.10f, 0.43f, 0.85f, 0.22f);
+    c[ImGuiCol_HeaderActive] = ImVec4(0.10f, 0.43f, 0.85f, 0.32f);
 
-    c[ImGuiCol_Separator] = ImVec4(0.76f, 0.81f, 0.88f, 0.95f);
-    c[ImGuiCol_Tab] = ImVec4(0.90f, 0.92f, 0.96f, 1.00f);
-    c[ImGuiCol_TabHovered] = ImVec4(0.80f, 0.88f, 0.98f, 1.00f);
-    c[ImGuiCol_TabSelected] = ImVec4(0.76f, 0.86f, 0.99f, 1.00f);
+    c[ImGuiCol_Separator] = ImVec4(0.84f, 0.88f, 0.93f, 0.95f);
+    c[ImGuiCol_Tab] = ImVec4(0.91f, 0.93f, 0.96f, 1.00f);
+    c[ImGuiCol_TabHovered] = ImVec4(0.82f, 0.89f, 0.98f, 1.00f);
+    c[ImGuiCol_TabSelected] = ImVec4(0.78f, 0.87f, 0.99f, 1.00f);
 
-    c[ImGuiCol_TableHeaderBg] = ImVec4(0.89f, 0.92f, 0.96f, 1.00f);
-    c[ImGuiCol_TableBorderStrong] = ImVec4(0.72f, 0.78f, 0.86f, 1.00f);
-    c[ImGuiCol_TableBorderLight] = ImVec4(0.83f, 0.87f, 0.92f, 0.95f);
+    c[ImGuiCol_TableHeaderBg] = ImVec4(0.94f, 0.955f, 0.98f, 1.00f);
+    c[ImGuiCol_TableBorderStrong] = ImVec4(0.82f, 0.86f, 0.92f, 1.00f);
+    c[ImGuiCol_TableBorderLight] = ImVec4(0.89f, 0.92f, 0.95f, 0.95f);
     c[ImGuiCol_TableRowBg] = ImVec4(0.0f, 0.0f, 0.0f, 0.0f);
-    c[ImGuiCol_TableRowBgAlt] = ImVec4(0.0f, 0.15f, 0.35f, 0.035f);
+    c[ImGuiCol_TableRowBgAlt] = ImVec4(0.0f, 0.15f, 0.35f, 0.025f);
 
-    c[ImGuiCol_PlotHistogram] = ImVec4(0.20f, 0.54f, 0.92f, 1.00f);
+    c[ImGuiCol_PlotHistogram] = ImVec4(0.10f, 0.43f, 0.85f, 1.00f);
 }
 
 void ApplyAppTheme(HWND hwnd, float scale, bool lightTheme, bool initLayout) {
@@ -288,6 +358,9 @@ void LoadUserPreferences() noexcept {
     if (readDword(L"AutoCheckUpdates", dw)) {
         g_autoCheckAppUpdates = (dw != 0);
     }
+    if (readDword(L"PinLogPanel", dw)) {
+        g_pinLogPanel = (dw != 0);
+    }
     if (readDword(L"Language", dw)) {
         if (dw == static_cast<DWORD>(hdm::Lang::Ru)) {
             hdm::SetLang(hdm::Lang::Ru);
@@ -327,6 +400,7 @@ void SaveUserPreferences() noexcept {
     writeDword(L"AdvancedMode", g_isAdvancedMode ? 1u : 0u);
     writeDword(L"LightTheme", g_isLightTheme ? 1u : 0u);
     writeDword(L"AutoCheckUpdates", g_autoCheckAppUpdates ? 1u : 0u);
+    writeDword(L"PinLogPanel", g_pinLogPanel ? 1u : 0u);
     writeDword(L"Language", static_cast<DWORD>(hdm::GetLang()));
 }
 
@@ -550,9 +624,8 @@ bool RenderCellText(const std::string& text, bool dimmed, bool alignToFrame) {
     return (shown != raw);
 }
 
-// Rounded tinted pill status badge with UTF-8 ellipsis protection and optional vertical frame centering.
 void RenderStatusBadge(const ImVec4& color, const char* text, bool alignToFrame) {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
     const float textH = ImGui::GetTextLineHeight();
     const float frameH = ImGui::GetFrameHeight();
     const float badgeH = textH + std::round(6.0f * uiScale);
@@ -576,14 +649,14 @@ void RenderStatusBadge(const ImVec4& color, const char* text, bool alignToFrame)
     const ImVec2 pMax(pMin.x + pillW, pMin.y + badgeH);
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const ImVec4 bgVec(color.x, color.y, color.z, g_isLightTheme ? 0.16f : 0.14f);
+    const ImVec4 bgVec(color.x, color.y, color.z, g_isLightTheme ? 0.14f : 0.14f);
     const ImVec4 borderVec =
         g_isLightTheme
-            ? ImVec4(color.x * 0.72f, color.y * 0.72f, color.z * 0.72f, 0.50f)
-            : ImVec4(color.x, color.y, color.z, 0.42f);
+            ? ImVec4(color.x * 0.72f, color.y * 0.72f, color.z * 0.72f, 0.38f)
+            : ImVec4(color.x, color.y, color.z, 0.36f);
     const ImVec4 fgVec =
         g_isLightTheme
-            ? ImVec4(color.x * 0.50f, color.y * 0.50f, color.z * 0.50f, 1.00f)
+            ? ImVec4(color.x * 0.48f, color.y * 0.48f, color.z * 0.48f, 1.00f)
             : color;
     const float rounding = badgeH * 0.5f;
     dl->AddRectFilled(pMin, pMax, ImGui::ColorConvertFloat4ToU32(bgVec), rounding);
@@ -601,35 +674,35 @@ void RenderStatusBadge(const ImVec4& color, const char* text, bool alignToFrame)
 }
 
 bool RenderPillButton(const char* label, bool active, const ImVec2& size) {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::round(10.0f * uiScale));
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::round(14.0f * uiScale));
     if (g_isLightTheme) {
         if (active) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.82f, 0.89f, 0.98f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.75f, 0.84f, 0.97f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.69f, 0.80f, 0.95f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.50f, 0.82f, 0.88f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.08f, 0.18f, 0.36f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.86f, 0.92f, 0.99f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.80f, 0.88f, 0.98f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.74f, 0.84f, 0.97f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.18f, 0.48f, 0.86f, 0.70f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.08f, 0.28f, 0.62f, 1.00f));
         } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.94f, 0.95f, 0.98f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.88f, 0.91f, 0.96f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.83f, 0.87f, 0.94f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.77f, 0.82f, 0.88f, 0.90f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.32f, 0.38f, 0.48f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.93f, 0.95f, 0.98f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.88f, 0.91f, 0.96f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.82f, 0.86f, 0.92f, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.30f, 0.36f, 0.46f, 1.00f));
         }
     } else {
         if (active) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.21f, 0.33f, 0.95f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.27f, 0.42f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.12f, 0.18f, 0.29f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.34f, 0.54f, 0.80f, 0.82f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.88f, 0.94f, 1.00f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f, 0.24f, 0.40f, 0.98f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f, 0.30f, 0.49f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.12f, 0.21f, 0.35f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.32f, 0.60f, 0.95f, 0.78f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.96f, 1.00f, 1.00f));
         } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.102f, 0.122f, 0.165f, 0.92f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.145f, 0.175f, 0.238f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.090f, 0.108f, 0.148f, 0.95f));
-            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.19f, 0.23f, 0.31f, 0.85f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.68f, 0.74f, 0.84f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.105f, 0.130f, 0.184f, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.145f, 0.180f, 0.250f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.090f, 0.112f, 0.160f, 0.98f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.18f, 0.23f, 0.32f, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.66f, 0.73f, 0.84f, 1.00f));
         }
     }
     const bool clicked = ImGui::Button(label, size);
@@ -639,46 +712,46 @@ bool RenderPillButton(const char* label, bool active, const ImVec2& size) {
 }
 
 float CalcSubSectionTabWidth(const char* label) {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
     PushFontSafe(g_fontSecondaryHeader);
-    const float w = ImGui::CalcTextSize(label, nullptr, true).x + std::round(12.0f * uiScale) * 2.0f;
+    const float w = ImGui::CalcTextSize(label, nullptr, true).x + std::round(14.0f * uiScale) * 2.0f;
     PopFontSafe(g_fontSecondaryHeader);
     return w;
 }
 
 bool RenderSubSectionHeaderTab(const char* label, bool active) {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
     PushFontSafe(g_fontSecondaryHeader);
-    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::round(5.0f * uiScale));
+    ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::round(7.0f * uiScale));
     ImGui::PushStyleVar(
         ImGuiStyleVar_FramePadding,
-        ImVec2(std::round(12.0f * uiScale), std::round(5.5f * uiScale)));
+        ImVec2(std::round(14.0f * uiScale), std::round(6.0f * uiScale)));
     if (g_isLightTheme) {
         if (active) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.83f, 0.93f, 0.97f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.76f, 0.89f, 0.95f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.70f, 0.85f, 0.93f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.16f, 0.56f, 0.74f, 0.95f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.06f, 0.22f, 0.32f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.88f, 0.93f, 1.00f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.83f, 0.90f, 0.99f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.78f, 0.86f, 0.98f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.20f, 0.49f, 0.86f, 0.72f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.08f, 0.27f, 0.62f, 1.00f));
         } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.93f, 0.95f, 0.98f, 0.95f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.87f, 0.91f, 0.96f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.82f, 0.87f, 0.93f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.76f, 0.81f, 0.88f, 0.85f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.34f, 0.41f, 0.52f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.00f, 1.00f, 1.00f, 0.95f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.93f, 0.95f, 0.98f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.88f, 0.91f, 0.96f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.83f, 0.87f, 0.92f, 0.90f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.32f, 0.39f, 0.50f, 1.00f));
         }
     } else {
         if (active) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.105f, 0.185f, 0.265f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.135f, 0.235f, 0.335f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.090f, 0.160f, 0.230f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.26f, 0.68f, 0.84f, 0.92f));
-            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.92f, 0.97f, 1.00f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.125f, 0.215f, 0.355f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.155f, 0.260f, 0.425f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.105f, 0.185f, 0.305f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.28f, 0.60f, 0.95f, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.95f, 0.98f, 1.00f, 1.00f));
         } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.092f, 0.112f, 0.152f, 0.85f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.125f, 0.160f, 0.220f, 0.95f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.080f, 0.100f, 0.138f, 0.95f));
-            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.17f, 0.21f, 0.28f, 0.75f));
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.094f, 0.118f, 0.169f, 0.92f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.130f, 0.165f, 0.235f, 0.98f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.082f, 0.104f, 0.148f, 0.98f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.17f, 0.22f, 0.30f, 0.80f));
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.64f, 0.72f, 0.84f, 1.00f));
         }
     }
@@ -688,14 +761,11 @@ bool RenderSubSectionHeaderTab(const char* label, bool active) {
         const ImVec2 rMax = ImGui::GetItemRectMax();
         const float lineH = std::max(2.0f, 2.5f * uiScale);
         const float y = rMax.y - lineH * 0.5f;
-        const float pad = std::round(4.0f * uiScale);
-        const ImVec4 lineCol = g_isLightTheme
-                                   ? ImVec4(0.09f, 0.54f, 0.76f, 1.00f)
-                                   : ImVec4(0.32f, 0.78f, 0.94f, 1.00f);
+        const float pad = std::round(6.0f * uiScale);
         ImGui::GetWindowDrawList()->AddLine(
             ImVec2(rMin.x + pad, y),
             ImVec2(rMax.x - pad, y),
-            ImGui::ColorConvertFloat4ToU32(lineCol),
+            ImGui::ColorConvertFloat4ToU32(AccentBarColor()),
             lineH);
     }
     ImGui::PopStyleColor(5);
@@ -705,120 +775,122 @@ bool RenderSubSectionHeaderTab(const char* label, bool active) {
 }
 
 void RenderSecondaryCardHeader(const char* title, const char* rightMeta) {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
     PushFontSafe(g_fontSecondaryHeader);
     const float textH = ImGui::GetTextLineHeight();
-    const float padX = std::round(9.0f * uiScale);
-    const float padY = std::round(4.0f * uiScale);
-    const float bannerH = textH + padY * 2.0f;
     const float availW = std::max(60.0f, ImGui::GetContentRegionAvail().x);
+    const float headerH = textH + std::round(4.0f * uiScale);
 
     const ImVec2 pMin = ImGui::GetCursorScreenPos();
-    const ImVec2 pMax(pMin.x + availW, pMin.y + bannerH);
+    const ImVec2 pMax(pMin.x + availW, pMin.y + headerH);
     ImDrawList* dl = ImGui::GetWindowDrawList();
 
-    const float rounding = std::round(4.0f * uiScale);
-    const ImVec4 fillCol = g_isLightTheme
-                               ? ImVec4(0.90f, 0.93f, 0.97f, 1.00f)
-                               : ImVec4(0.115f, 0.145f, 0.205f, 0.92f);
-    const ImVec4 borderCol = g_isLightTheme
-                                 ? ImVec4(0.72f, 0.79f, 0.88f, 0.95f)
-                                 : ImVec4(0.22f, 0.32f, 0.46f, 0.80f);
-    dl->AddRectFilled(pMin, pMax, ImGui::ColorConvertFloat4ToU32(fillCol), rounding);
-    dl->AddRect(pMin, pMax, ImGui::ColorConvertFloat4ToU32(borderCol), rounding, 0, 1.0f);
-
     const float barW = std::max(2.5f, std::round(3.0f * uiScale));
-    const float barPadY = std::round(3.0f * uiScale);
+    const float barPadY = std::round(2.0f * uiScale);
     dl->AddRectFilled(
-        ImVec2(pMin.x + 2.0f, pMin.y + barPadY),
-        ImVec2(pMin.x + 2.0f + barW, pMax.y - barPadY),
+        ImVec2(pMin.x, pMin.y + barPadY),
+        ImVec2(pMin.x + barW, pMax.y - barPadY),
         ImGui::ColorConvertFloat4ToU32(AccentBarColor()),
         barW * 0.5f);
 
     float rightReserve = 0.0f;
     if (rightMeta != nullptr && rightMeta[0] != '\0') {
         const ImVec2 metaSize = ImGui::CalcTextSize(rightMeta);
-        rightReserve = metaSize.x + padX * 1.5f;
-        const ImVec4 metaCol = g_isLightTheme
-                                   ? ImVec4(0.38f, 0.45f, 0.56f, 1.00f)
-                                   : ImVec4(0.56f, 0.64f, 0.76f, 1.00f);
+        rightReserve = metaSize.x + std::round(10.0f * uiScale);
         dl->AddText(
-            ImVec2(pMax.x - padX - metaSize.x, pMin.y + padY),
-            ImGui::ColorConvertFloat4ToU32(metaCol),
+            ImVec2(pMax.x - metaSize.x, pMin.y + (headerH - textH) * 0.5f),
+            ImGui::ColorConvertFloat4ToU32(MutedTextColor()),
             rightMeta);
     }
 
-    const float maxTitleW = std::max(24.0f, availW - (padX + barW + 4.0f + padX + rightReserve));
+    const float titleOffset = barW + std::round(8.0f * uiScale);
+    const float maxTitleW = std::max(24.0f, availW - titleOffset - rightReserve);
     const std::string shownTitle = EllipsizeUtf8(title != nullptr ? title : "", maxTitleW);
     dl->AddText(
-        ImVec2(pMin.x + 2.0f + barW + padX, pMin.y + padY),
+        ImVec2(pMin.x + titleOffset, pMin.y + (headerH - textH) * 0.5f),
         ImGui::ColorConvertFloat4ToU32(CardHeaderTextColor()),
         shownTitle.c_str());
 
-    ImGui::Dummy(ImVec2(availW, bannerH));
+    ImGui::Dummy(ImVec2(availW, headerH));
     PopFontSafe(g_fontSecondaryHeader);
-}
-
-void RenderVerticalDivider(float padX) {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
-    const float gap = std::round(padX * uiScale);
-    const float h = ImGui::GetFrameHeight();
-    ImGui::SameLine(0.0f, gap);
-    const ImVec2 p = ImGui::GetCursorScreenPos();
-    const float x = std::floor(p.x + 1.0f) + 0.5f;
-    const float yPad = std::round(3.0f * uiScale);
-    const ImVec4 divCol = g_isLightTheme
-                              ? ImVec4(0.73f, 0.78f, 0.86f, 0.95f)
-                              : ImVec4(0.24f, 0.31f, 0.44f, 0.90f);
-    ImGui::GetWindowDrawList()->AddLine(
-        ImVec2(x, p.y + yPad),
-        ImVec2(x, p.y + h - yPad),
-        ImGui::ColorConvertFloat4ToU32(divCol),
-        1.0f);
-    ImGui::Dummy(ImVec2(2.0f + gap, h));
 }
 
 void RenderSecondaryGroupLabel(const char* text) {
     PushFontSafe(g_fontSecondaryHeader);
     ImGui::AlignTextToFramePadding();
-    const ImVec4 lblCol = g_isLightTheme
-                              ? ImVec4(0.32f, 0.40f, 0.52f, 1.00f)
-                              : ImVec4(0.58f, 0.67f, 0.80f, 1.00f);
-    ImGui::TextColored(lblCol, "%s", text);
+    ImGui::TextColored(MutedTextColor(), "%s", text);
     PopFontSafe(g_fontSecondaryHeader);
 }
 
 void RenderTableHeadersRow() {
     PushFontSafe(g_fontSecondaryHeader);
     const ImVec4 hdrCol = g_isLightTheme
-                              ? ImVec4(0.12f, 0.20f, 0.34f, 1.00f)
-                              : ImVec4(0.78f, 0.87f, 0.98f, 1.00f);
+                              ? ImVec4(0.16f, 0.23f, 0.35f, 1.00f)
+                              : ImVec4(0.76f, 0.84f, 0.96f, 1.00f);
     ImGui::PushStyleColor(ImGuiCol_Text, hdrCol);
     ImGui::TableHeadersRow();
     ImGui::PopStyleColor();
     PopFontSafe(g_fontSecondaryHeader);
 }
 
-bool RenderSecondaryButton(const char* label, const ImVec2& size) {
+bool RenderPrimaryButton(const char* label, const ImVec2& size) {
+    const bool isDisabled = (ImGui::GetStyle().Alpha < 0.95f);
     if (g_isLightTheme) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.93f, 0.95f, 0.98f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.87f, 0.91f, 0.96f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.81f, 0.86f, 0.94f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.70f, 0.76f, 0.85f, 0.95f));
+        if (isDisabled) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.84f, 0.88f, 0.93f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.84f, 0.88f, 0.93f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.84f, 0.88f, 0.93f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.75f, 0.80f, 0.88f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.24f, 0.31f, 0.42f, 1.00f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.10f, 0.43f, 0.85f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.08f, 0.36f, 0.76f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.06f, 0.30f, 0.66f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.08f, 0.36f, 0.75f, 0.85f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+        }
     } else {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.125f, 0.149f, 0.204f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.173f, 0.208f, 0.278f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.106f, 0.129f, 0.180f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.23f, 0.28f, 0.37f, 0.95f));
+        if (isDisabled) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.22f, 0.33f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.16f, 0.22f, 0.33f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.16f, 0.22f, 0.33f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.24f, 0.31f, 0.43f, 0.75f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.76f, 0.82f, 0.92f, 1.00f));
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.18f, 0.48f, 0.94f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.25f, 0.55f, 1.00f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.14f, 0.40f, 0.82f, 1.00f));
+            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.32f, 0.62f, 1.00f, 0.55f));
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+        }
     }
     const bool clicked = ImGui::Button(label, size);
-    ImGui::PopStyleColor(4);
+    ImGui::PopStyleColor(5);
+    return clicked;
+}
+
+bool RenderSecondaryButton(const char* label, const ImVec2& size) {
+    if (g_isLightTheme) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(1.00f, 1.00f, 1.00f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.93f, 0.95f, 0.98f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.87f, 0.91f, 0.96f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.78f, 0.83f, 0.90f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.12f, 0.17f, 0.26f, 1.00f));
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.125f, 0.155f, 0.218f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.170f, 0.212f, 0.294f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.105f, 0.132f, 0.188f, 1.00f));
+        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.22f, 0.28f, 0.39f, 0.95f));
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.89f, 0.93f, 0.98f, 1.00f));
+    }
+    const bool clicked = ImGui::Button(label, size);
+    ImGui::PopStyleColor(5);
     return clicked;
 }
 
 bool RenderActionButton(const char* label, const ImVec2& size, bool primary) {
     if (primary) {
-        return ImGui::Button(label, size);
+        return RenderPrimaryButton(label, size);
     }
     return RenderSecondaryButton(label, size);
 }
@@ -827,10 +899,10 @@ float CalcSummaryInfoBadgeWidth(const SummaryBadgeSegment* segments, size_t coun
     if (segments == nullptr || count == 0) {
         return 0.0f;
     }
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
-    const float padX = std::round(7.0f * uiScale);
-    const float gap = std::round(3.0f * uiScale);
-    const float sepPad = std::round(5.0f * uiScale);
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float padX = std::round(9.0f * uiScale);
+    const float gap = std::round(4.0f * uiScale);
+    const float sepPad = std::round(6.0f * uiScale);
     const float sepTotal = sepPad * 2.0f + 1.0f;
 
     float total = padX * 2.0f;
@@ -856,10 +928,10 @@ void RenderSummaryInfoBadge(const SummaryBadgeSegment* segments, size_t count) {
     if (segments == nullptr || count == 0) {
         return;
     }
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
-    const float padX = std::round(7.0f * uiScale);
-    const float gap = std::round(3.0f * uiScale);
-    const float sepPad = std::round(5.0f * uiScale);
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float padX = std::round(9.0f * uiScale);
+    const float gap = std::round(4.0f * uiScale);
+    const float sepPad = std::round(6.0f * uiScale);
     const float frameH = ImGui::GetFrameHeight();
     const float badgeW = CalcSummaryInfoBadgeWidth(segments, count);
 
@@ -867,19 +939,14 @@ void RenderSummaryInfoBadge(const SummaryBadgeSegment* segments, size_t count) {
     const ImVec2 pMax(pMin.x + badgeW, pMin.y + frameH);
     ImGui::Dummy(ImVec2(badgeW, frameH));
 
-    const ImVec4 bgCol =
-        g_isLightTheme ? ImVec4(0.92f, 0.95f, 0.99f, 1.00f) : ImVec4(0.09f, 0.14f, 0.23f, 0.96f);
-    const ImVec4 borderCol =
-        g_isLightTheme ? ImVec4(0.62f, 0.72f, 0.86f, 0.90f) : ImVec4(0.24f, 0.37f, 0.56f, 0.78f);
-    const ImU32 sepCol =
-        g_isLightTheme ? IM_COL32(150, 170, 198, 170) : IM_COL32(72, 98, 134, 150);
-    const ImVec4 defaultLabelCol =
-        g_isLightTheme ? ImVec4(0.32f, 0.38f, 0.48f, 1.00f) : ImVec4(0.71f, 0.78f, 0.89f, 1.00f);
-    const ImVec4 tintedLabelCol =
-        g_isLightTheme ? ImVec4(0.55f, 0.34f, 0.02f, 1.00f) : ImVec4(0.96f, 0.82f, 0.50f, 1.00f);
+    const ImVec4 bgCol = CardBgColor();
+    const ImVec4 borderCol = PanelBorderColor();
+    const ImU32 sepCol = ImGui::ColorConvertFloat4ToU32(PanelBorderColor());
+    const ImVec4 defaultLabelCol = MutedTextColor();
+    const ImVec4 tintedLabelCol = WarningTextColor();
 
     ImDrawList* dl = ImGui::GetWindowDrawList();
-    const float rounding = std::round(6.0f * uiScale);
+    const float rounding = std::round(7.0f * uiScale);
     dl->AddRectFilled(pMin, pMax, ImGui::ColorConvertFloat4ToU32(bgCol), rounding);
     dl->AddRect(pMin, pMax, ImGui::ColorConvertFloat4ToU32(borderCol), rounding, 0, 1.0f);
 
@@ -914,7 +981,7 @@ void RenderSummaryInfoBadge(const SummaryBadgeSegment* segments, size_t count) {
         if (hasValue) {
             const ImVec4 valCol =
                 g_isLightTheme
-                    ? ImVec4(seg.accentColor.x * 0.50f, seg.accentColor.y * 0.50f, seg.accentColor.z * 0.50f, 1.00f)
+                    ? ImVec4(seg.accentColor.x * 0.52f, seg.accentColor.y * 0.52f, seg.accentColor.z * 0.52f, 1.00f)
                     : seg.accentColor;
             PushFontSafe(g_fontSecondaryHeader);
             const ImVec2 valSize = ImGui::CalcTextSize(seg.value);
@@ -928,9 +995,372 @@ void RenderSummaryInfoBadge(const SummaryBadgeSegment* segments, size_t count) {
     }
 }
 
+void DrawAppIcon(ImDrawList* dl, ImVec2 c, float s, AppIcon icon, ImU32 col) {
+    if (dl == nullptr) {
+        return;
+    }
+    const float r = s * 0.5f;
+    const float t = std::max(1.4f, s * 0.105f);
+
+    switch (icon) {
+    case AppIcon::BrandLogo: {
+        // Fallback vector icon matching app_icon.png: rounded microchip inside circular update ring
+        const float ar = r * 0.84f;
+        dl->PathClear();
+        dl->PathArcTo(c, ar, 0.35f, 5.55f, 28);
+        dl->PathStroke(col, 0, t * 1.15f);
+        const float chipR = r * 0.38f;
+        dl->AddRect(
+            ImVec2(c.x - chipR, c.y - chipR),
+            ImVec2(c.x + chipR, c.y + chipR),
+            col,
+            std::max(1.5f, s * 0.08f),
+            0,
+            t);
+        break;
+    }
+    case AppIcon::Home: {
+        // Clean house outline
+        const ImVec2 roofL(c.x - r * 0.85f, c.y - r * 0.05f);
+        const ImVec2 roofTop(c.x, c.y - r * 0.82f);
+        const ImVec2 roofR(c.x + r * 0.85f, c.y - r * 0.05f);
+        dl->AddLine(roofL, roofTop, col, t);
+        dl->AddLine(roofTop, roofR, col, t);
+        const ImVec2 wallTL(c.x - r * 0.58f, c.y - r * 0.10f);
+        const ImVec2 wallBL(c.x - r * 0.58f, c.y + r * 0.72f);
+        const ImVec2 wallBR(c.x + r * 0.58f, c.y + r * 0.72f);
+        const ImVec2 wallTR(c.x + r * 0.58f, c.y - r * 0.10f);
+        dl->AddLine(wallTL, wallBL, col, t);
+        dl->AddLine(wallBL, wallBR, col, t);
+        dl->AddLine(wallBR, wallTR, col, t);
+        break;
+    }
+    case AppIcon::Apps: {
+        // 2x2 rounded grid (Games & Software)
+        const float g = r * 0.16f;
+        const float b = r * 0.68f;
+        const float rnd = std::max(1.5f, s * 0.12f);
+        dl->AddRect(ImVec2(c.x - b - g, c.y - b - g), ImVec2(c.x - g, c.y - g), col, rnd, 0, t);
+        dl->AddRect(ImVec2(c.x + g, c.y - b - g), ImVec2(c.x + b + g, c.y - g), col, rnd, 0, t);
+        dl->AddRect(ImVec2(c.x - b - g, c.y + g), ImVec2(c.x - g, c.y + b + g), col, rnd, 0, t);
+        dl->AddRect(ImVec2(c.x + g, c.y + g), ImVec2(c.x + b + g, c.y + b + g), col, rnd, 0, t);
+        break;
+    }
+    case AppIcon::Updates:
+    case AppIcon::Refresh: {
+        // Crisp symmetric circular update arrows with exact tangent-aligned triangular heads
+        const float ar = r * 0.72f;
+        const float headLen = std::max(3.6f, r * 0.44f);
+        const float headHalfW = std::max(2.6f, r * 0.30f);
+
+        auto drawArcWithArrow = [&](float aStart, float aEnd) {
+            dl->PathClear();
+            dl->PathArcTo(c, ar, aStart, aEnd, 20);
+            dl->PathStroke(col, 0, t);
+
+            // Exact unit tangent (clockwise in screen Y-down coords) and outward radial normal at aEnd
+            const float ca = std::cos(aEnd);
+            const float sa = std::sin(aEnd);
+            const ImVec2 endPt(c.x + ca * ar, c.y + sa * ar);
+            const ImVec2 tanVec(-sa, ca);
+            const ImVec2 radVec(ca, sa);
+
+            const ImVec2 tip(endPt.x + tanVec.x * headLen * 0.62f, endPt.y + tanVec.y * headLen * 0.62f);
+            const ImVec2 base(endPt.x - tanVec.x * headLen * 0.38f, endPt.y - tanVec.y * headLen * 0.38f);
+            const ImVec2 wingOut(base.x + radVec.x * headHalfW, base.y + radVec.y * headHalfW);
+            const ImVec2 wingIn(base.x - radVec.x * headHalfW, base.y - radVec.y * headHalfW);
+            dl->AddTriangleFilled(tip, wingOut, wingIn, col);
+        };
+
+        drawArcWithArrow(-2.45f, -0.35f);
+        drawArcWithArrow(0.69f, 2.79f);
+        break;
+    }
+    case AppIcon::Devices: {
+        // Monitor with stand
+        const float rnd = std::max(1.5f, s * 0.10f);
+        dl->AddRect(
+            ImVec2(c.x - r * 0.82f, c.y - r * 0.66f),
+            ImVec2(c.x + r * 0.82f, c.y + r * 0.36f),
+            col,
+            rnd,
+            0,
+            t);
+        dl->AddLine(ImVec2(c.x, c.y + r * 0.36f), ImVec2(c.x, c.y + r * 0.72f), col, t);
+        dl->AddLine(ImVec2(c.x - r * 0.44f, c.y + r * 0.72f), ImVec2(c.x + r * 0.44f, c.y + r * 0.72f), col, t);
+        break;
+    }
+    case AppIcon::Shield: {
+        // Protective shield with checkmark
+        ImVec2 pts[5] = {
+            ImVec2(c.x, c.y - r * 0.84f),
+            ImVec2(c.x + r * 0.74f, c.y - r * 0.50f),
+            ImVec2(c.x + r * 0.60f, c.y + r * 0.25f),
+            ImVec2(c.x, c.y + r * 0.86f),
+            ImVec2(c.x - r * 0.60f, c.y + r * 0.25f),
+        };
+        ImVec2 ptsFull[6] = {
+            pts[0],
+            pts[1],
+            pts[2],
+            pts[3],
+            pts[4],
+            ImVec2(c.x - r * 0.74f, c.y - r * 0.50f),
+        };
+        dl->AddPolyline(ptsFull, 6, col, ImDrawFlags_Closed, t);
+        dl->AddLine(
+            ImVec2(c.x - r * 0.30f, c.y + r * 0.02f),
+            ImVec2(c.x - r * 0.06f, c.y + r * 0.26f),
+            col,
+            t);
+        dl->AddLine(
+            ImVec2(c.x - r * 0.06f, c.y + r * 0.26f),
+            ImVec2(c.x + r * 0.34f, c.y - r * 0.22f),
+            col,
+            t);
+        break;
+    }
+    case AppIcon::Folder: {
+        ImVec2 pts[6] = {
+            ImVec2(c.x - r * 0.82f, c.y - r * 0.56f),
+            ImVec2(c.x - r * 0.22f, c.y - r * 0.56f),
+            ImVec2(c.x - r * 0.02f, c.y - r * 0.32f),
+            ImVec2(c.x + r * 0.82f, c.y - r * 0.32f),
+            ImVec2(c.x + r * 0.82f, c.y + r * 0.62f),
+            ImVec2(c.x - r * 0.82f, c.y + r * 0.62f),
+        };
+        dl->AddPolyline(pts, 6, col, ImDrawFlags_Closed, t);
+        break;
+    }
+    case AppIcon::Settings: {
+        // Sliders / Gear icon (3 horizontal bars with knobs — ultra crisp at small sizes)
+        const float w = r * 0.78f;
+        const float y1 = c.y - r * 0.50f;
+        const float y2 = c.y;
+        const float y3 = c.y + r * 0.50f;
+        const float kr = std::max(1.8f, r * 0.22f);
+        dl->AddLine(ImVec2(c.x - w, y1), ImVec2(c.x + w, y1), col, t);
+        dl->AddLine(ImVec2(c.x - w, y2), ImVec2(c.x + w, y2), col, t);
+        dl->AddLine(ImVec2(c.x - w, y3), ImVec2(c.x + w, y3), col, t);
+        dl->AddCircleFilled(ImVec2(c.x - w * 0.35f, y1), kr, col);
+        dl->AddCircleFilled(ImVec2(c.x + w * 0.35f, y2), kr, col);
+        dl->AddCircleFilled(ImVec2(c.x - w * 0.15f, y3), kr, col);
+        break;
+    }
+    case AppIcon::Info: {
+        dl->AddCircle(c, r * 0.82f, col, 24, t);
+        dl->AddCircleFilled(ImVec2(c.x, c.y - r * 0.34f), std::max(1.1f, r * 0.14f), col, 12);
+        dl->AddLine(ImVec2(c.x, c.y - r * 0.06f), ImVec2(c.x, c.y + r * 0.42f), col, t * 1.05f);
+        break;
+    }
+    case AppIcon::Sun: {
+        dl->AddCircle(c, r * 0.42f, col, 20, t);
+        for (int i = 0; i < 8; ++i) {
+            const float a = static_cast<float>(i) * 0.78539816f;
+            dl->AddLine(
+                ImVec2(c.x + std::cos(a) * r * 0.62f, c.y + std::sin(a) * r * 0.62f),
+                ImVec2(c.x + std::cos(a) * r * 0.88f, c.y + std::sin(a) * r * 0.88f),
+                col,
+                t * 0.9f);
+        }
+        break;
+    }
+    case AppIcon::Moon: {
+        dl->PathClear();
+        dl->PathArcTo(c, r * 0.74f, 0.55f, 4.90f, 20);
+        dl->PathStroke(col, 0, t);
+        dl->PathClear();
+        dl->PathArcTo(ImVec2(c.x + r * 0.36f, c.y - r * 0.24f), r * 0.58f, 1.30f, 4.20f, 16);
+        dl->PathStroke(col, 0, t);
+        break;
+    }
+    case AppIcon::CheckCircle: {
+        dl->AddCircle(c, r * 0.84f, col, 28, t);
+        dl->AddLine(
+            ImVec2(c.x - r * 0.36f, c.y + r * 0.02f),
+            ImVec2(c.x - r * 0.08f, c.y + r * 0.30f),
+            col,
+            t * 1.1f);
+        dl->AddLine(
+            ImVec2(c.x - r * 0.08f, c.y + r * 0.30f),
+            ImVec2(c.x + r * 0.40f, c.y - r * 0.26f),
+            col,
+            t * 1.1f);
+        break;
+    }
+    case AppIcon::AlertTriangle: {
+        ImVec2 tri[3] = {
+            ImVec2(c.x, c.y - r * 0.82f),
+            ImVec2(c.x + r * 0.84f, c.y + r * 0.72f),
+            ImVec2(c.x - r * 0.84f, c.y + r * 0.72f),
+        };
+        dl->AddPolyline(tri, 3, col, ImDrawFlags_Closed, t);
+        dl->AddLine(ImVec2(c.x, c.y - r * 0.26f), ImVec2(c.x, c.y + r * 0.22f), col, t * 1.05f);
+        dl->AddCircleFilled(ImVec2(c.x, c.y + r * 0.46f), std::max(1.2f, r * 0.12f), col, 12);
+        break;
+    }
+    case AppIcon::ChevronUp: {
+        dl->AddLine(ImVec2(c.x - r * 0.55f, c.y + r * 0.22f), ImVec2(c.x, c.y - r * 0.30f), col, t);
+        dl->AddLine(ImVec2(c.x, c.y - r * 0.30f), ImVec2(c.x + r * 0.55f, c.y + r * 0.22f), col, t);
+        break;
+    }
+    }
+}
+
+bool RenderSidebarNavItem(
+    const char* id,
+    AppIcon icon,
+    const char* label,
+    bool active,
+    size_t badgeCount,
+    const ImVec4& badgeColor,
+    float width) {
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float itemW = (width > 0.0f) ? width : ImGui::GetContentRegionAvail().x;
+    const float itemH = std::round(38.0f * uiScale);
+
+    const ImVec2 pMin = ImGui::GetCursorScreenPos();
+    const ImVec2 pMax(pMin.x + itemW, pMin.y + itemH);
+    const bool clicked = ImGui::InvisibleButton(id, ImVec2(itemW, itemH));
+    const bool hovered = ImGui::IsItemHovered();
+    if (hovered) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+
+    ImDrawList* dl = ImGui::GetWindowDrawList();
+    const float rounding = std::round(8.0f * uiScale);
+
+    if (active) {
+        const ImVec4 bg = g_isLightTheme
+                              ? ImVec4(0.84f, 0.90f, 0.99f, 1.00f)
+                              : ImVec4(0.125f, 0.205f, 0.340f, 0.95f);
+        dl->AddRectFilled(pMin, pMax, ImGui::ColorConvertFloat4ToU32(bg), rounding);
+        const float barW = std::max(3.0f, std::round(3.2f * uiScale));
+        const float barPadY = std::round(7.0f * uiScale);
+        dl->AddRectFilled(
+            ImVec2(pMin.x + 2.0f, pMin.y + barPadY),
+            ImVec2(pMin.x + 2.0f + barW, pMax.y - barPadY),
+            ImGui::ColorConvertFloat4ToU32(AccentBarColor()),
+            barW * 0.5f);
+    } else if (hovered) {
+        const ImVec4 bg = g_isLightTheme
+                              ? ImVec4(0.87f, 0.90f, 0.95f, 0.72f)
+                              : ImVec4(0.105f, 0.135f, 0.195f, 0.85f);
+        dl->AddRectFilled(pMin, pMax, ImGui::ColorConvertFloat4ToU32(bg), rounding);
+    }
+
+    const ImVec4 iconColVec =
+        active
+            ? AccentBarColor()
+            : (hovered ? (g_isLightTheme ? ImVec4(0.14f, 0.20f, 0.32f, 1.00f)
+                                         : ImVec4(0.84f, 0.90f, 0.98f, 1.00f))
+                       : MutedTextColor());
+    const ImVec4 textColVec =
+        active
+            ? (g_isLightTheme ? ImVec4(0.06f, 0.22f, 0.52f, 1.00f)
+                              : ImVec4(0.96f, 0.98f, 1.00f, 1.00f))
+            : (hovered ? (g_isLightTheme ? ImVec4(0.08f, 0.12f, 0.20f, 1.00f)
+                                         : ImVec4(0.92f, 0.95f, 1.00f, 1.00f))
+                       : (g_isLightTheme ? ImVec4(0.24f, 0.30f, 0.40f, 1.00f)
+                                         : ImVec4(0.73f, 0.80f, 0.90f, 1.00f)));
+
+    const float iconSize = std::round(16.0f * uiScale);
+    const float iconCenterX = pMin.x + std::round(22.0f * uiScale);
+    const float centerY = (pMin.y + pMax.y) * 0.5f;
+    DrawAppIcon(dl, ImVec2(iconCenterX, centerY), iconSize, icon, ImGui::ColorConvertFloat4ToU32(iconColVec));
+
+    float rightReserve = std::round(10.0f * uiScale);
+    if (badgeCount > 0) {
+        char bBuf[24];
+        if (badgeCount > 99) {
+            std::snprintf(bBuf, sizeof(bBuf), "99+");
+        } else {
+            std::snprintf(bBuf, sizeof(bBuf), "%zu", badgeCount);
+        }
+        PushFontSafe(g_fontSmall);
+        const ImVec2 bSize = ImGui::CalcTextSize(bBuf);
+        const float bPadX = std::round(6.5f * uiScale);
+        const float bH = std::round(19.0f * uiScale);
+        const float bW = std::max(bH, bSize.x + bPadX * 2.0f);
+        const ImVec2 bMin(pMax.x - std::round(10.0f * uiScale) - bW, centerY - bH * 0.5f);
+        const ImVec2 bMax(bMin.x + bW, bMin.y + bH);
+        const ImVec4 bBg(badgeColor.x, badgeColor.y, badgeColor.z, g_isLightTheme ? 0.18f : 0.22f);
+        const ImVec4 bFg =
+            g_isLightTheme
+                ? ImVec4(badgeColor.x * 0.50f, badgeColor.y * 0.50f, badgeColor.z * 0.50f, 1.00f)
+                : badgeColor;
+        dl->AddRectFilled(bMin, bMax, ImGui::ColorConvertFloat4ToU32(bBg), bH * 0.5f);
+        dl->AddText(
+            ImVec2(bMin.x + (bW - bSize.x) * 0.5f, bMin.y + (bH - bSize.y) * 0.5f),
+            ImGui::ColorConvertFloat4ToU32(bFg),
+            bBuf);
+        PopFontSafe(g_fontSmall);
+        rightReserve = bW + std::round(16.0f * uiScale);
+    }
+
+    ImFont* lblFont = active ? g_fontSecondaryHeader : g_fontRegular;
+    PushFontSafe(lblFont);
+    const float textX = pMin.x + std::round(40.0f * uiScale);
+    const float maxTextW = std::max(24.0f, itemW - (textX - pMin.x) - rightReserve);
+    const std::string shown = EllipsizeUtf8(label != nullptr ? label : "", maxTextW);
+    const ImVec2 ts = ImGui::CalcTextSize(shown.c_str());
+    dl->AddText(
+        ImVec2(textX, centerY - ts.y * 0.5f),
+        ImGui::ColorConvertFloat4ToU32(textColVec),
+        shown.c_str());
+    PopFontSafe(lblFont);
+
+    return clicked;
+}
+
+bool RenderIconButton(
+    const char* id,
+    AppIcon icon,
+    const ImVec2& size,
+    const char* tooltip,
+    bool active) {
+    const bool clicked = active ? RenderPillButton(id, true, size)
+                                : RenderSecondaryButton(id, size);
+    const bool hovered = ImGui::IsItemHovered();
+    if (hovered) {
+        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+    }
+    if (ImGui::IsItemVisible()) {
+        const ImVec2 rMin = ImGui::GetItemRectMin();
+        const ImVec2 rMax = ImGui::GetItemRectMax();
+        const ImVec2 center((rMin.x + rMax.x) * 0.5f, (rMin.y + rMax.y) * 0.5f);
+        const float iconSz = std::min(rMax.x - rMin.x, rMax.y - rMin.y) * 0.52f;
+        const ImVec4 col =
+            (active || hovered)
+                ? AccentTextColor()
+                : (g_isLightTheme ? ImVec4(0.24f, 0.32f, 0.44f, 1.00f)
+                                  : ImVec4(0.75f, 0.83f, 0.94f, 1.00f));
+        DrawAppIcon(ImGui::GetWindowDrawList(), center, iconSz, icon, ImGui::ColorConvertFloat4ToU32(col));
+    }
+    if (tooltip != nullptr && tooltip[0] != '\0' && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        ImGui::SetTooltip("%s", tooltip);
+    }
+    return clicked;
+}
+
+void RenderPageHeader(const char* title, const char* subtitle) {
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    PushFontSafe(g_fontMainTab);
+    ImGui::TextUnformatted(title != nullptr ? title : "");
+    PopFontSafe(g_fontMainTab);
+    if (subtitle != nullptr && subtitle[0] != '\0') {
+        PushFontSafe(g_fontSmall);
+        ImGui::PushStyleColor(ImGuiCol_Text, MutedTextColor());
+        ImGui::TextWrapped("%s", subtitle);
+        ImGui::PopStyleColor();
+        PopFontSafe(g_fontSmall);
+    }
+    ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
+}
+
 int CompareVersionOrString(const std::string& a, const std::string& b) {
     if (a.empty() && b.empty()) return 0;
-    if (a.empty()) return 1; // Put empty values ("—") last in ascending order
+    if (a.empty()) return 1;
     if (b.empty()) return -1;
 
     auto extractNums = [](const std::string& s) {

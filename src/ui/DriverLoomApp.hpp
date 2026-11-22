@@ -40,6 +40,16 @@ public:
         int selectDevRow = -1);
 
 private:
+    enum NavPage : int {
+        PageOverview = 0,
+        PageComponents = 1,
+        PageWindowsUpdate = 2,
+        PageDevices = 3,
+        PageDiagnostics = 4,
+        PageLocalInstaller = 5,
+        PageSettings = 6
+    };
+
     enum class DeviceFilterMode {
         All,
         ProblemOnly,
@@ -69,13 +79,16 @@ private:
         const std::string& driverDate,
         const std::string& infName,
         const std::string& statusText);
+    static bool IsUserRelevantDeviceIssue(const hdm::DeviceInfo& d);
+    static bool IsOptionalVendorSoftware(const hdm::SystemComponentItem& item);
+    static bool IsComponentRecommendedAction(const hdm::SystemComponentItem& item);
 
     void LoadBaselineSnapshot();
     void CaptureCurrentAsBaseline(bool logNotification);
     void RebuildSnapshotDiff();
     void SyncScannerSnapshots();
 
-    void RenderHeaderBar();
+    void RenderSidebar();
     void RenderRebootBanner();
     void StartAppUpdateCheckAsync(bool manual);
     void RenderAboutModal();
@@ -95,7 +108,9 @@ private:
     static bool IsOemInfName(const std::string& infName);
     void JumpToDriverStorePackage(const std::string& infName);
     void HandleKeyboardShortcuts();
+    void NavigateTo(int pageIndex);
 
+    void RenderOverviewTab();
     void RenderDevicesTab();
     void RebuildComponentsViewCache(ImGuiTableSortSpecs* sortSpecs);
     void RenderComponentsTab();
@@ -104,12 +119,12 @@ private:
     void RenderDriverStoreSection();
     void RenderLocalInstallerTab();
     void RenderDiagnosticsTab();
-    void RenderLogPanel();
+    void RenderSettingsTab();
+    void RenderStatusBarAndLogDrawer();
 
     HWND hwnd_{nullptr};
     bool isElevated_{false};
-    int pendingInitialTab_{-1};
-    int activeTabIndex_{0};
+    int activeTabIndex_{PageOverview};
     bool exitRequested_{false};
     std::atomic<bool> rebootRequired_{false};
     std::atomic<bool> pendingDeviceRescan_{false};
@@ -133,16 +148,16 @@ private:
     std::vector<DriverBaselineEntry> baselineEntries_;
     std::vector<DriverSnapshotDiffRow> snapshotDiffRows_;
     size_t snapshotChangedCount_{0};
-    [[maybe_unused]] bool snapshotLoadedFromReg_{false};
     bool snapShowAll_{false};
     hdm::Lang lastSnapshotLang_{hdm::Lang::Ru};
 
-    // Cached Devices UI state (zero per-frame filtering/sorting allocations)
+    // Cached Devices UI state
     std::vector<hdm::DeviceInfo> devicesCache_;
     std::vector<size_t> visibleDeviceIndices_;
     uint64_t lastDeviceGen_{0};
     size_t totalDevicesCount_{0};
     size_t problemDevicesCount_{0};
+    size_t userRelevantIssueCount_{0};
     size_t monitorDevicesCount_{0};
     size_t peripheralDevicesCount_{0};
     char deviceFilterBuf_[256]{};
@@ -157,6 +172,10 @@ private:
     std::vector<size_t> visibleComponentIndices_;
     std::unordered_set<std::string> selectedComponentIds_;
     uint64_t lastComponentsGen_{0};
+    size_t actionableComponentsCount_{0};
+    size_t gamingComponentsCount_{0};
+    size_t peripheralComponentsCount_{0};
+    size_t gpuMonitorComponentsCount_{0};
     ComponentFilterMode compFilterMode_{ComponentFilterMode::All};
     bool compRestoreBefore_{true};
     bool compViewDirty_{true};
@@ -169,6 +188,7 @@ private:
     bool wuRestoreBefore_{true};
     bool wuIncludeSystemUpdates_{false};
     bool wuShowHidden_{false};
+    bool wuHasSearchedOnce_{false};
 
     // Local INF & DriverStore backup UI state
     int localSectionIndex_{0};
@@ -187,7 +207,8 @@ private:
     std::string pendingFolderUtf8_;
     bool hasPendingFolder_{false};
 
-    // Log UI state
+    // Status bar & collapsible log drawer state
+    bool logPanelExpanded_{false};
     bool logAutoScroll_{true};
 
     // About dialog & GitHub Releases update checker

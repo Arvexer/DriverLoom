@@ -83,7 +83,6 @@ public:
         ActionCallback onComplete = nullptr);
 
     [[nodiscard]] bool IsScanning() const noexcept { return scanning_.load(); }
-    [[nodiscard]] bool IsRunningAction() const noexcept { return runningAction_.load(); }
     [[nodiscard]] bool IsBusy() const noexcept { return scanning_.load() || runningAction_.load(); }
     [[nodiscard]] uint64_t Generation() const noexcept { return generation_.load(); }
     std::vector<DeviceInfo> GetDevicesSnapshot() const;
@@ -108,8 +107,10 @@ public:
 private:
     std::atomic<bool> scanning_{false};
     std::atomic<bool> runningAction_{false};
+    std::atomic<bool> stopRequested_{false};
     std::atomic<uint64_t> generation_{0};
     mutable std::mutex dataMutex_;
+    std::mutex threadMutex_;
     std::vector<DeviceInfo> devices_;
     std::thread worker_;
     std::thread actionWorker_;

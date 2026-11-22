@@ -8,8 +8,16 @@
 namespace hdm {
 
 SystemRestore::~SystemRestore() {
-    if (worker_.joinable()) {
-        worker_.join();
+    stopRequested_.store(true);
+    std::thread w;
+    {
+        std::lock_guard<std::mutex> lock(threadMutex_);
+        if (worker_.joinable()) {
+            w = std::move(worker_);
+        }
+    }
+    if (w.joinable()) {
+        w.join();
     }
 }
 
@@ -17,14 +25,30 @@ void SystemRestore::CreateRestorePointAsync(
     const std::string& description,
     LogCallback onLog,
     CompletionCallback onComplete) {
-    if (busy_.exchange(true)) {
-        if (onLog) {
-            onLog(LogLevel::Warning, "Создание точки восстановления уже выполняется.");
+    std::thread oldWorker;
+    {
+        std::lock_guard<std::mutex> lock(threadMutex_);
+        if (stopRequested_.load()) {
+            return;
         }
-        return;
+        if (busy_.exchange(true)) {
+            if (onLog) {
+                onLog(LogLevel::Warning, "Создание точки восстановления уже выполняется.");
+            }
+            return;
+        }
+        if (worker_.joinable()) {
+            oldWorker = std::move(worker_);
+        }
     }
-    if (worker_.joinable()) {
-        worker_.join();
+    if (oldWorker.joinable()) {
+        oldWorker.join();
+    }
+
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (stopRequested_.load()) {
+        busy_.store(false);
+        return;
     }
 
     worker_ = std::thread([this, description, log = std::move(onLog), complete = std::move(onComplete)]() {
@@ -39,11 +63,13 @@ void SystemRestore::CreateRestorePointAsync(
                     "Запрос прав администратора (UAC) для создания точки восстановления...");
             }
             const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_sr");
-            const std::wstring wideDesc = Utf8ToWide(description);
+            const std::wstring wideDesc = Utf8ToWide(description.empty() ? "DriverLoom" : description);
             const std::wstring args =
-                L"--cli-restore-point \"" + wideDesc + L"\" --log \"" + tempLog.wstring() + L"\"";
+                L"--cli-restore-point " + QuoteWin32Arg(wideDesc) +
+                L" --log " + QuoteWin32Arg(tempLog.wstring());
 
-            const ElevatedRunResult run = ExecuteElevatedSelf(args, true, &tempLog, log);
+            const ElevatedRunResult run =
+                ExecuteElevatedSelf(args, true, &tempLog, log, nullptr, &stopRequested_);
             std::error_code ec;
             std::filesystem::remove(tempLog, ec);
 
@@ -58,15 +84,17 @@ void SystemRestore::CreateRestorePointAsync(
                     log(LogLevel::Warning, outMsg);
                 }
             } else {
-                ok = (run.exitCode == 0);
+                ok = (!run.cancelled && !run.timedOutWaiting && run.exitCode == 0);
                 outMsg = ok ? "Точка восстановления успешно создана."
-                            : "Не удалось создать точку восстановления (код " +
-                                  std::to_string(run.exitCode) + ").";
+                            : (run.cancelled
+                                   ? "Создание точки восстановления отменено."
+                                   : "Не удалось создать точку восстановления (код " +
+                                         std::to_string(run.exitCode) + ").");
             }
         }
 
         busy_.store(false);
-        if (complete) {
+        if (complete && !stopRequested_.load()) {
             complete(ok, outMsg);
         }
     });
@@ -111,8 +139,9 @@ bool SystemRestore::CreateRestorePointSync(
     }
 
     // End the restore point change immediately so it is committed.
+    const INT64 seqNum = smgrStatus.llSequenceNumber;
     rpInfo.dwEventType = END_SYSTEM_CHANGE;
-    rpInfo.llSequenceNumber = smgrStatus.llSequenceNumber;
+    rpInfo.llSequenceNumber = seqNum;
     if (!SRSetRestorePointW(&rpInfo, &smgrStatus)) {
         const DWORD err = smgrStatus.nStatus != 0 ? smgrStatus.nStatus : GetLastError();
         if (onLog) {
@@ -122,7 +151,7 @@ bool SystemRestore::CreateRestorePointSync(
     }
 
     const std::string okMsg = "Точка восстановления системы создана (последовательность #" +
-                              std::to_string(smgrStatus.llSequenceNumber) + ").";
+                              std::to_string(seqNum) + ").";
     if (onLog) {
         onLog(LogLevel::Success, okMsg);
     }

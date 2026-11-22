@@ -14,6 +14,7 @@
 #include <mutex>
 #include <set>
 #include <thread>
+#include <unordered_set>
 
 namespace hdm {
 
@@ -369,10 +370,13 @@ JobWaitOutcome WaitForWuJob(
             break;
         }
 
-        if (cb != nullptr && cb->EventHandle() != nullptr &&
-            WaitForSingleObject(cb->EventHandle(), 400) == WAIT_OBJECT_0) {
-            outcome = JobWaitOutcome::Completed;
-            break;
+        if (cb != nullptr && cb->EventHandle() != nullptr) {
+            if (WaitForSingleObject(cb->EventHandle(), 400) == WAIT_OBJECT_0) {
+                outcome = JobWaitOutcome::Completed;
+                break;
+            }
+        } else {
+            Sleep(400);
         }
 
         if (cancelFlag != nullptr && cancelFlag->load()) {
@@ -404,10 +408,13 @@ JobWaitOutcome WaitForWuJob(
             aborted = true;
             break;
         }
-        if (cb != nullptr && cb->EventHandle() != nullptr &&
-            WaitForSingleObject(cb->EventHandle(), 200) == WAIT_OBJECT_0) {
-            aborted = true;
-            break;
+        if (cb != nullptr && cb->EventHandle() != nullptr) {
+            if (WaitForSingleObject(cb->EventHandle(), 200) == WAIT_OBJECT_0) {
+                aborted = true;
+                break;
+            }
+        } else {
+            Sleep(200);
         }
     }
     if (outAbortedCleanly != nullptr) {
@@ -570,6 +577,9 @@ struct WindowsUpdateManager::Impl {
     std::atomic<uint64_t> generation{0};
 
     mutable std::mutex dataMutex;
+    std::mutex threadMutex;
+    std::mutex callbackMutex;
+    bool ownerAlive{true};
     std::vector<DriverUpdateItem> updates;
     std::string phaseMessage;
 
@@ -587,38 +597,53 @@ WindowsUpdateManager::~WindowsUpdateManager() {
         return;
     }
     impl_->cancelRequested.store(true);
-
-    HANDLE handles[2]{};
-    DWORD count = 0;
-    if (impl_->searchThread.joinable() && impl_->searchDoneEvent.IsValid()) {
-        handles[count++] = impl_->searchDoneEvent.Get();
-    }
-    if (impl_->installThread.joinable() && impl_->installDoneEvent.IsValid()) {
-        handles[count++] = impl_->installDoneEvent.Get();
-    }
-    if (count > 0) {
-        WaitForMultipleObjects(count, handles, TRUE, 2500);
+    {
+        std::lock_guard<std::mutex> cbLock(impl_->callbackMutex);
+        impl_->ownerAlive = false;
     }
 
-    if (impl_->searchThread.joinable()) {
-        if (impl_->searchDoneEvent.IsValid() &&
-            WaitForSingleObject(impl_->searchDoneEvent.Get(), 0) == WAIT_OBJECT_0) {
-            impl_->searchThread.join();
-        } else {
-            impl_->searchThread.detach();
+    std::thread sThread;
+    std::thread iThread;
+    {
+        std::lock_guard<std::mutex> tLock(impl_->threadMutex);
+        HANDLE handles[2]{};
+        DWORD count = 0;
+        if (impl_->searchThread.joinable() && impl_->searchDoneEvent.IsValid()) {
+            handles[count++] = impl_->searchDoneEvent.Get();
+        }
+        if (impl_->installThread.joinable() && impl_->installDoneEvent.IsValid()) {
+            handles[count++] = impl_->installDoneEvent.Get();
+        }
+        if (count > 0) {
+            WaitForMultipleObjects(count, handles, TRUE, 2500);
+        }
+
+        if (impl_->searchThread.joinable()) {
+            if (impl_->searchDoneEvent.IsValid() &&
+                WaitForSingleObject(impl_->searchDoneEvent.Get(), 0) == WAIT_OBJECT_0) {
+                sThread = std::move(impl_->searchThread);
+            } else {
+                impl_->searchThread.detach();
+            }
+        }
+        if (impl_->installThread.joinable()) {
+            if (impl_->installDoneEvent.IsValid() &&
+                WaitForSingleObject(impl_->installDoneEvent.Get(), 0) == WAIT_OBJECT_0) {
+                iThread = std::move(impl_->installThread);
+            } else {
+                impl_->installThread.detach();
+            }
         }
     }
-    if (impl_->installThread.joinable()) {
-        if (impl_->installDoneEvent.IsValid() &&
-            WaitForSingleObject(impl_->installDoneEvent.Get(), 0) == WAIT_OBJECT_0) {
-            impl_->installThread.join();
-        } else {
-            impl_->installThread.detach();
-        }
+    if (sThread.joinable()) {
+        sThread.join();
+    }
+    if (iThread.joinable()) {
+        iThread.join();
     }
 }
 
-void WindowsUpdateManager::RequestCancel() noexcept {
+void WindowsUpdateManager::RequestCancel() {
     impl_->cancelRequested.store(true);
     std::lock_guard<std::mutex> lock(impl_->dataMutex);
     if (impl_->searching.load() || impl_->installing.load()) {
@@ -678,31 +703,58 @@ void WindowsUpdateManager::SelectAll(bool selected, bool includeHidden) {
 }
 
 void WindowsUpdateManager::StartSearchAsync(LogCallback onLog, bool driversOnly) {
-    if (IsBusy()) {
-        if (onLog) {
-            onLog(LogLevel::Warning, "Windows Update уже выполняет операцию.");
+    std::thread oldSearch;
+    {
+        std::lock_guard<std::mutex> tLock(impl_->threadMutex);
+        std::lock_guard<std::mutex> cbLock(impl_->callbackMutex);
+        if (!impl_->ownerAlive) {
+            return;
         }
-        return;
+        if (impl_->searching.load() || impl_->installing.load()) {
+            if (onLog) {
+                onLog(LogLevel::Warning, "Windows Update уже выполняет операцию.");
+            }
+            return;
+        }
+        impl_->cancelRequested.store(false);
+        impl_->searching.store(true);
+        impl_->progress.store(0.0f);
+        if (impl_->searchDoneEvent.IsValid()) {
+            ResetEvent(impl_->searchDoneEvent.Get());
+        }
+        if (impl_->searchThread.joinable()) {
+            oldSearch = std::move(impl_->searchThread);
+        }
     }
-    if (impl_->searchThread.joinable()) {
-        impl_->searchThread.join();
+    if (oldSearch.joinable()) {
+        oldSearch.join();
     }
 
     auto setPhase = [state = impl_](const std::string& msg) {
         std::lock_guard<std::mutex> lock(state->dataMutex);
         state->phaseMessage = msg;
     };
-
-    impl_->cancelRequested.store(false);
-    impl_->searching.store(true);
-    impl_->progress.store(0.0f);
-    if (impl_->searchDoneEvent.IsValid()) {
-        ResetEvent(impl_->searchDoneEvent.Get());
-    }
     setPhase("Подключение к службе Windows Update...");
 
+    std::lock_guard<std::mutex> tLock(impl_->threadMutex);
+    {
+        std::lock_guard<std::mutex> cbLock(impl_->callbackMutex);
+        if (!impl_->ownerAlive) {
+            impl_->searching.store(false);
+            if (impl_->searchDoneEvent.IsValid()) SetEvent(impl_->searchDoneEvent.Get());
+            return;
+        }
+    }
+
     std::shared_ptr<Impl> state = impl_;
-    impl_->searchThread = std::thread([state, setPhase, driversOnly, log = std::move(onLog)]() {
+    impl_->searchThread = std::thread([state, setPhase, driversOnly, rawLog = std::move(onLog)]() {
+        auto log = [&state, &rawLog](LogLevel lvl, const std::string& msg) {
+            std::lock_guard<std::mutex> cbLock(state->callbackMutex);
+            if (state->ownerAlive && rawLog) {
+                rawLog(lvl, msg);
+            }
+        };
+
         struct DoneSignal {
             HANDLE ev;
             std::atomic<bool>& flag;
@@ -714,10 +766,8 @@ void WindowsUpdateManager::StartSearchAsync(LogCallback onLog, bool driversOnly)
 
         CoInitGuard comInit(COINIT_MULTITHREADED);
         if (!comInit.Succeeded()) {
-            if (log) {
-                log(LogLevel::Error,
-                    "Ошибка CoInitializeEx (MTA): " + FormatHResult(comInit.Result()));
-            }
+            log(LogLevel::Error,
+                "Ошибка CoInitializeEx (MTA): " + FormatHResult(comInit.Result()));
             return;
         }
 
@@ -725,12 +775,10 @@ void WindowsUpdateManager::StartSearchAsync(LogCallback onLog, bool driversOnly)
             driversOnly
                 ? L"IsInstalled=0 and Type='Driver' and IsHidden=0 or IsInstalled=0 and Type='Driver' and IsHidden=1"
                 : L"IsInstalled=0 and IsHidden=0 or IsInstalled=0 and IsHidden=1";
-        if (log) {
-            log(LogLevel::Info,
-                driversOnly
-                    ? "Поиск доступных драйверов через Windows Update API (Type='Driver')..."
-                    : "Расширенный поиск драйверов и системных обновлений Windows Update...");
-        }
+        log(LogLevel::Info,
+            driversOnly
+                ? "Поиск доступных драйверов через Windows Update API (Type='Driver')..."
+                : "Расширенный поиск драйверов и системных обновлений Windows Update...");
 
         ComPtr<IUpdateSession> session;
         HRESULT hr = CoCreateInstance(
@@ -740,10 +788,8 @@ void WindowsUpdateManager::StartSearchAsync(LogCallback onLog, bool driversOnly)
             IID_IUpdateSession,
             reinterpret_cast<void**>(session.Put()));
         if (FAILED(hr) || !session) {
-            if (log) {
-                log(LogLevel::Error,
-                    "Не удалось создать IUpdateSession: " + FormatHResult(hr));
-            }
+            log(LogLevel::Error,
+                "Не удалось создать IUpdateSession: " + FormatHResult(hr));
             setPhase("Ошибка создания IUpdateSession");
             return;
         }
@@ -754,10 +800,8 @@ void WindowsUpdateManager::StartSearchAsync(LogCallback onLog, bool driversOnly)
         ComPtr<IUpdateSearcher> searcher;
         hr = session->CreateUpdateSearcher(searcher.Put());
         if (FAILED(hr) || !searcher) {
-            if (log) {
-                log(LogLevel::Error,
-                    "Не удалось создать IUpdateSearcher: " + FormatHResult(hr));
-            }
+            log(LogLevel::Error,
+                "Не удалось создать IUpdateSearcher: " + FormatHResult(hr));
             setPhase("Ошибка создания IUpdateSearcher");
             return;
         }
@@ -778,24 +822,18 @@ void WindowsUpdateManager::StartSearchAsync(LogCallback onLog, bool driversOnly)
             &outcome);
 
         if (outcome == JobWaitOutcome::Cancelled) {
-            if (log) {
-                log(LogLevel::Warning, "Поиск обновлений Windows Update отменён.");
-            }
+            log(LogLevel::Warning, "Поиск обновлений Windows Update отменён.");
             setPhase("Поиск отменён");
             return;
         }
         if (outcome == JobWaitOutcome::TimedOut) {
-            if (log) {
-                log(LogLevel::Error, "Тайм-аут поиска обновлений Windows Update.");
-            }
+            log(LogLevel::Error, "Тайм-аут поиска обновлений Windows Update.");
             setPhase("Тайм-аут поиска обновлений");
             return;
         }
         if (FAILED(hr) || !searchResult) {
-            if (log) {
-                log(LogLevel::Error,
-                    "Ошибка EndSearch Windows Update: " + FormatHResult(hr));
-            }
+            log(LogLevel::Error,
+                "Ошибка EndSearch Windows Update: " + FormatHResult(hr));
             setPhase("Ошибка получения результатов поиска");
             return;
         }
@@ -803,10 +841,8 @@ void WindowsUpdateManager::StartSearchAsync(LogCallback onLog, bool driversOnly)
         OperationResultCode resultCode = orcNotStarted;
         searchResult->get_ResultCode(&resultCode);
         if (resultCode != orcSucceeded && resultCode != orcSucceededWithErrors) {
-            if (log) {
-                log(LogLevel::Warning,
-                    "Поиск Windows Update завершился со статусом: " + ResultCodeToText(resultCode));
-            }
+            log(LogLevel::Warning,
+                "Поиск Windows Update завершился со статусом: " + ResultCodeToText(resultCode));
         }
 
         std::vector<DriverUpdateItem> found;
@@ -834,10 +870,6 @@ void WindowsUpdateManager::StartSearchAsync(LogCallback onLog, bool driversOnly)
                     BstrGuard idBstr;
                     if (SUCCEEDED(identity->get_UpdateID(idBstr.Put()))) {
                         item.updateId = idBstr.ToUtf8();
-                    }
-                    LONG rev = 0;
-                    if (SUCCEEDED(identity->get_RevisionNumber(&rev))) {
-                        item.revisionNumber = static_cast<int>(rev);
                     }
                 }
 
@@ -892,13 +924,11 @@ void WindowsUpdateManager::StartSearchAsync(LogCallback onLog, bool driversOnly)
         state->generation.fetch_add(1);
         state->progress.store(1.0f);
 
-        if (log) {
-            if (total == 0) {
-                log(LogLevel::Success, "Новых обновлений драйверов в Windows Update не найдено.");
-            } else {
-                log(LogLevel::Success,
-                    "Найдено обновлений в Windows Update: " + std::to_string(total));
-            }
+        if (total == 0) {
+            log(LogLevel::Success, "Новых обновлений драйверов в Windows Update не найдено.");
+        } else {
+            log(LogLevel::Success,
+                "Найдено обновлений в Windows Update: " + std::to_string(total));
         }
         setPhase(total == 0 ? "Обновления не найдены"
                             : "Найдено обновлений: " + std::to_string(total));
@@ -911,20 +941,38 @@ void WindowsUpdateManager::StartDownloadAndInstallAsync(
     LogCallback onLog,
     InstallDoneCallback onComplete,
     bool driversOnly) {
-    if (IsBusy()) {
-        if (onLog) {
-            onLog(LogLevel::Warning, "Windows Update уже выполняет операцию.");
-        }
-        return;
-    }
     if (selectedUpdateIds.empty()) {
         if (onLog) {
             onLog(LogLevel::Warning, "Не выбрано ни одного обновления для установки.");
         }
         return;
     }
-    if (impl_->installThread.joinable()) {
-        impl_->installThread.join();
+
+    std::thread oldInstall;
+    {
+        std::lock_guard<std::mutex> tLock(impl_->threadMutex);
+        std::lock_guard<std::mutex> cbLock(impl_->callbackMutex);
+        if (!impl_->ownerAlive) {
+            return;
+        }
+        if (impl_->searching.load() || impl_->installing.load()) {
+            if (onLog) {
+                onLog(LogLevel::Warning, "Windows Update уже выполняет операцию.");
+            }
+            return;
+        }
+        impl_->cancelRequested.store(false);
+        impl_->installing.store(true);
+        impl_->progress.store(0.0f);
+        if (impl_->installDoneEvent.IsValid()) {
+            ResetEvent(impl_->installDoneEvent.Get());
+        }
+        if (impl_->installThread.joinable()) {
+            oldInstall = std::move(impl_->installThread);
+        }
+    }
+    if (oldInstall.joinable()) {
+        oldInstall.join();
     }
 
     auto setPhase = [state = impl_](const std::string& msg) {
@@ -952,13 +1000,17 @@ void WindowsUpdateManager::StartDownloadAndInstallAsync(
         state->generation.fetch_add(1);
     };
 
-    impl_->cancelRequested.store(false);
-    impl_->installing.store(true);
-    impl_->progress.store(0.0f);
-    if (impl_->installDoneEvent.IsValid()) {
-        ResetEvent(impl_->installDoneEvent.Get());
-    }
     setPhase("Подготовка к загрузке и установке...");
+
+    std::lock_guard<std::mutex> tLock(impl_->threadMutex);
+    {
+        std::lock_guard<std::mutex> cbLock(impl_->callbackMutex);
+        if (!impl_->ownerAlive) {
+            impl_->installing.store(false);
+            if (impl_->installDoneEvent.IsValid()) SetEvent(impl_->installDoneEvent.Get());
+            return;
+        }
+    }
 
     std::shared_ptr<Impl> state = impl_;
     impl_->installThread = std::thread([state,
@@ -967,8 +1019,15 @@ void WindowsUpdateManager::StartDownloadAndInstallAsync(
                                         selectedUpdateIds,
                                         createRestorePoint,
                                         driversOnly,
-                                        log = std::move(onLog),
-                                        complete = std::move(onComplete)]() {
+                                        rawLog = std::move(onLog),
+                                        rawComplete = std::move(onComplete)]() {
+        auto log = [&state, &rawLog](LogLevel lvl, const std::string& msg) {
+            std::lock_guard<std::mutex> cbLock(state->callbackMutex);
+            if (state->ownerAlive && rawLog) {
+                rawLog(lvl, msg);
+            }
+        };
+
         struct DoneSignal {
             HANDLE ev;
             std::atomic<bool>& flag;
@@ -992,10 +1051,8 @@ void WindowsUpdateManager::StartDownloadAndInstallAsync(
                 updateItem,
                 driversOnly);
         } else {
-            if (log) {
-                log(LogLevel::Info,
-                    "Запрос прав администратора (UAC) для установки драйверов Windows Update...");
-            }
+            log(LogLevel::Info,
+                "Запрос прав администратора (UAC) для установки драйверов Windows Update...");
             setPhase("Ожидание подтверждения UAC...");
 
             const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_wu");
@@ -1004,19 +1061,21 @@ void WindowsUpdateManager::StartDownloadAndInstallAsync(
             std::error_code ec;
             std::filesystem::remove(cancelMarker, ec);
 
-            std::wstring args = L"--cli-wu-install \"" + Utf8ToWide(JoinUpdateIds(selectedUpdateIds)) + L"\"";
+            std::wstring args =
+                L"--cli-wu-install " + QuoteWin32Arg(Utf8ToWide(JoinUpdateIds(selectedUpdateIds)));
             if (createRestorePoint) {
                 args += L" --restore-before";
             }
             if (driversOnly) {
                 args += L" --drivers-only";
             }
-            args += L" --log \"" + tempLog.wstring() + L"\"";
-            args += L" --cancel-file \"" + cancelMarker.wstring() + L"\"";
+            args += L" --log " + QuoteWin32Arg(tempLog.wstring());
+            args += L" --cancel-file " + QuoteWin32Arg(cancelMarker.wstring());
 
             setPhase("Запуск установки с правами администратора...");
             state->progress.store(0.03f);
 
+            std::unordered_set<std::string> reportedIds;
             auto handleMeta = [&](const std::string& payload) {
                 if (payload.rfind("PROG|", 0) == 0) {
                     const size_t sep = payload.find('|', 5);
@@ -1035,6 +1094,7 @@ void WindowsUpdateManager::StartDownloadAndInstallAsync(
                         const bool ok = payload.substr(p1 + 1, p2 - p1 - 1) == "1";
                         const bool reb = payload.substr(p2 + 1, p3 - p2 - 1) == "1";
                         const std::string stText = payload.substr(p3 + 1);
+                        reportedIds.insert(uid);
                         if (ok) {
                             ++summary.installedCount;
                             if (reb) summary.rebootRequired = true;
@@ -1060,37 +1120,35 @@ void WindowsUpdateManager::StartDownloadAndInstallAsync(
             if (!run.launched) {
                 summary.failedCount = selectedUpdateIds.size();
                 if (run.launchError == ERROR_CANCELLED) {
-                    if (log) {
-                        log(LogLevel::Warning, "Установка отменена пользователем в окне UAC.");
-                    }
-                } else if (log) {
+                    log(LogLevel::Warning, "Установка отменена пользователем в окне UAC.");
+                } else {
                     log(LogLevel::Error,
                         "Не удалось запустить elevated-процесс: " + FormatWin32Error(run.launchError));
                 }
             } else {
-                summary.cancelled = run.cancelled;
-                if (summary.installedCount == 0 && summary.failedCount == 0) {
-                    if (run.exitCode == 2) {
-                        summary.installedCount = selectedUpdateIds.size();
-                        summary.rebootRequired = true;
-                    } else if (run.exitCode == 0) {
-                        summary.installedCount = selectedUpdateIds.size();
-                    } else {
-                        summary.failedCount = selectedUpdateIds.size();
-                    }
-                    for (const auto& uid : selectedUpdateIds) {
-                        const bool ok = (run.exitCode == 0 || run.exitCode == 2);
-                        const bool reb = (run.exitCode == 2);
-                        updateItem(
-                            uid,
-                            ok,
-                            reb,
-                            ok ? (reb ? "Установлено (нужна перезагрузка)" : "Установлено")
-                               : (run.cancelled ? "Отменено" : "Ошибка установки"));
-                    }
-                }
+                summary.cancelled = run.cancelled || (run.exitCode == 3);
                 if (run.exitCode == 2) {
                     summary.rebootRequired = true;
+                }
+                for (const auto& uid : selectedUpdateIds) {
+                    if (reportedIds.count(uid) > 0) {
+                        continue;
+                    }
+                    const bool ok = !summary.cancelled &&
+                                    reportedIds.empty() &&
+                                    (run.exitCode == 0 || run.exitCode == 2);
+                    const bool reb = ok && (run.exitCode == 2);
+                    if (ok) {
+                        ++summary.installedCount;
+                    } else {
+                        ++summary.failedCount;
+                    }
+                    updateItem(
+                        uid,
+                        ok,
+                        reb,
+                        ok ? (reb ? "Установлено (нужна перезагрузка)" : "Установлено")
+                           : (summary.cancelled ? "Отменено" : "Ошибка установки"));
                 }
             }
             state->progress.store(1.0f);
@@ -1105,8 +1163,12 @@ void WindowsUpdateManager::StartDownloadAndInstallAsync(
         } else {
             setPhase("Операция Windows Update завершена");
         }
-        if (complete) {
-            complete(summary);
+
+        {
+            std::lock_guard<std::mutex> cbLock(state->callbackMutex);
+            if (state->ownerAlive && rawComplete) {
+                rawComplete(summary);
+            }
         }
     });
 }
@@ -1246,7 +1308,10 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
         if (onLog) {
             onLog(LogLevel::Info, "Запрос недостающих метаданных с сервера Windows Update...");
         }
-        const wchar_t* criteriaW = driversOnly ? L"IsInstalled=0 and Type='Driver'" : L"IsInstalled=0";
+        const wchar_t* criteriaW =
+            driversOnly
+                ? L"IsInstalled=0 and Type='Driver' and IsHidden=0 or IsInstalled=0 and Type='Driver' and IsHidden=1"
+                : L"IsInstalled=0 and IsHidden=0 or IsInstalled=0 and IsHidden=1";
         ComPtr<ISearchResult> onlineResult;
         bool abortedCleanly = true;
         JobWaitOutcome outcome = JobWaitOutcome::Completed;
@@ -1272,7 +1337,7 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
             hr = RunAsyncSearch(
                 session,
                 searcher,
-                L"IsInstalled=0",
+                L"IsInstalled=0 and IsHidden=0 or IsInstalled=0 and IsHidden=1",
                 true,
                 kSearchOnlineTimeout,
                 cancelFlag,
@@ -1338,6 +1403,29 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
         return summary;
     }
 
+    if (!session) {
+        hr = CoCreateInstance(
+            CLSID_UpdateSession,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            IID_IUpdateSession,
+            reinterpret_cast<void**>(session.Put()));
+        if (FAILED(hr) || !session) {
+            if (onLog) {
+                onLog(LogLevel::Error,
+                      "Не удалось пересоздать IUpdateSession: " + FormatHResult(hr));
+            }
+            for (const auto& t : targets) {
+                ++summary.failedCount;
+                if (onItemUpdate) {
+                    onItemUpdate(t.id, false, false, "Ошибка сессии WU");
+                }
+            }
+            return summary;
+        }
+        session->put_ClientApplicationID(appId.Get());
+    }
+
     ComPtr<IUpdateDownloader> downloader;
     hr = session->CreateUpdateDownloader(downloader.Put());
     if (FAILED(hr) || !downloader) {
@@ -1345,7 +1433,12 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
             onLog(LogLevel::Error,
                   "Не удалось создать IUpdateDownloader: " + FormatHResult(hr));
         }
-        summary.failedCount += targets.size();
+        for (const auto& t : targets) {
+            ++summary.failedCount;
+            if (onItemUpdate) {
+                onItemUpdate(t.id, false, false, "Ошибка загрузки");
+            }
+        }
         return summary;
     }
 
@@ -1356,7 +1449,12 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
             onLog(LogLevel::Error,
                   "Не удалось создать IUpdateInstaller: " + FormatHResult(hr));
         }
-        summary.failedCount += targets.size();
+        for (const auto& t : targets) {
+            ++summary.failedCount;
+            if (onItemUpdate) {
+                onItemUpdate(t.id, false, false, "Ошибка установки");
+            }
+        }
         return summary;
     }
 
@@ -1421,7 +1519,16 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
             setProg(itemStart, stepPrefix + "Скачивание: " + target.title + "...");
 
             if (!downloader) {
-                session->CreateUpdateDownloader(downloader.Put());
+                hr = session->CreateUpdateDownloader(downloader.Put());
+                if (FAILED(hr) || !downloader) {
+                    if (onLog) {
+                        onLog(LogLevel::Error,
+                              stepPrefix + "Не удалось создать IUpdateDownloader: " + FormatHResult(hr));
+                    }
+                    ++summary.failedCount;
+                    if (onItemUpdate) onItemUpdate(target.id, false, false, "Ошибка загрузки");
+                    continue;
+                }
             }
             downloader->put_Updates(singleColl.Get());
 
@@ -1607,6 +1714,7 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
                     summary.cancelled ? "Отменено" : "Служба занята");
             }
             if (summary.cancelled) {
+                markRemaining(idx + 1, false, "Отменено");
                 break;
             }
             continue;
@@ -1814,9 +1922,7 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
 bool WindowsUpdateManager::SetUpdatesHiddenSync(
     const std::vector<std::string>& updateIds,
     bool hide,
-    const LogCallback& onLog,
-    bool driversOnly) {
-    (void)driversOnly;
+    const LogCallback& onLog) {
     if (updateIds.empty()) {
         return false;
     }
@@ -1952,31 +2058,57 @@ bool WindowsUpdateManager::SetUpdatesHiddenSync(
 void WindowsUpdateManager::SetUpdatesHiddenAsync(
     const std::vector<std::string>& updateIds,
     bool hide,
-    LogCallback onLog,
-    bool driversOnly) {
-    if (IsBusy() || updateIds.empty()) {
+    LogCallback onLog) {
+    if (updateIds.empty()) {
         return;
     }
-    if (impl_->installThread.joinable()) {
-        impl_->installThread.join();
+    std::thread oldInstall;
+    {
+        std::lock_guard<std::mutex> tLock(impl_->threadMutex);
+        std::lock_guard<std::mutex> cbLock(impl_->callbackMutex);
+        if (!impl_->ownerAlive || impl_->searching.load() || impl_->installing.load()) {
+            return;
+        }
+        impl_->cancelRequested.store(false);
+        impl_->installing.store(true);
+        impl_->progress.store(0.20f);
+        if (impl_->installDoneEvent.IsValid()) {
+            ResetEvent(impl_->installDoneEvent.Get());
+        }
+        if (impl_->installThread.joinable()) {
+            oldInstall = std::move(impl_->installThread);
+        }
+    }
+    if (oldInstall.joinable()) {
+        oldInstall.join();
     }
 
     auto setPhase = [state = impl_](const std::string& msg) {
         std::lock_guard<std::mutex> lock(state->dataMutex);
         state->phaseMessage = msg;
     };
-
-    impl_->cancelRequested.store(false);
-    impl_->installing.store(true);
-    impl_->progress.store(0.20f);
-    if (impl_->installDoneEvent.IsValid()) {
-        ResetEvent(impl_->installDoneEvent.Get());
-    }
     setPhase(hide ? "Скрытие выбранных обновлений..." : "Возврат скрытых обновлений...");
+
+    std::lock_guard<std::mutex> tLock(impl_->threadMutex);
+    {
+        std::lock_guard<std::mutex> cbLock(impl_->callbackMutex);
+        if (!impl_->ownerAlive) {
+            impl_->installing.store(false);
+            if (impl_->installDoneEvent.IsValid()) SetEvent(impl_->installDoneEvent.Get());
+            return;
+        }
+    }
 
     std::shared_ptr<Impl> state = impl_;
     impl_->installThread = std::thread(
-        [state, setPhase, updateIds, hide, driversOnly, log = std::move(onLog)]() {
+        [state, setPhase, updateIds, hide, rawLog = std::move(onLog)]() {
+            auto log = [&state, &rawLog](LogLevel lvl, const std::string& msg) {
+                std::lock_guard<std::mutex> cbLock(state->callbackMutex);
+                if (state->ownerAlive && rawLog) {
+                    rawLog(lvl, msg);
+                }
+            };
+
             struct DoneSignal {
                 HANDLE ev;
                 std::atomic<bool>& flag;
@@ -1988,30 +2120,26 @@ void WindowsUpdateManager::SetUpdatesHiddenAsync(
 
             bool ok = false;
             if (IsProcessElevated()) {
-                ok = SetUpdatesHiddenSync(updateIds, hide, log, driversOnly);
+                ok = SetUpdatesHiddenSync(updateIds, hide, log);
             } else {
                 const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_wuhide");
                 std::wstring args =
-                    std::wstring(hide ? L"--cli-wu-hide \"" : L"--cli-wu-unhide \"") +
-                    Utf8ToWide(JoinUpdateIds(updateIds)) + L"\"";
-                if (driversOnly) {
-                    args += L" --drivers-only";
-                }
-                args += L" --log \"" + tempLog.wstring() + L"\"";
+                    std::wstring(hide ? L"--cli-wu-hide " : L"--cli-wu-unhide ") +
+                    QuoteWin32Arg(Utf8ToWide(JoinUpdateIds(updateIds))) +
+                    L" --log " + QuoteWin32Arg(tempLog.wstring());
 
-                const ElevatedRunResult run = ExecuteElevatedSelf(args, true, &tempLog, log);
+                const ElevatedRunResult run =
+                    ExecuteElevatedSelf(args, true, &tempLog, log, nullptr, &state->cancelRequested);
                 std::error_code ec;
                 std::filesystem::remove(tempLog, ec);
                 if (!run.launched) {
-                    if (log) {
-                        log(run.launchError == ERROR_CANCELLED ? LogLevel::Warning : LogLevel::Error,
-                            run.launchError == ERROR_CANCELLED
-                                ? "Операция скрытия отменена пользователем (UAC)."
-                                : "Не удалось запустить elevated-процесс: " +
-                                      FormatWin32Error(run.launchError));
-                    }
+                    log(run.launchError == ERROR_CANCELLED ? LogLevel::Warning : LogLevel::Error,
+                        run.launchError == ERROR_CANCELLED
+                            ? "Операция скрытия отменена пользователем (UAC)."
+                            : "Не удалось запустить elevated-процесс: " +
+                                  FormatWin32Error(run.launchError));
                 } else {
-                    ok = (run.exitCode == 0);
+                    ok = (!run.cancelled && !run.timedOutWaiting && run.exitCode == 0);
                 }
             }
 

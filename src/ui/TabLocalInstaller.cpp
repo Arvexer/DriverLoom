@@ -81,7 +81,7 @@ void DriverLoomApp::RenderDriverStoreSection() {
                       localInstaller_.IsInstalling();
 
     ImGui::BeginDisabled(busy);
-    if (ImGui::Button(hdm::Tr(
+    if (RenderPrimaryButton(hdm::Tr(
             "Экспорт бэкапа в папку...###DsExp",
             "Експорт бекапу в папку...###DsExp",
             "Export Backup Folder...###DsExp"))) {
@@ -351,7 +351,7 @@ void DriverLoomApp::RenderDriverStoreSection() {
 
     const char* rmTxt = hdm::Tr("Удалить", "Видалити", "Remove");
     const float rmBtnW = CalcButtonWidth(rmTxt) + 8.0f * uiScale;
-    const float actionColW = rmBtnW + style.CellPadding.x * 2.0f + 4.0f;
+    const float actionColW = rmBtnW + style.CellPadding.x * 2.0f + style.ScrollbarSize + 8.0f * uiScale;
 
     if (ImGui::BeginTable("##DriverStoreTable", 9, kTableFlags, ImGui::GetContentRegionAvail())) {
         ImGui::TableSetupScrollFreeze(0, 1);
@@ -491,9 +491,16 @@ void DriverLoomApp::RenderDriverStoreSection() {
 }
 
 void DriverLoomApp::RenderLocalInstallerTab() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
     const ImGuiStyle& style = ImGui::GetStyle();
     const bool isAppForeground = (GetForegroundWindow() == hwnd_);
+
+    RenderPageHeader(
+        hdm::Tr("Локальные драйверы (.inf) и DriverStore", "Локальні драйвери (.inf) та DriverStore", "Local Drivers (.inf) & DriverStore"),
+        hdm::Tr(
+            "Режим эксперта: ручная установка .inf-пакетов, резервное копирование и очистка старых дубликатов DriverStore.",
+            "Режим експерта: ручне встановлення .inf-пакетів, резервне копіювання та очищення старих дублікатів DriverStore.",
+            "Expert mode: manual .inf driver installation, DriverStore backup export, and old duplicate cleanup."));
 
     if (RenderSubSectionHeaderTab(
             hdm::Tr(
@@ -625,7 +632,7 @@ void DriverLoomApp::RenderLocalInstallerTab() {
         "Встановити всі .inf (DiInstallDriverW)",
         "Install All .inf (DiInstallDriverW)")));
     ImGui::BeginDisabled(busy || std::strlen(localFolderBuf_) == 0);
-    if (ImGui::Button(hdm::Tr(
+    if (RenderPrimaryButton(hdm::Tr(
             "Установить все .inf (DiInstallDriverW)###LocInstAll",
             "Встановити всі .inf (DiInstallDriverW)###LocInstAll",
             "Install All .inf (DiInstallDriverW)###LocInstAll"))) {

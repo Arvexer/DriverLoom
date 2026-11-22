@@ -26,6 +26,7 @@ ID3D11Device* g_pd3dDevice = nullptr;
 ID3D11DeviceContext* g_pd3dDeviceContext = nullptr;
 IDXGISwapChain* g_pSwapChain = nullptr;
 ID3D11RenderTargetView* g_mainRenderTargetView = nullptr;
+ID3D11ShaderResourceView* g_appLogoSrv = nullptr;
 bool g_swapChainOccluded = false;
 UINT g_resizeWidth = 0;
 UINT g_resizeHeight = 0;
@@ -112,7 +113,87 @@ bool CreateDeviceD3D(HWND hWnd) {
     return true;
 }
 
+void CreateAppLogoTexture(HINSTANCE hInstance, int iconResId) {
+    if (g_pd3dDevice == nullptr || g_appLogoSrv != nullptr) {
+        return;
+    }
+    HICON hIcon = static_cast<HICON>(LoadImageW(
+        hInstance,
+        MAKEINTRESOURCEW(iconResId),
+        IMAGE_ICON,
+        128,
+        128,
+        LR_DEFAULTCOLOR));
+    if (hIcon == nullptr) {
+        return;
+    }
+
+    ICONINFO ii{};
+    if (!GetIconInfo(hIcon, &ii)) {
+        DestroyIcon(hIcon);
+        return;
+    }
+
+    BITMAP bm{};
+    if (ii.hbmColor != nullptr && GetObjectW(ii.hbmColor, sizeof(bm), &bm) > 0 &&
+        bm.bmWidth > 0 && bm.bmHeight > 0) {
+        const UINT w = static_cast<UINT>(bm.bmWidth);
+        const UINT h = static_cast<UINT>(bm.bmHeight);
+        std::vector<unsigned char> pixels(static_cast<size_t>(w) * h * 4u, 0);
+
+        BITMAPINFO bmi{};
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = static_cast<LONG>(w);
+        bmi.bmiHeader.biHeight = -static_cast<LONG>(h); // Top-down DIB
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        HDC hdc = GetDC(nullptr);
+        if (hdc != nullptr) {
+            if (GetDIBits(hdc, ii.hbmColor, 0, h, pixels.data(), &bmi, DIB_RGB_COLORS) > 0) {
+                D3D11_TEXTURE2D_DESC desc{};
+                desc.Width = w;
+                desc.Height = h;
+                desc.MipLevels = 1;
+                desc.ArraySize = 1;
+                desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+                desc.SampleDesc.Count = 1;
+                desc.Usage = D3D11_USAGE_IMMUTABLE;
+                desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+                D3D11_SUBRESOURCE_DATA initData{};
+                initData.pSysMem = pixels.data();
+                initData.SysMemPitch = w * 4u;
+
+                ID3D11Texture2D* tex = nullptr;
+                if (SUCCEEDED(g_pd3dDevice->CreateTexture2D(&desc, &initData, &tex)) && tex != nullptr) {
+                    D3D11_SHADER_RESOURCE_VIEW_DESC srvDesc{};
+                    srvDesc.Format = desc.Format;
+                    srvDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURE2D;
+                    srvDesc.Texture2D.MipLevels = 1;
+                    if (SUCCEEDED(g_pd3dDevice->CreateShaderResourceView(tex, &srvDesc, &g_appLogoSrv)) &&
+                        g_appLogoSrv != nullptr) {
+                        g_appLogoTexture = reinterpret_cast<ImTextureID>(g_appLogoSrv);
+                    }
+                    tex->Release();
+                }
+            }
+            ReleaseDC(nullptr, hdc);
+        }
+    }
+
+    if (ii.hbmColor != nullptr) DeleteObject(ii.hbmColor);
+    if (ii.hbmMask != nullptr) DeleteObject(ii.hbmMask);
+    DestroyIcon(hIcon);
+}
+
 void CleanupDeviceD3D() {
+    if (g_appLogoSrv != nullptr) {
+        g_appLogoSrv->Release();
+        g_appLogoSrv = nullptr;
+    }
+    g_appLogoTexture = 0;
     CleanupRenderTarget();
     if (g_pSwapChain != nullptr) {
         g_pSwapChain->Release();
@@ -294,9 +375,7 @@ void RenderSingleFrame(
     g_appInstance->RenderFrame();
 
     ImGui::Render();
-    const ImVec4 clearColor = g_isLightTheme
-                                  ? ImVec4(0.941f, 0.953f, 0.973f, 1.00f)
-                                  : ImVec4(0.059f, 0.071f, 0.098f, 1.00f);
+    const ImVec4 clearColor = CanvasBgColor();
     const float clearColorWithAlpha[4] = {
         clearColor.x, clearColor.y, clearColor.z, clearColor.w};
     g_pd3dDeviceContext->OMSetRenderTargets(1, &g_mainRenderTargetView, nullptr);
@@ -313,32 +392,32 @@ void RenderSingleFrame(
             if (phase == 0) {
                 switch (viewIdx) {
                 case 0:
-                    g_appInstance->ConfigureCaptureState(0, 0, 0, true, false, 0);
+                    g_appInstance->ConfigureCaptureState(0, 0, 0, false, false, -1);
                     break;
                 case 1:
-                    g_appInstance->ConfigureCaptureState(1, 0, 0, true, false, -1);
+                    g_appInstance->ConfigureCaptureState(1, 0, 0, false, false, -1);
                     break;
                 case 2:
-                    g_appInstance->ConfigureCaptureState(2, 0, 0, true, false, -1);
+                    g_appInstance->ConfigureCaptureState(2, 0, 0, false, false, -1);
                     break;
                 case 3:
-                    g_appInstance->ConfigureCaptureState(3, 0, 1, true, false, -1);
+                    g_appInstance->ConfigureCaptureState(3, 0, 0, false, false, 0);
                     break;
                 case 4:
-                    g_appInstance->ConfigureCaptureState(4, 0, 0, true, false, -1);
+                    g_appInstance->ConfigureCaptureState(4, 0, 0, false, false, -1);
                     break;
                 case 5:
-                    g_appInstance->ConfigureCaptureState(0, 0, 0, false, true, 0);
+                    g_appInstance->ConfigureCaptureState(0, 0, 0, false, true, -1);
                     break;
                 default:
                     break;
                 }
             } else if (phase == 3) {
                 static constexpr const wchar_t* kSuiteFiles[6] = {
-                    L"01-devices.bmp",
+                    L"01-overview.bmp",
                     L"02-components.bmp",
                     L"03-windows-update.bmp",
-                    L"04-driverstore.bmp",
+                    L"04-devices.bmp",
                     L"05-diagnostics.bmp",
                     L"06-light-theme.bmp",
                 };
@@ -435,7 +514,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             LocalFree(argv);
         }
     }
-    if ((initialTab == 3 || hasLocalSectionArg) && !hasModeArg) {
+    if ((initialTab == 5 || hasLocalSectionArg) && !hasModeArg) {
         g_isAdvancedMode = true;
     }
     if (!captureSuiteDir.empty()) {
@@ -459,14 +538,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         IMAGE_ICON,
         GetSystemMetrics(SM_CXICON),
         GetSystemMetrics(SM_CYICON),
-        LR_DEFAULTCOLOR));
+        LR_DEFAULTCOLOR | LR_SHARED));
     wc.hIconSm = static_cast<HICON>(LoadImageW(
         hInstance,
         MAKEINTRESOURCEW(kAppIconId),
         IMAGE_ICON,
         GetSystemMetrics(SM_CXSMICON),
         GetSystemMetrics(SM_CYSMICON),
-        LR_DEFAULTCOLOR));
+        LR_DEFAULTCOLOR | LR_SHARED));
     wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     wc.lpszClassName = L"DriverLoomWndClass";
     RegisterClassExW(&wc);
@@ -498,6 +577,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         UnregisterClassW(wc.lpszClassName, wc.hInstance);
         return 1;
     }
+    CreateAppLogoTexture(hInstance, kAppIconId);
 
     ShowWindow(hwnd, SW_SHOWDEFAULT);
     UpdateWindow(hwnd);
@@ -524,29 +604,34 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             path, sizePx, &cfg, io.Fonts->GetGlyphRangesCyrillic());
     };
 
-    g_fontRegular = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeui.ttf", 16.0f * fontScale);
+    g_fontRegular = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeui.ttf", 15.5f * fontScale);
     if (g_fontRegular == nullptr) {
         g_fontRegular = io.Fonts->AddFontDefault();
     }
     io.FontDefault = g_fontRegular;
 
+    g_fontSmall = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeui.ttf", 13.5f * fontScale);
+    if (g_fontSmall == nullptr) {
+        g_fontSmall = g_fontRegular;
+    }
+
     g_fontSecondaryHeader =
-        tryLoadCyrillicFont("C:\\Windows\\Fonts\\seguisb.ttf", 16.5f * fontScale);
+        tryLoadCyrillicFont("C:\\Windows\\Fonts\\seguisb.ttf", 16.0f * fontScale);
     if (g_fontSecondaryHeader == nullptr) {
         g_fontSecondaryHeader =
-            tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 16.5f * fontScale);
+            tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 16.0f * fontScale);
     }
     if (g_fontSecondaryHeader == nullptr) {
         g_fontSecondaryHeader = g_fontRegular;
     }
 
-    g_fontMainTab = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 17.5f * fontScale);
+    g_fontMainTab = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 19.0f * fontScale);
     if (g_fontMainTab == nullptr) {
         g_fontMainTab = g_fontSecondaryHeader;
     }
 
     g_fontPrimaryHeader =
-        tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 19.5f * fontScale);
+        tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 22.0f * fontScale);
     if (g_fontPrimaryHeader == nullptr) {
         g_fontPrimaryHeader = g_fontMainTab;
     }

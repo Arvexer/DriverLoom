@@ -30,8 +30,6 @@ struct WindowsReadinessInfo {
     bool systemRestoreEnabled{false};
     bool systemRestorePolicyDisabled{false};
     bool trimEnabled{true};
-    uint32_t restoreDiskPercent{0};
-    uint32_t restoreLastIndex{0};
 };
 
 enum class ControllerHealth {
@@ -154,7 +152,6 @@ public:
 
     void SetActivePowerSchemeAsync(
         const std::string& schemeGuidStr,
-        std::vector<DeviceInfo> devicesSnapshot,
         LogCallback onLog);
 
     static bool SetActivePowerSchemeSync(
@@ -209,9 +206,11 @@ private:
     std::atomic<bool> runningAction_{false};
     std::atomic<bool> exportingReport_{false};
     std::atomic<bool> cancelRequested_{false};
+    std::atomic<bool> stopRequested_{false};
     std::atomic<uint64_t> generation_{0};
 
     mutable std::mutex dataMutex_;
+    mutable std::mutex threadMutex_;
     SystemDiagnosticsSnapshot snapshot_;
     std::string actionPhase_;
 

@@ -53,6 +53,7 @@ add_executable(DriverLoom WIN32
     src/app/CliWorker.cpp
     src/ui/AppWidgets.cpp
     src/ui/DriverLoomApp.cpp
+    src/ui/TabOverview.cpp
     src/ui/TabDevices.cpp
     src/ui/TabComponents.cpp
     src/ui/TabWindowsUpdate.cpp

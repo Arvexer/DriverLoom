@@ -20,7 +20,11 @@ void DriverLoomApp::RebuildDeviceViewCache(ImGuiTableSortSpecs* sortSpecs) {
         const auto& d = devicesCache_[i];
         switch (deviceFilterMode_) {
         case DeviceFilterMode::ProblemOnly:
-            if (d.health == hdm::DeviceHealth::Ok && !d.isGenericMonitorDriver) continue;
+            if (g_isAdvancedMode) {
+                if (d.health == hdm::DeviceHealth::Ok && !d.isGenericMonitorDriver) continue;
+            } else {
+                if (!IsUserRelevantDeviceIssue(d)) continue;
+            }
             break;
         case DeviceFilterMode::Monitors:
             if (d.category != hdm::DeviceCategory::Monitor) continue;
@@ -55,11 +59,13 @@ void DriverLoomApp::RebuildDeviceViewCache(ImGuiTableSortSpecs* sortSpecs) {
                 int cmp = 0;
                 switch (spec.ColumnUserID) {
                 case 0: {
-                    auto rank = [](hdm::DeviceHealth h) {
-                        return h == hdm::DeviceHealth::Error ? 0
-                               : (h == hdm::DeviceHealth::Warning ? 1 : 2);
+                    auto rank = [&](const hdm::DeviceInfo& d) {
+                        if (d.health == hdm::DeviceHealth::Error) return 0;
+                        if (IsUserRelevantDeviceIssue(d)) return 1;
+                        if (d.health == hdm::DeviceHealth::Warning || d.isGenericMonitorDriver) return 2;
+                        return 3;
                     };
-                    cmp = rank(a.health) - rank(b.health);
+                    cmp = rank(a) - rank(b);
                     if (cmp == 0) cmp = a.statusText.compare(b.statusText);
                     break;
                 }
@@ -79,85 +85,33 @@ void DriverLoomApp::RebuildDeviceViewCache(ImGuiTableSortSpecs* sortSpecs) {
 }
 
 void DriverLoomApp::RenderDevicesTab() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
     const bool isAppForeground = (GetForegroundWindow() == hwnd_);
 
-    // Row 1: Scan button + PnP rescan + Category filter pills (auto-wrap on narrow windows)
+    RenderPageHeader(
+        hdm::Tr("Устройства и мониторы", "Пристрої та монітори", "Devices & Monitors"),
+        hdm::Tr(
+            "Нажмите на любое устройство в списке, чтобы посмотреть сведения или установить официальный драйвер.",
+            "Натисніть на будь-який пристрій у списку, щоб переглянути відомості або встановити офіційний драйвер.",
+            "Click any device below to view details or install an official driver."));
+
     const bool scanning = scanner_.IsScanning();
     const bool catalogBusy = componentsScanner_.IsInstalling();
     const bool devBusy = scanner_.IsBusy() || catalogBusy;
-    ImGui::BeginDisabled(devBusy);
-    const char* devScanLbl =
-        scanning
-            ? hdm::Tr("Сканирование...###DevScan", "Сканування...###DevScan", "Scanning...###DevScan")
-            : (devBusy
-                   ? hdm::Tr("Выполнение...###DevScan", "Виконання...###DevScan", "Working...###DevScan")
-                   : hdm::Tr("Сканировать###DevScan", "Сканувати###DevScan", "Scan###DevScan"));
-    if (ImGui::Button(devScanLbl)) {
-        scanner_.StartScanAsync(MakeLogger());
-    }
-    ImGui::EndDisabled();
 
-    if (g_isAdvancedMode) {
-        const char* pnpTxt = hdm::Tr("Обновить PnP", "Оновити PnP", "Rescan PnP");
-        SameLineWrapIfNeeded(CalcButtonWidth(pnpTxt));
-        ImGui::BeginDisabled(devBusy);
-        if (RenderSecondaryButton(hdm::Tr(
-                "Обновить PnP###DevPnp",
-                "Оновити PnP###DevPnp",
-                "Rescan PnP###DevPnp"))) {
-            scanner_.RunDeviceActionAsync(
-                hdm::DeviceAction::Reenumerate,
-                {},
-                hdm::Tr("Шина PnP", "Шина PnP", "PnP Bus"),
-                MakeLogger(),
-                [this](bool, bool rebootReq) {
-                    if (rebootReq) {
-                        rebootRequired_.store(true);
-                    }
-                });
-        }
-        if (isAppForeground &&
-            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
-            ImGui::SetTooltip(
-                "%s",
-                hdm::Tr(
-                    "Повторный опрос шины PnP (CM_Reenumerate_DevNode) для поиска подключённых или удалённых устройств.",
-                    "Повторне опитування шини PnP (CM_Reenumerate_DevNode) для пошуку підключених або видалених пристроїв.",
-                    "Rescan the PnP bus (CM_Reenumerate_DevNode) to detect connected or removed hardware."));
-        }
-        ImGui::EndDisabled();
-    }
-
-    const char* fAllTxt = hdm::Tr("Все", "Усі", "All");
-    const char* fProbTxt = hdm::Tr("Проблемные", "Проблемні", "Issues");
+    // Row 1: Filter Pills + Scan + Summary Badge
+    const char* fProbTxt = hdm::Tr("Внимание", "Увага", "Attention");
     const char* fMonTxt = hdm::Tr("Мониторы", "Монітори", "Monitors");
     const char* fPerTxt = hdm::Tr("Периферия", "Периферія", "Peripherals");
     const char* fGpuTxt = hdm::Tr("Видео и чипсет", "Відео та чипсет", "GPU & Chipset");
 
-    const char* filterLbl = hdm::Tr("Фильтр:", "Фільтр:", "Filter:");
-    float filterLblW = 0.0f;
-    {
-        PushFontSafe(g_fontSecondaryHeader);
-        filterLblW = ImGui::CalcTextSize(filterLbl).x;
-        PopFontSafe(g_fontSecondaryHeader);
-    }
-    const float divCheckW = 14.0f * uiScale + filterLblW + 6.0f * uiScale + CalcButtonWidth(fAllTxt);
-    const float lastX = ImGui::GetItemRectMax().x;
-    const float winRightLim = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
-    if (lastX + ImGui::GetStyle().ItemSpacing.x + divCheckW <= winRightLim) {
-        RenderVerticalDivider(3.0f);
-        ImGui::SameLine(0.0f, 3.0f * uiScale);
-    }
-    RenderSecondaryGroupLabel(filterLbl);
-    ImGui::SameLine(0.0f, 6.0f * uiScale);
     if (RenderPillButton(hdm::Tr("Все###DfAll", "Усі###DfAll", "All###DfAll"),
                          deviceFilterMode_ == DeviceFilterMode::All)) {
         deviceFilterMode_ = DeviceFilterMode::All;
         deviceViewDirty_ = true;
     }
     SameLineWrapIfNeeded(CalcButtonWidth(fProbTxt));
-    if (RenderPillButton(hdm::Tr("Проблемные###DfProb", "Проблемні###DfProb", "Issues###DfProb"),
+    if (RenderPillButton(hdm::Tr("Внимание###DfProb", "Увага###DfProb", "Attention###DfProb"),
                          deviceFilterMode_ == DeviceFilterMode::ProblemOnly)) {
         deviceFilterMode_ = DeviceFilterMode::ProblemOnly;
         deviceViewDirty_ = true;
@@ -181,34 +135,73 @@ void DriverLoomApp::RenderDevicesTab() {
         deviceViewDirty_ = true;
     }
 
-    {
-        char totStr[32], monStr[32], probStr[32];
-        std::snprintf(totStr, sizeof(totStr), "%zu", totalDevicesCount_);
-        std::snprintf(monStr, sizeof(monStr), "%zu", monitorDevicesCount_);
-        std::snprintf(probStr, sizeof(probStr), "%zu", problemDevicesCount_);
+    // Right-aligned Refresh + optional PnP Rescan + Summary
+    const char* devScanLbl =
+        scanning
+            ? hdm::Tr("Поиск...###DevScan", "Пошук...###DevScan", "Scanning...###DevScan")
+            : hdm::Tr("Обновить###DevScan", "Оновити###DevScan", "Refresh###DevScan");
+    const float scanW = CalcButtonWidth(scanning ? hdm::Tr("Поиск...", "Пошук...", "Scanning...")
+                                                 : hdm::Tr("Обновить", "Оновити", "Refresh")) +
+                        4.0f * uiScale;
+    const float pnpW =
+        g_isAdvancedMode ? (CalcButtonWidth(hdm::Tr("Обновить PnP", "Оновити PnP", "Rescan PnP")) + ImGui::GetStyle().ItemSpacing.x)
+                         : 0.0f;
 
-        const ImVec4 probAccent =
-            (problemDevicesCount_ > 0)
-                ? ImVec4(0.98f, 0.72f, 0.16f, 1.00f)
-                : ImVec4(0.20f, 0.83f, 0.60f, 1.00f);
-        const SummaryBadgeSegment segments[3] = {
-            {hdm::Tr("Всего:", "Усього:", "Total:"), totStr, ImVec4(0.46f, 0.74f, 0.98f, 1.00f), false},
-            {hdm::Tr("Мониторы:", "Монітори:", "Monitors:"), monStr, ImVec4(0.26f, 0.82f, 0.92f, 1.00f), false},
-            {hdm::Tr("Проблемные:", "Проблемні:", "Issues:"), probStr, probAccent, problemDevicesCount_ > 0},
-        };
+    char totStr[32], monStr[32], probStr[32];
+    const size_t shownIssues = g_isAdvancedMode ? problemDevicesCount_ : userRelevantIssueCount_;
+    std::snprintf(totStr, sizeof(totStr), "%zu", totalDevicesCount_);
+    std::snprintf(monStr, sizeof(monStr), "%zu", monitorDevicesCount_);
+    std::snprintf(probStr, sizeof(probStr), "%zu", shownIssues);
 
-        const float summaryW = CalcSummaryInfoBadgeWidth(segments, 3);
-        const float lastItemEndLocalX = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
-        const float winRightX = ImGui::GetWindowContentRegionMax().x;
-        if (winRightX - summaryW > lastItemEndLocalX + 10.0f * uiScale) {
-            ImGui::SameLine(winRightX - summaryW);
-        } else {
-            ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), winRightX - summaryW));
-        }
-        RenderSummaryInfoBadge(segments, 3);
+    const ImVec4 probAccent = (shownIssues > 0) ? WarningColor() : HealthyColor();
+    const SummaryBadgeSegment segments[3] = {
+        {hdm::Tr("Всего:", "Усього:", "Total:"), totStr, InfoAccentColor(), false},
+        {hdm::Tr("Мониторы:", "Монітори:", "Monitors:"), monStr, ImVec4(0.24f, 0.78f, 0.90f, 1.00f), false},
+        {hdm::Tr("Внимание:", "Увага:", "Attention:"), probStr, probAccent, shownIssues > 0},
+    };
+    const float summaryW = CalcSummaryInfoBadgeWidth(segments, 3);
+    const float rightTotalW = summaryW + ImGui::GetStyle().ItemSpacing.x + pnpW + scanW;
+    const float lastItemEndLocalX = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+    const float winRightX = ImGui::GetWindowContentRegionMax().x;
+    if (winRightX - rightTotalW > lastItemEndLocalX + 10.0f * uiScale) {
+        ImGui::SameLine(winRightX - rightTotalW);
+    } else {
+        ImGui::Dummy(ImVec2(0.0f, std::round(2.0f * uiScale)));
     }
 
-    // Row 2: Responsive full-width search bar
+    RenderSummaryInfoBadge(segments, 3);
+    ImGui::SameLine();
+    if (g_isAdvancedMode) {
+        ImGui::BeginDisabled(devBusy);
+        if (RenderSecondaryButton(hdm::Tr("Обновить PnP###DevPnp", "Оновити PnP###DevPnp", "Rescan PnP###DevPnp"))) {
+            scanner_.RunDeviceActionAsync(
+                hdm::DeviceAction::Reenumerate,
+                {},
+                hdm::Tr("Шина PnP", "Шина PnP", "PnP Bus"),
+                MakeLogger(),
+                [this](bool, bool rebootReq) {
+                    if (rebootReq) rebootRequired_.store(true);
+                });
+        }
+        if (isAppForeground &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "%s",
+                hdm::Tr(
+                    "Повторный опрос шины PnP (CM_Reenumerate_DevNode) для поиска подключённых устройств.",
+                    "Повторне опитування шини PnP (CM_Reenumerate_DevNode) для пошуку підключених пристроїв.",
+                    "Rescan the PnP bus (CM_Reenumerate_DevNode) to detect connected hardware."));
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+    }
+    ImGui::BeginDisabled(devBusy);
+    if (RenderSecondaryButton(devScanLbl, ImVec2(scanW, 0.0f))) {
+        scanner_.StartScanAsync(MakeLogger());
+    }
+    ImGui::EndDisabled();
+
+    // Row 2: Search Bar
     ImGui::SetNextItemWidth(std::max(180.0f, ImGui::GetContentRegionAvail().x));
     if (focusDeviceSearchNextFrame_) {
         ImGui::SetKeyboardFocusHere();
@@ -222,9 +215,9 @@ void DriverLoomApp::RenderDevicesTab() {
                       "Пошук за назвою, моделлю монітора (EDID), брендом, версією або Hardware ID... (Ctrl+F)",
                       "Search by name, monitor model (EDID), brand, version, or Hardware ID... (Ctrl+F)")
                 : hdm::Tr(
-                      "Поиск по названию устройства, модели монитора, бренду или версии... (Ctrl+F)",
-                      "Пошук за назвою пристрою, моделлю монітора, брендом або версією... (Ctrl+F)",
-                      "Search by device name, monitor model, brand, or version... (Ctrl+F)"),
+                      "Поиск устройства, монитора, мыши, клавиатуры или производителя... (Ctrl+F)",
+                      "Пошук пристрою, монітора, миші, клавіатури або виробника... (Ctrl+F)",
+                      "Search for a device, monitor, mouse, keyboard, or brand... (Ctrl+F)"),
             deviceFilterBuf_,
             sizeof(deviceFilterBuf_))) {
         deviceViewDirty_ = true;
@@ -239,10 +232,7 @@ void DriverLoomApp::RenderDevicesTab() {
             sizeof(overlay),
             "%s (%.0f%%)",
             phase.empty()
-                ? hdm::Tr(
-                      "Установка драйвера из Microsoft Update Catalog...",
-                      "Встановлення драйвера з Microsoft Update Catalog...",
-                      "Installing driver from Microsoft Update Catalog...")
+                ? hdm::Tr("Установка официального драйвера...", "Встановлення офіційного драйвера...", "Installing official driver...")
                 : phase.c_str(),
             prog * 100.0f);
         const char* cancelTxt = hdm::Tr("Отмена", "Скасувати", "Cancel");
@@ -259,7 +249,7 @@ void DriverLoomApp::RenderDevicesTab() {
         }
     }
 
-    ImGui::Spacing();
+    ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
 
     if (pendingSelectDeviceRow_ >= 0) {
         if (deviceViewDirty_ && !devicesCache_.empty()) {
@@ -276,11 +266,11 @@ void DriverLoomApp::RenderDevicesTab() {
 
     const hdm::DeviceInfo* selectedDevBefore = FindSelectedDevice();
     const ImGuiStyle& devStyle = ImGui::GetStyle();
-    const float cardPadY = std::round(8.0f * uiScale);
+    const float cardPadY = std::round(10.0f * uiScale);
     const float detailsH =
         (selectedDevBefore != nullptr)
             ? (ImGui::GetTextLineHeightWithSpacing() * 2.0f + ImGui::GetFrameHeight() +
-               cardPadY * 2.0f + 8.0f * uiScale)
+               cardPadY * 2.0f + 10.0f * uiScale)
             : 0.0f;
     const float tableH = std::max(
         110.0f,
@@ -294,42 +284,20 @@ void DriverLoomApp::RenderDevicesTab() {
 
     if (ImGui::BeginTable(
             g_isAdvancedMode ? "##DevicesTable" : "##DevicesTableStd",
-            g_isAdvancedMode ? 7 : 6,
+            g_isAdvancedMode ? 7 : 5,
             kTableFlags,
             ImVec2(0.0f, tableH))) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn(
-            hdm::Tr("Статус", "Статус", "Status"),
-            ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch,
-            1.28f,
-            0);
-        ImGui::TableSetupColumn(
-            hdm::Tr("Устройство / Модель", "Пристрій / Модель", "Device / Model"),
-            ImGuiTableColumnFlags_WidthStretch,
-            1.45f,
-            1);
-        ImGui::TableSetupColumn(
-            hdm::Tr("Производитель", "Виробник", "Manufacturer"),
-            ImGuiTableColumnFlags_WidthStretch,
-            0.90f,
-            2);
-        ImGui::TableSetupColumn(
-            hdm::Tr("Класс", "Клас", "Class"),
-            ImGuiTableColumnFlags_WidthStretch,
-            0.60f,
-            3);
-        ImGui::TableSetupColumn(
-            hdm::Tr("Версия", "Версія", "Version"),
-            ImGuiTableColumnFlags_WidthStretch,
-            0.76f,
-            4);
-        ImGui::TableSetupColumn(
-            hdm::Tr("Дата", "Дата", "Date"),
-            ImGuiTableColumnFlags_WidthStretch,
-            0.60f,
-            5);
+        ImGui::TableSetupColumn(hdm::Tr("Статус", "Статус", "Status"), ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 1.15f, 0);
+        ImGui::TableSetupColumn(hdm::Tr("Устройство / Модель", "Пристрій / Модель", "Device / Model"), ImGuiTableColumnFlags_WidthStretch, 1.65f, 1);
+        ImGui::TableSetupColumn(hdm::Tr("Производитель", "Виробник", "Manufacturer"), ImGuiTableColumnFlags_WidthStretch, 0.90f, 2);
         if (g_isAdvancedMode) {
-            ImGui::TableSetupColumn("Hardware ID", ImGuiTableColumnFlags_WidthStretch, 1.28f, 6);
+            ImGui::TableSetupColumn(hdm::Tr("Класс", "Клас", "Class"), ImGuiTableColumnFlags_WidthStretch, 0.58f, 3);
+        }
+        ImGui::TableSetupColumn(hdm::Tr("Версия", "Версія", "Version"), ImGuiTableColumnFlags_WidthStretch, 0.72f, 4);
+        ImGui::TableSetupColumn(hdm::Tr("Дата", "Дата", "Date"), ImGuiTableColumnFlags_WidthStretch, 0.56f, 5);
+        if (g_isAdvancedMode) {
+            ImGui::TableSetupColumn("Hardware ID", ImGuiTableColumnFlags_WidthStretch, 1.25f, 6);
         }
         RenderTableHeadersRow();
 
@@ -352,7 +320,7 @@ void DriverLoomApp::RenderDevicesTab() {
                 ImGui::TableNextRow();
                 ImGui::PushID(row);
 
-                // Col 0: Full-row selectable behind rounded status badge (zero X-shift)
+                // Col 0: Full-row selectable + Status badge
                 ImGui::TableSetColumnIndex(0);
                 const ImVec2 cellStart = ImGui::GetCursorPos();
                 const bool isRowSelected =
@@ -378,10 +346,9 @@ void DriverLoomApp::RenderDevicesTab() {
 
                     const bool hasHwKey = !dev.searchHardwareKey.empty() || !dev.hardwareId.empty();
                     if (ImGui::MenuItem(
-                            hdm::Tr(
-                                "Скачать и установить драйвер (Catalog WHQL)",
-                                "Завантажити та встановити драйвер (Catalog WHQL)",
-                                "Download & Install Driver (Catalog WHQL)"),
+                            g_isAdvancedMode
+                                ? hdm::Tr("Скачать и установить драйвер (Catalog WHQL)", "Завантажити та встановити драйвер (Catalog WHQL)", "Download & Install Driver (Catalog WHQL)")
+                                : hdm::Tr("Установить официальный драйвер", "Встановити офіційний драйвер", "Install Official Driver"),
                             nullptr,
                             false,
                             !devBusy && hasHwKey)) {
@@ -393,158 +360,94 @@ void DriverLoomApp::RenderDevicesTab() {
                             devicesCache_,
                             MakeLogger(),
                             [this](bool ok, bool rebootReq) {
-                                if (rebootReq) {
-                                    rebootRequired_.store(true);
-                                }
-                                if (ok) {
-                                    pendingDeviceRescan_.store(true);
-                                }
+                                if (rebootReq) rebootRequired_.store(true);
+                                if (ok) pendingDeviceRescan_.store(true);
                             });
                     }
                     ImGui::Separator();
 
                     const bool canControl = !devBusy && !dev.instanceId.empty();
-                    [[maybe_unused]] auto triggerAction = [&](hdm::DeviceAction act) {
+                    auto triggerAction = [&](hdm::DeviceAction act) {
                         scanner_.RunDeviceActionAsync(
                             act,
                             dev.instanceId,
                             dev.name,
                             MakeLogger(),
                             [this](bool, bool rebootReq) {
-                                if (rebootReq) {
-                                    rebootRequired_.store(true);
-                                }
+                                if (rebootReq) rebootRequired_.store(true);
                             });
                     };
 
                     if (g_isAdvancedMode) {
-                        if (ImGui::MenuItem(
-                                hdm::Tr("Перезапустить устройство", "Перезапустити пристрій", "Restart device"),
-                                nullptr,
-                                false,
-                                canControl)) {
+                        if (ImGui::MenuItem(hdm::Tr("Перезапустить устройство", "Перезапустити пристрій", "Restart device"), nullptr, false, canControl)) {
                             triggerAction(hdm::DeviceAction::Restart);
                         }
                         if (dev.problemCode == CM_PROB_DISABLED) {
-                            if (ImGui::MenuItem(
-                                    hdm::Tr("Включить устройство", "Увімкнути пристрій", "Enable device"),
-                                    nullptr,
-                                    false,
-                                    canControl)) {
+                            if (ImGui::MenuItem(hdm::Tr("Включить устройство", "Увімкнути пристрій", "Enable device"), nullptr, false, canControl)) {
                                 triggerAction(hdm::DeviceAction::Enable);
                             }
                         } else {
-                            if (ImGui::MenuItem(
-                                    hdm::Tr("Отключить устройство", "Вимкнути пристрій", "Disable device"),
-                                    nullptr,
-                                    false,
-                                    canControl)) {
+                            if (ImGui::MenuItem(hdm::Tr("Отключить устройство", "Вимкнути пристрій", "Disable device"), nullptr, false, canControl)) {
                                 triggerAction(hdm::DeviceAction::Disable);
                             }
                         }
-                        if (ImGui::MenuItem(
-                                hdm::Tr(
-                                    "Откатить драйвер (предыдущая версия)",
-                                    "Відкотити драйвер (попередня версія)",
-                                    "Roll back driver (previous version)"),
-                                nullptr,
-                                false,
-                                canControl && dev.hasDriver)) {
+                        if (ImGui::MenuItem(hdm::Tr("Откатить драйвер", "Відкотити драйвер", "Roll back driver"), nullptr, false, canControl && dev.hasDriver)) {
                             triggerAction(hdm::DeviceAction::RollbackDriver);
                         }
-                        if (ImGui::MenuItem(
-                                hdm::Tr(
-                                    "Удалить устройство (переустановка PnP)",
-                                    "Видалити пристрій (перевстановлення PnP)",
-                                    "Uninstall device (PnP reinstall)"),
-                                nullptr,
-                                false,
-                                canControl)) {
+                        if (ImGui::MenuItem(hdm::Tr("Удалить устройство (PnP)", "Видалити пристрій (PnP)", "Uninstall device (PnP)"), nullptr, false, canControl)) {
                             triggerAction(hdm::DeviceAction::UninstallDevice);
                         }
-                        if (ImGui::MenuItem(
-                                hdm::Tr(
-                                    "Открыть Диспетчер устройств Windows",
-                                    "Відкрити Диспетчер пристроїв Windows",
-                                    "Open Windows Device Manager"))) {
+                        if (ImGui::MenuItem(hdm::Tr("Диспетчер устройств Windows", "Диспетчер пристроїв Windows", "Windows Device Manager"))) {
                             ShellExecuteW(nullptr, L"open", L"devmgmt.msc", nullptr, nullptr, SW_SHOWNORMAL);
                         }
-                        if (ImGui::MenuItem(
-                                hdm::Tr(
-                                    "Показать пакет в DriverStore (oem*.inf)",
-                                    "Показати пакет у DriverStore (oem*.inf)",
-                                    "Show package in DriverStore (oem*.inf)"),
-                                nullptr,
-                                false,
-                                IsOemInfName(dev.infName))) {
+                        if (ImGui::MenuItem(hdm::Tr("Показать в DriverStore", "Показати у DriverStore", "Show in DriverStore"), nullptr, false, IsOemInfName(dev.infName))) {
                             JumpToDriverStorePackage(dev.infName);
                         }
                         ImGui::Separator();
-
-                        if (ImGui::MenuItem(
-                                hdm::Tr("Копировать Hardware ID", "Копіювати Hardware ID", "Copy Hardware ID"),
-                                nullptr,
-                                false,
-                                !dev.hardwareId.empty())) {
+                        if (ImGui::MenuItem(hdm::Tr("Копировать Hardware ID", "Копіювати Hardware ID", "Copy Hardware ID"), nullptr, false, !dev.hardwareId.empty())) {
                             ImGui::SetClipboardText(dev.hardwareId.c_str());
-                            logBuffer_.Push(
-                                hdm::LogLevel::Info,
-                                std::string(hdm::Tr("Скопирован Hardware ID: ", "Скопійовано Hardware ID: ", "Copied Hardware ID: ")) +
-                                    dev.hardwareId);
                         }
-                        if (ImGui::MenuItem(
-                                hdm::Tr("Копировать короткий ID (VEN/DEV)", "Копіювати короткий ID (VEN/DEV)", "Copy Short ID (VEN/DEV)"),
-                                nullptr,
-                                false,
-                                !dev.searchHardwareKey.empty())) {
+                        if (ImGui::MenuItem(hdm::Tr("Копировать короткий ID", "Копіювати короткий ID", "Copy Short ID"), nullptr, false, !dev.searchHardwareKey.empty())) {
                             ImGui::SetClipboardText(dev.searchHardwareKey.c_str());
                         }
                     } else if (dev.problemCode == CM_PROB_DISABLED) {
-                        if (ImGui::MenuItem(
-                                hdm::Tr("Включить устройство", "Увімкнути пристрій", "Enable device"),
-                                nullptr,
-                                false,
-                                canControl)) {
+                        if (ImGui::MenuItem(hdm::Tr("Включить устройство", "Увімкнути пристрій", "Enable device"), nullptr, false, canControl)) {
                             triggerAction(hdm::DeviceAction::Enable);
                         }
                         ImGui::Separator();
                     }
-                    if (ImGui::MenuItem(
-                            hdm::Tr("Копировать название устройства", "Копіювати назву пристрою", "Copy Device Name"))) {
+                    if (ImGui::MenuItem(hdm::Tr("Копировать название", "Копіювати назву", "Copy Name"))) {
                         ImGui::SetClipboardText(dev.name.c_str());
                     }
-                    ImGui::Separator();
                     const std::string queryId =
                         !dev.edidModel.empty()
                             ? (dev.manufacturer + " " + dev.edidModel + " monitor driver")
                             : (!dev.searchHardwareKey.empty()
                                    ? (dev.searchHardwareKey + " Windows driver")
                                    : (dev.name + " Windows driver"));
-                    if (ImGui::MenuItem(
-                            hdm::Tr("Найти драйвер в браузере (Google)", "Знайти драйвер у браузері (Google)", "Search driver in browser (Google)"))) {
+                    if (ImGui::MenuItem(hdm::Tr("Найти драйвер в интернете", "Знайти драйвер в інтернеті", "Search driver online"))) {
                         OpenUrlInBrowser("https://www.google.com/search?q=" + UrlEncode(queryId));
                     }
                     if (g_isAdvancedMode &&
-                        ImGui::MenuItem(
-                            hdm::Tr("Найти в каталоге Microsoft Update", "Знайти в каталозі Microsoft Update", "Search in Microsoft Update Catalog"),
-                            nullptr,
-                            false,
-                            !dev.searchHardwareKey.empty())) {
-                        OpenUrlInBrowser(
-                            "https://www.catalog.update.microsoft.com/Search.aspx?q=" +
-                            UrlEncode(dev.searchHardwareKey));
+                        ImGui::MenuItem(hdm::Tr("Открыть в Microsoft Update Catalog", "Відкрити у Microsoft Update Catalog", "Search Microsoft Update Catalog"), nullptr, false, !dev.searchHardwareKey.empty())) {
+                        OpenUrlInBrowser("https://www.catalog.update.microsoft.com/Search.aspx?q=" + UrlEncode(dev.searchHardwareKey));
                     }
                     ImGui::EndPopup();
                 }
 
                 ImGui::SetCursorPos(cellStart);
-                ImVec4 statusColor(0.20f, 0.83f, 0.60f, 1.00f); // Emerald
-                if (dev.health == hdm::DeviceHealth::Error) {
-                    statusColor = ImVec4(0.97f, 0.44f, 0.44f, 1.00f); // Coral Red
+                ImVec4 statusColor = HealthyColor();
+                std::string devStatusShown = hdm::TrDyn(dev.statusText);
+                if (dev.problemCode == CM_PROB_DISABLED) {
+                    statusColor = MutedTextColor();
+                    if (!g_isAdvancedMode) {
+                        devStatusShown = hdm::Tr("Отключено", "Вимкнено", "Disabled");
+                    }
+                } else if (dev.health == hdm::DeviceHealth::Error) {
+                    statusColor = DangerColor();
                 } else if (dev.health == hdm::DeviceHealth::Warning || dev.isGenericMonitorDriver) {
-                    statusColor = ImVec4(0.98f, 0.75f, 0.14f, 1.00f); // Amber
+                    statusColor = IsUserRelevantDeviceIssue(dev) ? WarningColor() : MutedTextColor();
                 }
-                const std::string devStatusShown = hdm::TrDyn(dev.statusText);
                 RenderStatusBadge(statusColor, devStatusShown.c_str(), false);
 
                 // Col 1: Device Name
@@ -559,50 +462,20 @@ void DriverLoomApp::RenderDevicesTab() {
                 RenderCellText(devTitleCell);
                 if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                     ImGui::BeginTooltip();
-                    ImGui::PushTextWrapPos(460.0f * uiScale);
+                    ImGui::PushTextWrapPos(440.0f * uiScale);
                     ImGui::TextColored(AccentTextColor(), "%s", devNameShown.c_str());
                     ImGui::TextDisabled(
-                        hdm::Tr(
-                            "Производитель: %s  |  Класс: %s",
-                            "Виробник: %s  |  Клас: %s",
-                            "Manufacturer: %s  |  Class: %s"),
+                        hdm::Tr("Производитель: %s  |  Статус: %s", "Виробник: %s  |  Статус: %s", "Manufacturer: %s  |  Status: %s"),
                         dev.manufacturer.empty() ? "—" : dev.manufacturer.c_str(),
-                        dev.deviceClass.empty() ? "—" : dev.deviceClass.c_str());
-                    if (g_isAdvancedMode) {
-                        ImGui::TextDisabled(
-                            hdm::Tr(
-                                "INF: %s  |  Статус: %s",
-                                "INF: %s  |  Статус: %s",
-                                "INF: %s  |  Status: %s"),
-                            dev.infName.empty() ? "—" : dev.infName.c_str(),
-                            devStatusShown.c_str());
-                        if (!dev.hardwareId.empty()) {
-                            ImGui::TextWrapped("Hardware ID: %s", dev.hardwareId.c_str());
-                        }
-                    } else {
-                        ImGui::TextDisabled(
-                            hdm::Tr("Статус: %s", "Статус: %s", "Status: %s"),
-                            devStatusShown.c_str());
-                    }
-                    if (!dev.edidModel.empty()) {
-                        ImGui::Text(
-                            hdm::Tr("Модель (EDID): %s", "Модель (EDID): %s", "Model (EDID): %s"),
-                            dev.edidModel.c_str());
+                        devStatusShown.c_str());
+                    if (g_isAdvancedMode && !dev.hardwareId.empty()) {
+                        ImGui::TextWrapped("INF: %s  |  HWID: %s", dev.infName.empty() ? "—" : dev.infName.c_str(), dev.hardwareId.c_str());
                     }
                     if (!dev.displayModeText.empty()) {
-                        ImGui::Text(
-                            hdm::Tr("Режим: %s", "Режим: %s", "Mode: %s"),
-                            dev.displayModeText.c_str());
-                        if (!dev.connectedGpuName.empty()) {
-                            ImGui::TextDisabled(
-                                hdm::Tr("Видеокарта: %s", "Відеокарта: %s", "GPU: %s"),
-                                dev.connectedGpuName.c_str());
-                        }
+                        ImGui::Text(hdm::Tr("Экран: %s", "Екран: %s", "Display: %s"), dev.displayModeText.c_str());
                     }
                     if (dev.gpuVramBytes >= (64ull * 1024ull * 1024ull)) {
-                        ImGui::Text(
-                            hdm::Tr("Видеопамять (VRAM): %s", "Відеопам'ять (VRAM): %s", "Video Memory (VRAM): %s"),
-                            hdm::FormatBytes(dev.gpuVramBytes).c_str());
+                        ImGui::Text(hdm::Tr("Видеопамять: %s", "Відеопам'ять: %s", "VRAM: %s"), hdm::FormatBytes(dev.gpuVramBytes).c_str());
                     }
                     ImGui::PopTextWrapPos();
                     ImGui::EndTooltip();
@@ -615,21 +488,20 @@ void DriverLoomApp::RenderDevicesTab() {
                     ImGui::SetTooltip("%s", dev.manufacturer.c_str());
                 }
 
-                // Col 3: Class
-                ImGui::TableSetColumnIndex(3);
-                RenderCellText(dev.deviceClass);
+                int colIdx = 3;
+                if (g_isAdvancedMode) {
+                    ImGui::TableSetColumnIndex(colIdx++);
+                    RenderCellText(dev.deviceClass);
+                }
 
-                // Col 4: Version
-                ImGui::TableSetColumnIndex(4);
+                ImGui::TableSetColumnIndex(colIdx++);
                 RenderCellText(dev.driverVersion, dev.driverVersion.empty());
 
-                // Col 5: Date
-                ImGui::TableSetColumnIndex(5);
+                ImGui::TableSetColumnIndex(colIdx++);
                 RenderCellText(dev.driverDate, true);
 
                 if (g_isAdvancedMode) {
-                    // Col 6: Hardware ID
-                    ImGui::TableSetColumnIndex(6);
+                    ImGui::TableSetColumnIndex(colIdx++);
                     if (RenderCellText(dev.hardwareId, dev.hardwareId.empty()) &&
                         isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                         ImGui::SetTooltip("%s", dev.hardwareId.c_str());
@@ -642,8 +514,9 @@ void DriverLoomApp::RenderDevicesTab() {
         ImGui::EndTable();
     }
 
+    // Selected Device Details Card
     if (const hdm::DeviceInfo* selectedDev = FindSelectedDevice()) {
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(devStyle.WindowPadding.x, cardPadY));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(std::round(14.0f * uiScale), cardPadY));
         ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
         ImGui::BeginChild(
             "##DeviceDetailsCard",
@@ -654,89 +527,86 @@ void DriverLoomApp::RenderDevicesTab() {
 
         {
             PushFontSafe(g_fontSecondaryHeader);
-            const float lineH = ImGui::GetTextLineHeight();
-            const float barW = std::max(2.5f, std::round(3.0f * uiScale));
-            const ImVec2 barMin = ImGui::GetCursorScreenPos();
-            ImGui::GetWindowDrawList()->AddRectFilled(
-                ImVec2(barMin.x, barMin.y + 1.0f),
-                ImVec2(barMin.x + barW, barMin.y + lineH - 1.0f),
-                ImGui::ColorConvertFloat4ToU32(AccentBarColor()),
-                barW * 0.5f);
-            ImGui::Dummy(ImVec2(barW + std::round(5.0f * uiScale), lineH));
-            ImGui::SameLine(0.0f, 0.0f);
-            ImGui::TextColored(
-                CardHeaderTextColor(),
-                "%s",
-                EllipsizeUtf8(selectedDev->name, 420.0f * uiScale).c_str());
+            ImGui::TextColored(CardHeaderTextColor(), "%s", EllipsizeUtf8(selectedDev->name, 420.0f * uiScale).c_str());
             PopFontSafe(g_fontSecondaryHeader);
         }
         ImGui::SameLine(0.0f, 12.0f);
         std::string metaLine =
             g_isAdvancedMode
-                ? (std::string(hdm::Tr("Статус: ", "Статус: ", "Status: ")) +
-                   hdm::TrDyn(selectedDev->statusText) +
-                   hdm::Tr("  |  Класс: ", "  |  Клас: ", "  |  Class: ") +
-                   (selectedDev->deviceClass.empty() ? "—" : selectedDev->deviceClass) +
-                   "  |  INF: " + (selectedDev->infName.empty() ? "—" : selectedDev->infName))
-                : (std::string(hdm::Tr("Статус: ", "Статус: ", "Status: ")) +
-                   hdm::TrDyn(selectedDev->statusText) +
-                   hdm::Tr("  |  Класс: ", "  |  Клас: ", "  |  Class: ") +
-                   (selectedDev->deviceClass.empty() ? "—" : selectedDev->deviceClass) +
-                   hdm::Tr("  |  Производитель: ", "  |  Виробник: ", "  |  Vendor: ") +
-                   (selectedDev->manufacturer.empty() ? "—" : selectedDev->manufacturer));
+                ? (std::string(hdm::Tr("Статус: ", "Статус: ", "Status: ")) + hdm::TrDyn(selectedDev->statusText) +
+                   "  •  " + (selectedDev->deviceClass.empty() ? "—" : selectedDev->deviceClass) +
+                   "  •  INF: " + (selectedDev->infName.empty() ? "—" : selectedDev->infName))
+                : (std::string(hdm::Tr("Производитель: ", "Виробник: ", "Vendor: ")) +
+                   (selectedDev->manufacturer.empty() ? "—" : selectedDev->manufacturer) +
+                   (!selectedDev->driverVersion.empty()
+                        ? (std::string(hdm::Tr("  •  Версия: ", "  •  Версія: ", "  •  Version: ")) + selectedDev->driverVersion)
+                        : ""));
         if (!selectedDev->displayModeText.empty()) {
-            metaLine += std::string(hdm::Tr("  |  Режим: ", "  |  Режим: ", "  |  Mode: ")) +
-                        selectedDev->displayModeText;
-            if (!selectedDev->connectedGpuName.empty()) {
-                metaLine += "  |  GPU: " + selectedDev->connectedGpuName;
-            }
-        } else if (selectedDev->gpuVramBytes >= (64ull * 1024ull * 1024ull)) {
-            metaLine += "  |  VRAM: " + hdm::FormatBytes(selectedDev->gpuVramBytes);
+            metaLine += "  •  " + selectedDev->displayModeText;
         }
         RenderCellText(metaLine, true);
 
         if (g_isAdvancedMode) {
             const std::string idLine =
-                "Hardware ID: " + (selectedDev->hardwareId.empty() ? "—" : selectedDev->hardwareId) +
-                "   |   Instance ID: " +
-                (selectedDev->instanceId.empty() ? "—" : selectedDev->instanceId);
+                "HWID: " + (selectedDev->hardwareId.empty() ? "—" : selectedDev->hardwareId) +
+                "   |   Instance: " + (selectedDev->instanceId.empty() ? "—" : selectedDev->instanceId);
             if (RenderCellText(idLine, true) && isAppForeground &&
                 ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                 ImGui::SetTooltip("%s", idLine.c_str());
             }
         } else {
-            const bool needsAttention =
-                (selectedDev->health != hdm::DeviceHealth::Ok || selectedDev->isGenericMonitorDriver);
             std::string friendlyLine;
-            if (needsAttention) {
+            if (selectedDev->problemCode == CM_PROB_DISABLED) {
                 friendlyLine = hdm::Tr(
-                    "Рекомендуется установить официальный WHQL-драйвер кнопкой ниже.",
-                    "Рекомендується встановити офіційний WHQL-драйвер кнопкою нижче.",
-                    "Recommended: install an official WHQL driver using the button below.");
+                    "Это устройство отключено вручную в Windows. Если оно вам нужно, вы можете включить его.",
+                    "Цей пристрій вимкнено вручну у Windows. Якщо він вам потрібен, ви можете увімкнути його.",
+                    "This device is manually disabled in Windows. You can re-enable it if needed.");
+            } else if (IsUserRelevantDeviceIssue(*selectedDev)) {
+                friendlyLine = hdm::Tr(
+                    "Рекомендуется установить официальный драйвер Microsoft кнопкой ниже.",
+                    "Рекомендується встановити офіційний драйвер Microsoft кнопкою нижче.",
+                    "Recommended: install an official Microsoft driver using the button below.");
+            } else if (selectedDev->health != hdm::DeviceHealth::Ok) {
+                friendlyLine = hdm::Tr(
+                    "Служебный / виртуальный порт — отдельный драйвер обычно не требуется.",
+                    "Службовий / віртуальний порт — окремий драйвер зазвичай не потрібен.",
+                    "Auxiliary / virtual port — a separate driver is normally not required.");
             } else {
                 friendlyLine = hdm::Tr(
-                    "Устройство работает исправно. Драйвер не требует вмешательства.",
-                    "Пристрій працює справно. Драйвер не потребує втручання.",
-                    "Device is working properly. No driver action is required.");
-                if (!selectedDev->driverVersion.empty()) {
-                    friendlyLine += std::string(hdm::Tr("  (версия: ", "  (версія: ", "  (version: ")) +
-                                    selectedDev->driverVersion + ")";
-                }
+                    "Устройство работает исправно — дополнительных действий не требуется.",
+                    "Пристрій працює справно — додаткових дій не потрібно.",
+                    "This device is working properly — no action is required.");
             }
+            PushFontSafe(g_fontSmall);
             RenderCellText(friendlyLine, true);
+            PopFontSafe(g_fontSmall);
         }
 
         const bool hasHwKey =
             !selectedDev->searchHardwareKey.empty() || !selectedDev->hardwareId.empty();
-        const bool highlightCatalog =
-            (selectedDev->health != hdm::DeviceHealth::Ok || selectedDev->isGenericMonitorDriver);
+        const bool highlightCatalog = IsUserRelevantDeviceIssue(*selectedDev);
+
+        if (!g_isAdvancedMode && selectedDev->problemCode == CM_PROB_DISABLED) {
+            ImGui::BeginDisabled(devBusy || selectedDev->instanceId.empty());
+            if (RenderPrimaryButton(hdm::Tr("Включить устройство###DevEnBtn", "Увімкнути пристрій###DevEnBtn", "Enable Device###DevEnBtn"))) {
+                scanner_.RunDeviceActionAsync(
+                    hdm::DeviceAction::Enable,
+                    selectedDev->instanceId,
+                    selectedDev->name,
+                    MakeLogger(),
+                    [this](bool, bool rebootReq) {
+                        if (rebootReq) rebootRequired_.store(true);
+                    });
+            }
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+        }
 
         ImGui::BeginDisabled(devBusy || !hasHwKey);
         if (RenderActionButton(
-                hdm::Tr(
-                    "Установить из Catalog (WHQL)###DevCatBtn",
-                    "Встановити з Catalog (WHQL)###DevCatBtn",
-                    "Install from Catalog (WHQL)###DevCatBtn"),
+                g_isAdvancedMode
+                    ? hdm::Tr("Установить из Catalog (WHQL)###DevCatBtn", "Встановити з Catalog (WHQL)###DevCatBtn", "Install from Catalog (WHQL)###DevCatBtn")
+                    : hdm::Tr("Установить официальный драйвер###DevCatBtn", "Встановити офіційний драйвер###DevCatBtn", "Install Official Driver###DevCatBtn"),
                 ImVec2(0.0f, 0.0f),
                 highlightCatalog)) {
             componentsScanner_.SearchAndInstallFromCatalogAsync(
@@ -757,8 +627,7 @@ void DriverLoomApp::RenderDevicesTab() {
             const bool canControl = !devBusy && !selectedDev->instanceId.empty();
             ImGui::SameLine();
             ImGui::BeginDisabled(!canControl);
-            if (RenderSecondaryButton(
-                    hdm::Tr("Перезапустить###DevRst", "Перезапустити###DevRst", "Restart###DevRst"))) {
+            if (RenderSecondaryButton(hdm::Tr("Перезапустить###DevRst", "Перезапустити###DevRst", "Restart###DevRst"))) {
                 scanner_.RunDeviceActionAsync(
                     hdm::DeviceAction::Restart,
                     selectedDev->instanceId,
@@ -770,8 +639,7 @@ void DriverLoomApp::RenderDevicesTab() {
             }
             ImGui::SameLine();
             ImGui::BeginDisabled(!selectedDev->hasDriver);
-            if (RenderSecondaryButton(
-                    hdm::Tr("Откатить драйвер###DevRb", "Відкотити драйвер###DevRb", "Roll Back###DevRb"))) {
+            if (RenderSecondaryButton(hdm::Tr("Откатить###DevRb", "Відкотити###DevRb", "Roll Back###DevRb"))) {
                 scanner_.RunDeviceActionAsync(
                     hdm::DeviceAction::RollbackDriver,
                     selectedDev->instanceId,
@@ -786,51 +654,21 @@ void DriverLoomApp::RenderDevicesTab() {
 
             ImGui::SameLine();
             ImGui::BeginDisabled(selectedDev->hardwareId.empty());
-            if (RenderSecondaryButton(
-                    hdm::Tr("Копировать HWID (Ctrl+C)###DevCpHw", "Копіювати HWID (Ctrl+C)###DevCpHw", "Copy HWID (Ctrl+C)###DevCpHw"))) {
+            if (RenderSecondaryButton(hdm::Tr("HWID###DevCpHw", "HWID###DevCpHw", "Copy HWID###DevCpHw"))) {
                 ImGui::SetClipboardText(selectedDev->hardwareId.c_str());
-                logBuffer_.Push(
-                    hdm::LogLevel::Info,
-                    std::string(hdm::Tr("Скопирован Hardware ID: ", "Скопійовано Hardware ID: ", "Copied Hardware ID: ")) +
-                        selectedDev->hardwareId);
-            }
-            ImGui::EndDisabled();
-
-            ImGui::SameLine();
-            ImGui::BeginDisabled(selectedDev->instanceId.empty());
-            if (RenderSecondaryButton(
-                    hdm::Tr("Копировать Instance ID###DevCpInst", "Копіювати Instance ID###DevCpInst", "Copy Instance ID###DevCpInst"))) {
-                ImGui::SetClipboardText(selectedDev->instanceId.c_str());
-                logBuffer_.Push(
-                    hdm::LogLevel::Info,
-                    std::string(hdm::Tr("Скопирован Instance ID: ", "Скопійовано Instance ID: ", "Copied Instance ID: ")) +
-                        selectedDev->instanceId);
+                logBuffer_.Push(hdm::LogLevel::Info, std::string("Copied Hardware ID: ") + selectedDev->hardwareId);
             }
             ImGui::EndDisabled();
 
             if (IsOemInfName(selectedDev->infName)) {
                 ImGui::SameLine();
-                if (RenderSecondaryButton(hdm::Tr(
-                        "В DriverStore###DevGoStore",
-                        "У DriverStore###DevGoStore",
-                        "In DriverStore###DevGoStore"))) {
+                if (RenderSecondaryButton(hdm::Tr("В DriverStore###DevGoStore", "У DriverStore###DevGoStore", "DriverStore###DevGoStore"))) {
                     JumpToDriverStorePackage(selectedDev->infName);
-                }
-                if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-                    ImGui::SetTooltip(
-                        hdm::Tr(
-                            "Перейти к пакету %s во вкладке DriverStore для бэкапа или удаления",
-                            "Перейти до пакета %s у вкладці DriverStore для бекапу або видалення",
-                            "Jump to package %s in DriverStore tab for backup or removal"),
-                        selectedDev->infName.c_str());
                 }
             }
         } else {
             ImGui::SameLine();
-            if (RenderSecondaryButton(hdm::Tr(
-                    "Найти драйвер в Google###DevGglBtn",
-                    "Знайти драйвер у Google###DevGglBtn",
-                    "Search Driver in Google###DevGglBtn"))) {
+            if (RenderSecondaryButton(hdm::Tr("Найти в интернете###DevGglBtn", "Знайти в інтернеті###DevGglBtn", "Search Online###DevGglBtn"))) {
                 const std::string queryId =
                     !selectedDev->edidModel.empty()
                         ? (selectedDev->manufacturer + " " + selectedDev->edidModel + " monitor driver")
@@ -841,8 +679,8 @@ void DriverLoomApp::RenderDevicesTab() {
             }
         }
 
-        const char* closeTxt = hdm::Tr("Закрыть (Esc)", "Закрити (Esc)", "Close (Esc)");
-        const float closeW = CalcButtonWidth(closeTxt);
+        const char* closeTxt = hdm::Tr("Закрыть", "Закрити", "Close");
+        const float closeW = CalcButtonWidth(closeTxt) + 4.0f * uiScale;
         const float winRight = ImGui::GetWindowContentRegionMax().x;
         const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
         if (winRight - closeW > lastEnd + devStyle.ItemSpacing.x) {
@@ -850,9 +688,7 @@ void DriverLoomApp::RenderDevicesTab() {
         } else {
             ImGui::SameLine();
         }
-        if (RenderSecondaryButton(
-                hdm::Tr("Закрыть (Esc)###DevClose", "Закрити (Esc)###DevClose", "Close (Esc)###DevClose"),
-                ImVec2(closeW, 0.0f))) {
+        if (RenderSecondaryButton(hdm::Tr("Закрыть###DevClose", "Закрити###DevClose", "Close###DevClose"), ImVec2(closeW, 0.0f))) {
             selectedDeviceInstanceId_.clear();
         }
 

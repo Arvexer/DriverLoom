@@ -1,4 +1,5 @@
 #include "core/SystemComponentsScanner.hpp"
+#include "core/DeviceScanner.hpp"
 #include "core/LocalDriverInstaller.hpp"
 #include "core/SystemRestore.hpp"
 
@@ -17,6 +18,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <limits>
 #include <map>
 #include <set>
 #include <sstream>
@@ -61,7 +63,7 @@ std::wstring ReadRegStr(HKEY key, const wchar_t* name) {
         bytes == 0 || (type != REG_SZ && type != REG_EXPAND_SZ)) {
         return {};
     }
-    std::wstring buf(bytes / sizeof(wchar_t) + 1, L'\0');
+    std::wstring buf(bytes / sizeof(wchar_t) + 2, L'\0');
     if (RegQueryValueExW(key, name, nullptr, &type,
                          reinterpret_cast<LPBYTE>(buf.data()), &bytes) != ERROR_SUCCESS) {
         return {};
@@ -158,13 +160,18 @@ std::string GetFileVersionUtf8(const std::filesystem::path& filePath) {
     return buf;
 }
 
-std::vector<int> ParseVersionParts(const std::string& ver) {
-    std::vector<int> parts;
-    int current = 0;
+std::vector<uint64_t> ParseVersionParts(const std::string& ver) {
+    std::vector<uint64_t> parts;
+    uint64_t current = 0;
     bool inNum = false;
     for (char ch : ver) {
         if (ch >= '0' && ch <= '9') {
-            current = current * 10 + (ch - '0');
+            const uint64_t digit = static_cast<uint64_t>(ch - '0');
+            if (current <= (std::numeric_limits<uint64_t>::max() - digit) / 10) {
+                current = current * 10 + digit;
+            } else {
+                current = std::numeric_limits<uint64_t>::max();
+            }
             inNum = true;
         } else if (inNum) {
             parts.push_back(current);
@@ -189,8 +196,8 @@ bool IsVersionNewer(const std::string& latest, const std::string& current) {
     }
     const size_t n = std::max(a.size(), b.size());
     for (size_t i = 0; i < n; ++i) {
-        const int va = i < a.size() ? a[i] : 0;
-        const int vb = i < b.size() ? b[i] : 0;
+        const uint64_t va = i < a.size() ? a[i] : 0;
+        const uint64_t vb = i < b.size() ? b[i] : 0;
         if (va != vb) {
             return va > vb;
         }
@@ -322,7 +329,10 @@ std::string FindBestVcUninstallVersion(
 
 std::string DetectHighestDotNetDesktop(const std::string& majorPrefix) {
     wchar_t progFiles[MAX_PATH]{};
-    GetEnvironmentVariableW(L"ProgramFiles", progFiles, MAX_PATH);
+    const DWORD len = GetEnvironmentVariableW(L"ProgramFiles", progFiles, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        return {};
+    }
     const std::filesystem::path dir =
         std::filesystem::path(progFiles) / L"dotnet" / L"shared" / L"Microsoft.WindowsDesktop.App";
     std::error_code ec;
@@ -330,11 +340,15 @@ std::string DetectHighestDotNetDesktop(const std::string& majorPrefix) {
         return {};
     }
     std::string best;
-    for (const auto& entry : std::filesystem::directory_iterator(dir, ec)) {
-        if (!entry.is_directory(ec)) {
+    for (std::filesystem::directory_iterator it(
+             dir, std::filesystem::directory_options::skip_permission_denied, ec);
+         !ec && it != std::filesystem::directory_iterator();
+         it.increment(ec)) {
+        std::error_code entryEc;
+        if (!it->is_directory(entryEc)) {
             continue;
         }
-        const std::string ver = WideToUtf8(entry.path().filename().wstring());
+        const std::string ver = WideToUtf8(it->path().filename().wstring());
         if (ver.rfind(majorPrefix + ".", 0) == 0) {
             if (best.empty() || IsVersionNewer(ver, best)) {
                 best = ver;
@@ -346,17 +360,17 @@ std::string DetectHighestDotNetDesktop(const std::string& majorPrefix) {
 
 std::filesystem::path GetSystemDirPath(bool wow64) {
     wchar_t buf[MAX_PATH]{};
-    if (wow64) {
-        GetSystemWow64DirectoryW(buf, MAX_PATH);
-    } else {
-        GetSystemDirectoryW(buf, MAX_PATH);
+    const UINT len = wow64 ? GetSystemWow64DirectoryW(buf, MAX_PATH) : GetSystemDirectoryW(buf, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
+        return {};
     }
     return std::filesystem::path(buf);
 }
 
 std::filesystem::path GetEnvPath(const wchar_t* varName) {
     wchar_t buf[MAX_PATH]{};
-    if (GetEnvironmentVariableW(varName, buf, MAX_PATH) == 0) {
+    const DWORD len = GetEnvironmentVariableW(varName, buf, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) {
         return {};
     }
     return std::filesystem::path(buf);
@@ -854,10 +868,33 @@ UINT CALLBACK CabExtractCallback(PVOID ctx, UINT notification, UINT_PTR param1, 
     if (notification == SPFILENOTIFY_FILEINCABINET) {
         auto* info = reinterpret_cast<FILE_IN_CABINET_INFO_W*>(param1);
         const auto* baseDir = static_cast<const std::filesystem::path*>(ctx);
-        const std::filesystem::path dest = *baseDir / info->NameInCabinet;
+        if (info == nullptr || info->NameInCabinet == nullptr || baseDir == nullptr) {
+            return FILEOP_ABORT;
+        }
+        const std::filesystem::path rel = std::filesystem::path(info->NameInCabinet).lexically_normal();
+        if (rel.empty() || rel == L"." || rel.is_absolute() || rel.has_root_name() ||
+            rel.has_root_directory()) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return FILEOP_ABORT;
+        }
+        for (const auto& part : rel) {
+            if (part == L"..") {
+                SetLastError(ERROR_ACCESS_DENIED);
+                return FILEOP_ABORT;
+            }
+        }
+        const std::filesystem::path dest = (*baseDir / rel).lexically_normal();
+        const std::wstring destW = dest.wstring();
+        if (destW.size() >= MAX_PATH) {
+            SetLastError(ERROR_FILENAME_EXCED_RANGE);
+            return FILEOP_ABORT;
+        }
         std::error_code ec;
         std::filesystem::create_directories(dest.parent_path(), ec);
-        wcsncpy_s(info->FullTargetName, MAX_PATH, dest.c_str(), _TRUNCATE);
+        if (ec) {
+            return FILEOP_ABORT;
+        }
+        wcsncpy_s(info->FullTargetName, MAX_PATH, destW.c_str(), _TRUNCATE);
         return FILEOP_DOIT;
     }
     return NO_ERROR;
@@ -1306,9 +1343,11 @@ bool DownloadFileViaWinHttp(
         return false;
     }
 
+    bool ioError = false;
+    std::string ioErrMsg;
     ULONGLONG downloaded = 0;
     DWORD avail = 0;
-    while (WinHttpQueryDataAvailable(request.Get(), &avail) && avail > 0) {
+    for (;;) {
         if (cancelFlag != nullptr && cancelFlag->load()) {
             ofs.close();
             std::error_code rmEc;
@@ -1316,13 +1355,30 @@ bool DownloadFileViaWinHttp(
             if (outError) *outError = "Отменено пользователем.";
             return false;
         }
-        std::vector<char> buf(std::min<DWORD>(avail, 65536));
-        DWORD readBytes = 0;
-        if (!WinHttpReadData(request.Get(), buf.data(), static_cast<DWORD>(buf.size()), &readBytes) ||
-            readBytes == 0) {
+        avail = 0;
+        if (!WinHttpQueryDataAvailable(request.Get(), &avail)) {
+            ioError = true;
+            ioErrMsg = "Ошибка чтения ответа HTTP: " + FormatWin32Error(GetLastError());
             break;
         }
-        ofs.write(buf.data(), static_cast<std::streamsize>(readBytes));
+        if (avail == 0) {
+            break;
+        }
+        std::vector<char> buf(std::min<DWORD>(avail, 65536));
+        DWORD readBytes = 0;
+        if (!WinHttpReadData(request.Get(), buf.data(), static_cast<DWORD>(buf.size()), &readBytes)) {
+            ioError = true;
+            ioErrMsg = "Ошибка загрузки данных: " + FormatWin32Error(GetLastError());
+            break;
+        }
+        if (readBytes == 0) {
+            break;
+        }
+        if (!ofs.write(buf.data(), static_cast<std::streamsize>(readBytes))) {
+            ioError = true;
+            ioErrMsg = "Ошибка записи временного файла на диск.";
+            break;
+        }
         downloaded += readBytes;
         if (progress != nullptr && totalSize > 0) {
             const float localFrac = std::clamp(
@@ -1330,8 +1386,28 @@ bool DownloadFileViaWinHttp(
             progress->store(std::clamp(baseProgress + localFrac * progressSpan, 0.0f, 0.99f));
         }
     }
+    ofs.flush();
+    if (!ofs.good() && !ioError) {
+        ioError = true;
+        ioErrMsg = "Ошибка завершения записи временного файла.";
+    }
     ofs.close();
-    return downloaded > 0;
+
+    if (!ioError && downloaded == 0) {
+        ioError = true;
+        ioErrMsg = "Сервер вернул пустой файл.";
+    } else if (!ioError && totalSize > 0 && downloaded < totalSize) {
+        ioError = true;
+        ioErrMsg = "Загрузка прервалась неполной (" + std::to_string(downloaded) + " из " +
+                   std::to_string(totalSize) + " байт).";
+    }
+    if (ioError) {
+        std::error_code rmEc;
+        std::filesystem::remove(destPath, rmEc);
+        if (outError) *outError = ioErrMsg;
+        return false;
+    }
+    return true;
 }
 
 bool ExtractZipViaShellCom(
@@ -1339,6 +1415,9 @@ bool ExtractZipViaShellCom(
     const std::filesystem::path& destDir) {
     std::error_code ec;
     std::filesystem::create_directories(destDir, ec);
+    if (ec) {
+        return false;
+    }
 
     CoInitGuard comInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
     if (!comInit.Succeeded()) {
@@ -1380,6 +1459,10 @@ bool ExtractZipViaShellCom(
     if (FAILED(zipFolder->Items(items.Put())) || !items) {
         return false;
     }
+    long itemCount = 0;
+    if (FAILED(items->get_Count(&itemCount)) || itemCount <= 0) {
+        return false;
+    }
 
     VARIANT vItems;
     VariantInit(&vItems);
@@ -1408,13 +1491,23 @@ bool VerifyAuthenticodeSignature(const std::filesystem::path& filePath, std::str
     trustData.dwUnionChoice = WTD_CHOICE_FILE;
     trustData.pFile = &fileInfo;
     trustData.dwStateAction = WTD_STATEACTION_VERIFY;
-    trustData.dwProvFlags = WTD_SAFER_FLAG;
+    trustData.dwProvFlags = WTD_SAFER_FLAG | WTD_REVOCATION_CHECK_NONE;
 
     GUID policyGuid = WINTRUST_ACTION_GENERIC_VERIFY_V2;
-    const LONG status = WinVerifyTrust(nullptr, &policyGuid, &trustData);
+    struct WinTrustStateGuard {
+        GUID policy{};
+        WINTRUST_DATA& data;
+        bool active{false};
+        ~WinTrustStateGuard() {
+            if (active && data.hWVTStateData != nullptr) {
+                data.dwStateAction = WTD_STATEACTION_CLOSE;
+                WinVerifyTrust(static_cast<HWND>(INVALID_HANDLE_VALUE), &policy, &data);
+            }
+        }
+    } stateGuard{policyGuid, trustData, true};
 
-    trustData.dwStateAction = WTD_STATEACTION_CLOSE;
-    WinVerifyTrust(nullptr, &policyGuid, &trustData);
+    const LONG status = WinVerifyTrust(
+        static_cast<HWND>(INVALID_HANDLE_VALUE), &policyGuid, &trustData);
 
     if (status == ERROR_SUCCESS) {
         return true;
@@ -1429,7 +1522,9 @@ bool LaunchAndWaitProcess(
     const std::filesystem::path& exePath,
     const std::wstring& args,
     DWORD* outExitCode,
-    DWORD* outLaunchErr) {
+    DWORD* outLaunchErr,
+    const std::atomic<bool>* cancelFlag = nullptr,
+    const std::atomic<bool>* stopFlag = nullptr) {
     SHELLEXECUTEINFOW sei{};
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
@@ -1445,7 +1540,21 @@ bool LaunchAndWaitProcess(
     }
     if (sei.hProcess != nullptr) {
         HandleGuard proc(sei.hProcess);
-        WaitForSingleObject(proc.Get(), INFINITE);
+        for (;;) {
+            const DWORD wait = WaitForSingleObject(proc.Get(), 200);
+            if (wait == WAIT_OBJECT_0) {
+                break;
+            }
+            if ((stopFlag != nullptr && stopFlag->load()) ||
+                (cancelFlag != nullptr && cancelFlag->load())) {
+                if (outLaunchErr) *outLaunchErr = ERROR_CANCELLED;
+                return false;
+            }
+            if (wait != WAIT_TIMEOUT) {
+                if (outLaunchErr) *outLaunchErr = GetLastError();
+                return false;
+            }
+        }
         DWORD code = 0;
         GetExitCodeProcess(proc.Get(), &code);
         if (outExitCode) *outExitCode = code;
@@ -1548,7 +1657,7 @@ constexpr PeripheralVendorRule kPeripheralRules[] = {
      "c/Corsair/iCUE/5", nullptr, "--quiet", "Поиск...",
      {"CORSAIR iCUE", "Corsair Utility Engine", nullptr}},
     {"sw_asus", "ASUS ROG", "ASUS Armoury Crate",
-     "Фирменный софт ASUS ROG: настройка клавиатур, мышей, гарнитур, синхронизация Aura Sync и обновление драйверов/прошивок.",
+     "Фирменный софт ASUS для материнских плат и периферии: подсветка Aura Sync, управление вентиляторами и профили (по желанию).",
      "https://www.asus.com/supportonly/armoury%20crate/helpdesk_download/",
      "https://dlcdnets.asus.com/pub/ASUS/mb/14Utilities/ArmouryCrateInstallTool.zip",
      "a/Asus/ArmouryCrate", "ArmouryCrateInstaller_3.3.6.0/ArmouryCrateInstaller.exe", "/SILENT", "Поиск...",
@@ -1708,10 +1817,25 @@ MonitorBrandInfo GetMonitorBrandSupport(const std::string& pnpOrBrand, const std
 } // namespace
 
 SystemComponentsScanner::~SystemComponentsScanner() {
+    stopRequested_.store(true);
     cancelInstallRequested_.store(true);
-    if (scanThread_.joinable()) scanThread_.join();
-    if (onlineThread_.joinable()) onlineThread_.join();
-    if (installThread_.joinable()) installThread_.join();
+    for (;;) {
+        std::thread scanT;
+        std::thread onlineT;
+        std::thread installT;
+        {
+            std::lock_guard<std::mutex> lock(threadMutex_);
+            scanT = std::move(scanThread_);
+            onlineT = std::move(onlineThread_);
+            installT = std::move(installThread_);
+        }
+        if (!scanT.joinable() && !onlineT.joinable() && !installT.joinable()) {
+            break;
+        }
+        if (installT.joinable()) installT.join();
+        if (onlineT.joinable()) onlineT.join();
+        if (scanT.joinable()) scanT.join();
+    }
 }
 
 void SystemComponentsScanner::SetPhaseMessage(const std::string& msg) {
@@ -1733,7 +1857,8 @@ void SystemComponentsScanner::StartLocalScanAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog,
     bool autoCheckOnline) {
-    if (scanning_.exchange(true)) {
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (stopRequested_.load() || scanning_.exchange(true)) {
         return;
     }
     if (scanThread_.joinable()) {
@@ -1746,18 +1871,20 @@ void SystemComponentsScanner::StartLocalScanAsync(
                                log = std::move(onLog),
                                autoCheckOnline]() {
         auto list = ScanLocalSynchronously(devs);
-        {
-            std::lock_guard<std::mutex> lock(dataMutex_);
-            items_ = std::move(list);
+        if (!stopRequested_.load()) {
+            {
+                std::lock_guard<std::mutex> lock(dataMutex_);
+                items_ = std::move(list);
+            }
+            generation_.fetch_add(1);
+            SetPhaseMessage("Локальная проверка завершена");
         }
-        generation_.fetch_add(1);
-        SetPhaseMessage("Локальная проверка завершена");
         scanning_.store(false);
-        if (log) {
+        if (!stopRequested_.load() && log) {
             log(LogLevel::Success,
                 "Проверка игровых библиотек, мониторов и ПО периферии завершена.");
         }
-        if (autoCheckOnline) {
+        if (autoCheckOnline && !stopRequested_.load()) {
             StartOnlineVersionCheckAsync(log);
         }
     });
@@ -1765,7 +1892,8 @@ void SystemComponentsScanner::StartLocalScanAsync(
 
 void SystemComponentsScanner::RefreshLocalPreserveOnlineAsync(
     std::vector<DeviceInfo> devicesSnapshot) {
-    if (scanning_.exchange(true)) {
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (stopRequested_.load() || scanning_.exchange(true)) {
         return;
     }
     if (scanThread_.joinable()) {
@@ -1774,20 +1902,23 @@ void SystemComponentsScanner::RefreshLocalPreserveOnlineAsync(
 
     scanThread_ = std::thread([this, devs = std::move(devicesSnapshot)]() {
         auto refreshed = ScanLocalSynchronously(devs);
-        {
-            std::lock_guard<std::mutex> lock(dataMutex_);
-            if (!items_.empty()) {
-                MergeOnlineMetadataIntoRefreshed(refreshed, items_);
+        if (!stopRequested_.load()) {
+            {
+                std::lock_guard<std::mutex> lock(dataMutex_);
+                if (!items_.empty()) {
+                    MergeOnlineMetadataIntoRefreshed(refreshed, items_);
+                }
+                items_ = std::move(refreshed);
             }
-            items_ = std::move(refreshed);
+            generation_.fetch_add(1);
         }
-        generation_.fetch_add(1);
         scanning_.store(false);
     });
 }
 
 void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
-    if (checkingOnline_.exchange(true)) {
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (stopRequested_.load() || checkingOnline_.exchange(true)) {
         return;
     }
     if (onlineThread_.joinable()) {
@@ -2027,14 +2158,18 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
         // Philips SmartControl, ViewSonic DisplayPortal, Elgato, EPOS, Intel DSA).
         auto fWinget = std::async(std::launch::async, [&]() {
             const size_t n = wingetTargets.size();
+            if (n == 0 || stopRequested_.load()) {
+                return;
+            }
             std::vector<WingetManifestInfo> resolved(n);
-            const size_t kWorkers = std::min<size_t>(4, std::max<size_t>(1, n));
+            const size_t kWorkers = std::min<size_t>(4, n);
             std::atomic<size_t> nextIdx{0};
             std::vector<std::thread> pool;
             pool.reserve(kWorkers);
             for (size_t w = 0; w < kWorkers; ++w) {
                 pool.emplace_back([&]() {
                     for (;;) {
+                        if (stopRequested_.load()) break;
                         const size_t idx = nextIdx.fetch_add(1);
                         if (idx >= n) break;
                         resolved[idx] = ResolveWingetPkgManifest(
@@ -2043,6 +2178,9 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                 });
             }
             for (auto& t : pool) t.join();
+            if (stopRequested_.load()) {
+                return;
+            }
 
             std::lock_guard<std::mutex> lock(dataMutex_);
             for (auto& item : items_) {
@@ -2082,7 +2220,7 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
         // Group 5: Parallel Microsoft Update Catalog WHQL lookups (LAN / Wi-Fi / BT / Audio)
         auto fCatalog = std::async(std::launch::async, [&]() {
             const size_t n = catalogKeys.size();
-            if (n == 0) return;
+            if (n == 0 || stopRequested_.load()) return;
             std::vector<std::pair<std::string, std::string>> resolved(n);
             const size_t kWorkers = std::min<size_t>(4, n);
             std::atomic<size_t> nextIdx{0};
@@ -2091,6 +2229,7 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
             for (size_t w = 0; w < kWorkers; ++w) {
                 pool.emplace_back([&]() {
                     for (;;) {
+                        if (stopRequested_.load()) break;
                         const size_t idx = nextIdx.fetch_add(1);
                         if (idx >= n) break;
                         resolved[idx] = ResolveMsCatalogDriverCab(catalogKeys[idx]);
@@ -2098,6 +2237,7 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                 });
             }
             for (auto& t : pool) t.join();
+            if (stopRequested_.load()) return;
 
             std::lock_guard<std::mutex> lock(dataMutex_);
             for (auto& item : items_) {
@@ -2132,10 +2272,12 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
         fWinget.wait();
         fCatalog.wait();
 
-        generation_.fetch_add(1);
-        SetPhaseMessage("Актуальные версии проверены");
+        if (!stopRequested_.load()) {
+            generation_.fetch_add(1);
+            SetPhaseMessage("Актуальные версии проверены");
+        }
         checkingOnline_.store(false);
-        if (log) {
+        if (!stopRequested_.load() && log) {
             log(LogLevel::Success, "Онлайн-проверка актуальных версий завершена.");
         }
     });
@@ -2157,16 +2299,30 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
 
     SetPhaseMessage("Скачивание: " + item.name);
 
+    std::error_code tempEc;
+    std::filesystem::path tempRoot;
     wchar_t tempDir[MAX_PATH]{};
-    GetTempPathW(MAX_PATH, tempDir);
+    const DWORD tempLen = GetTempPathW(MAX_PATH, tempDir);
+    if (tempLen > 0 && tempLen < MAX_PATH) {
+        tempRoot = std::filesystem::path(tempDir);
+    } else {
+        tempRoot = std::filesystem::temp_directory_path(tempEc);
+    }
+    if (tempRoot.empty()) {
+        if (log) {
+            log(LogLevel::Error, "Не удалось определить временную папку Windows.");
+        }
+        SetPhaseMessage("Ошибка временного каталога");
+        return false;
+    }
+
     const std::string cleanUrl = StripUrlQuery(item.directInstallerUrl);
     bool isZipPackage = EndsWithCaseInsensitive(cleanUrl, ".zip");
     const bool isCabPackage = EndsWithCaseInsensitive(cleanUrl, ".cab");
     const bool isDirectMsi = EndsWithCaseInsensitive(cleanUrl, ".msi");
     const char* initialExt =
         isCabPackage ? ".cab" : (isZipPackage ? ".zip" : (isDirectMsi ? ".msi" : ".exe"));
-    std::filesystem::path destFile =
-        std::filesystem::path(tempDir) / ("DriverLoom_" + item.id + initialExt);
+    std::filesystem::path destFile = tempRoot / ("DriverLoom_" + item.id + initialExt);
 
     if (log) {
         log(LogLevel::Info,
@@ -2182,7 +2338,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             baseProgress,
             progressSpan,
             &cancelInstallRequested_)) {
-        if (log) {
+        if (!stopRequested_.load() && log) {
             log(cancelInstallRequested_.load() ? LogLevel::Warning : LogLevel::Error,
                 "Ошибка скачивания " + item.name + ": " + errMsg);
         }
@@ -2196,7 +2352,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         if (!VerifyAuthenticodeSignature(destFile, &sigErr)) {
             std::error_code ec;
             std::filesystem::remove(destFile, ec);
-            if (log) {
+            if (!stopRequested_.load() && log) {
                 log(LogLevel::Error,
                     "Цифровая подпись CAB-пакета не прошла проверку (" + sigErr + ").");
             }
@@ -2205,8 +2361,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         }
 
         SetPhaseMessage("Распаковка драйвера (.cab)...");
-        std::filesystem::path cabExtractDir =
-            std::filesystem::path(tempDir) / ("DriverLoom_" + item.id + "_cab");
+        std::filesystem::path cabExtractDir = tempRoot / ("DriverLoom_" + item.id + "_cab");
         std::error_code ec;
         std::filesystem::remove_all(cabExtractDir, ec);
         std::filesystem::create_directories(cabExtractDir, ec);
@@ -2214,7 +2369,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         if (!SetupIterateCabinetW(destFile.c_str(), 0, CabExtractCallback, &cabExtractDir)) {
             std::filesystem::remove(destFile, ec);
             std::filesystem::remove_all(cabExtractDir, ec);
-            if (log) {
+            if (!stopRequested_.load() && log) {
                 log(LogLevel::Error,
                     "Ошибка распаковки CAB-архива " + item.name + ": " +
                         FormatWin32Error(GetLastError()));
@@ -2238,15 +2393,18 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         } else {
             const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_cab_inf");
             const std::wstring cliArgs =
-                L"--cli-install-inf \"" + cabExtractDir.wstring() + L"\" --log \"" +
-                tempLog.wstring() + L"\"";
-            const ElevatedRunResult run = ExecuteElevatedSelf(cliArgs, true, &tempLog, log);
+                L"--cli-install-inf " + QuoteWin32Arg(cabExtractDir.wstring()) +
+                L" --log " + QuoteWin32Arg(tempLog.wstring());
+            const ElevatedRunResult run =
+                ExecuteElevatedSelf(cliArgs, true, &tempLog, log, nullptr, &stopRequested_);
             std::filesystem::remove(tempLog, ec);
             if (!run.launched) {
                 if (run.launchError == ERROR_CANCELLED) {
                     cancelInstallRequested_.store(true);
-                    if (log) log(LogLevel::Warning, "Установка драйвера отменена (UAC).");
-                } else if (log) {
+                    if (!stopRequested_.load() && log) {
+                        log(LogLevel::Warning, "Установка драйвера отменена (UAC).");
+                    }
+                } else if (!stopRequested_.load() && log) {
                     log(LogLevel::Error, "Ошибка запуска UAC: " + FormatWin32Error(run.launchError));
                 }
             } else {
@@ -2258,12 +2416,15 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         }
         std::filesystem::remove_all(cabExtractDir, ec);
 
-        auto refreshed = ScanLocalSynchronously(devs);
-        {
-            std::lock_guard<std::mutex> lock(dataMutex_);
-            MergeOnlineMetadataIntoRefreshed(refreshed, items_);
-            items_ = std::move(refreshed);
-            generation_.fetch_add(1);
+        if (!stopRequested_.load()) {
+            const auto freshDevs = DeviceScanner::ScanSynchronously();
+            auto refreshed = ScanLocalSynchronously(freshDevs);
+            {
+                std::lock_guard<std::mutex> lock(dataMutex_);
+                MergeOnlineMetadataIntoRefreshed(refreshed, items_);
+                items_ = std::move(refreshed);
+                generation_.fetch_add(1);
+            }
         }
         progress_.store(std::clamp(baseProgress + progressSpan, 0.0f, 1.0f));
         return cabOk;
@@ -2285,12 +2446,13 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
 
     if (isZipPackage) {
         SetPhaseMessage("Распаковка архива...");
-        extractDir = std::filesystem::path(tempDir) / ("DriverLoom_" + item.id + "_pkg");
+        extractDir = tempRoot / ("DriverLoom_" + item.id + "_pkg");
         std::error_code ec;
         std::filesystem::remove_all(extractDir, ec);
         if (!ExtractZipViaShellCom(destFile, extractDir)) {
             std::filesystem::remove(destFile, ec);
-            if (log) {
+            std::filesystem::remove_all(extractDir, ec);
+            if (!stopRequested_.load() && log) {
                 log(LogLevel::Error, "Не удалось распаковать архив " + item.name + ".");
             }
             SetPhaseMessage("Ошибка распаковки");
@@ -2310,20 +2472,26 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             std::filesystem::path firstMsi;
             std::filesystem::path setupExe;
             std::filesystem::path firstExe;
-            for (const auto& entry : std::filesystem::recursive_directory_iterator(extractDir, ec)) {
-                if (!entry.is_regular_file(ec)) {
+            for (std::filesystem::recursive_directory_iterator it(
+                     extractDir,
+                     std::filesystem::directory_options::skip_permission_denied,
+                     ec);
+                 !ec && it != std::filesystem::recursive_directory_iterator();
+                 it.increment(ec)) {
+                std::error_code entryEc;
+                if (!it->is_regular_file(entryEc)) {
                     continue;
                 }
-                const std::string ext = ToLowerAscii(WideToUtf8(entry.path().extension().wstring()));
-                const std::string fname = ToLowerAscii(WideToUtf8(entry.path().filename().wstring()));
+                const std::string ext = ToLowerAscii(WideToUtf8(it->path().extension().wstring()));
+                const std::string fname = ToLowerAscii(WideToUtf8(it->path().filename().wstring()));
                 if (ext == ".msi" && firstMsi.empty()) {
-                    firstMsi = entry.path();
+                    firstMsi = it->path();
                 } else if (ext == ".exe") {
-                    if (firstExe.empty()) firstExe = entry.path();
+                    if (firstExe.empty()) firstExe = it->path();
                     if (setupExe.empty() &&
                         (fname.find("setup") != std::string::npos ||
                          fname.find("install") != std::string::npos)) {
-                        setupExe = entry.path();
+                        setupExe = it->path();
                     }
                 }
             }
@@ -2334,7 +2502,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         if (targetExe.empty()) {
             std::filesystem::remove(destFile, ec);
             std::filesystem::remove_all(extractDir, ec);
-            if (log) {
+            if (!stopRequested_.load() && log) {
                 log(LogLevel::Error, "В архиве не найден исполняемый файл установщика.");
             }
             SetPhaseMessage("Установщик не найден");
@@ -2356,7 +2524,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         std::error_code ec;
         std::filesystem::remove(destFile, ec);
         if (!extractDir.empty()) std::filesystem::remove_all(extractDir, ec);
-        if (log) {
+        if (!stopRequested_.load() && log) {
             log(LogLevel::Error,
                 "Цифровая подпись установщика не прошла проверку (" + sigErr +
                     "). Запуск отменён в целях безопасности.");
@@ -2366,7 +2534,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
     }
 
     const std::string dlVer = GetFileVersionUtf8(targetExe);
-    if (log) {
+    if (!stopRequested_.load() && log) {
         log(LogLevel::Success,
             "Подпись подтверждена" +
                 (dlVer.empty() ? std::string() : " (версия файла: " + dlVer + ")") +
@@ -2379,36 +2547,79 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
     DWORD exitCode = 0;
     DWORD launchErr = 0;
     bool launched = false;
+    bool errorAlreadyLogged = false;
 
     if (item.id == "rt_dx_legacy") {
-        const std::filesystem::path dxExtractDir =
-            std::filesystem::path(tempDir) / L"DriverLoom_DX2010";
+        const std::filesystem::path dxExtractDir = tempRoot / L"DriverLoom_DX2010";
         std::error_code ec;
+        std::filesystem::remove_all(dxExtractDir, ec);
         std::filesystem::create_directories(dxExtractDir, ec);
-        const std::wstring extractArgs = L"/Q /T:\"" + dxExtractDir.wstring() + L"\"";
-        if (LaunchAndWaitProcess(targetExe, extractArgs, &exitCode, &launchErr)) {
+        const std::wstring extractArgs = L"/Q /T:" + QuoteWin32Arg(dxExtractDir.wstring());
+        if (LaunchAndWaitProcess(
+                targetExe,
+                extractArgs,
+                &exitCode,
+                &launchErr,
+                &cancelInstallRequested_,
+                &stopRequested_)) {
             const std::filesystem::path dxSetup = dxExtractDir / L"DXSETUP.exe";
-            if (std::filesystem::exists(dxSetup, ec)) {
-                launched = LaunchAndWaitProcess(dxSetup, L"/silent", &exitCode, &launchErr);
+            if (exitCode != 0) {
+                if (!stopRequested_.load() && log) {
+                    log(LogLevel::Error,
+                        "Ошибка распаковки DirectX End-User Runtime (код " +
+                            std::to_string(exitCode) + ").");
+                }
+                errorAlreadyLogged = true;
+            } else if (std::filesystem::exists(dxSetup, ec)) {
+                launched = LaunchAndWaitProcess(
+                    dxSetup,
+                    L"/silent",
+                    &exitCode,
+                    &launchErr,
+                    &cancelInstallRequested_,
+                    &stopRequested_);
+            } else {
+                if (!stopRequested_.load() && log) {
+                    log(LogLevel::Error,
+                        "В распакованном пакете DirectX не найден DXSETUP.exe.");
+                }
+                launchErr = ERROR_FILE_NOT_FOUND;
+                errorAlreadyLogged = true;
             }
         }
         std::filesystem::remove_all(dxExtractDir, ec);
     } else if (EndsWithCaseInsensitive(WideToUtf8(targetExe.extension().wstring()), ".msi")) {
-        const std::filesystem::path msiexec = GetSystemDirPath(false) / L"msiexec.exe";
-        const std::wstring msiArgs =
-            L"/i \"" + targetExe.wstring() + L"\" /passive /norestart";
-        launched = LaunchAndWaitProcess(msiexec, msiArgs, &exitCode, &launchErr);
+        const std::filesystem::path sysDir = GetSystemDirPath(false);
+        if (!sysDir.empty()) {
+            const std::filesystem::path msiexec = sysDir / L"msiexec.exe";
+            const std::wstring msiArgs =
+                L"/i " + QuoteWin32Arg(targetExe.wstring()) + L" /passive /norestart";
+            launched = LaunchAndWaitProcess(
+                msiexec,
+                msiArgs,
+                &exitCode,
+                &launchErr,
+                &cancelInstallRequested_,
+                &stopRequested_);
+        } else {
+            launchErr = ERROR_PATH_NOT_FOUND;
+        }
     } else {
         launched = LaunchAndWaitProcess(
-            targetExe, Utf8ToWide(item.installerArgs), &exitCode, &launchErr);
+            targetExe,
+            Utf8ToWide(item.installerArgs),
+            &exitCode,
+            &launchErr,
+            &cancelInstallRequested_,
+            &stopRequested_);
     }
 
     bool succeeded = false;
     if (!launched) {
-        if (log) {
+        if (!errorAlreadyLogged && !stopRequested_.load() && log) {
             log(launchErr == ERROR_CANCELLED ? LogLevel::Warning : LogLevel::Error,
                 launchErr == ERROR_CANCELLED
-                    ? "Установка отменена пользователем (UAC)."
+                    ? "Установка отменена пользователем."
                     : "Не удалось запустить установщик: " + FormatWin32Error(launchErr));
         }
         if (launchErr == ERROR_CANCELLED) {
@@ -2422,13 +2633,13 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         if (outRebootRequired != nullptr && needReboot) {
             *outRebootRequired = true;
         }
-        if (log) {
+        if (!stopRequested_.load() && log) {
             log(LogLevel::Success,
                 item.name + " успешно установлен" +
                     (needReboot ? " (требуется перезагрузка для применения изменений)." : "."));
         }
     } else {
-        if (log) {
+        if (!stopRequested_.load() && log) {
             log(LogLevel::Warning,
                 item.name + " завершился с кодом " + std::to_string(exitCode) + ".");
         }
@@ -2438,6 +2649,10 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
     std::filesystem::remove(destFile, ec);
     if (!extractDir.empty()) {
         std::filesystem::remove_all(extractDir, ec);
+    }
+
+    if (stopRequested_.load()) {
+        return false;
     }
 
     auto refreshAndCompare = [&]() {
@@ -2474,8 +2689,15 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             }
         }
         if (needRetry) {
-            std::this_thread::sleep_for(std::chrono::seconds(3));
-            refreshAndCompare();
+            for (int step = 0; step < 30; ++step) {
+                if (stopRequested_.load() || cancelInstallRequested_.load()) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+            if (!stopRequested_.load()) {
+                refreshAndCompare();
+            }
         }
     }
 
@@ -2487,7 +2709,11 @@ void SystemComponentsScanner::DownloadAndInstallAsync(
     const SystemComponentItem& item,
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog) {
-    if (installing_.exchange(true)) {
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (stopRequested_.load()) {
+        return;
+    }
+    if (scanning_.load() || checkingOnline_.load() || installing_.exchange(true)) {
         if (onLog) {
             onLog(LogLevel::Warning, "Установка компонента уже выполняется.");
         }
@@ -2508,10 +2734,12 @@ void SystemComponentsScanner::DownloadAndInstallAsync(
         bool rebootReq = false;
         const bool ok = InstallSingleComponentSync(item, 0.0f, 1.0f, devs, log, &rebootReq);
         progress_.store(1.0f);
-        SetPhaseMessage(
-            ok ? (rebootReq ? "Установка завершена (требуется перезагрузка)" : "Установка завершена")
-               : (cancelInstallRequested_.load() ? "Установка отменена"
-                                                : "Установка завершена с предупреждением"));
+        if (!stopRequested_.load()) {
+            SetPhaseMessage(
+                ok ? (rebootReq ? "Установка завершена (требуется перезагрузка)" : "Установка завершена")
+                   : (cancelInstallRequested_.load() ? "Установка отменена"
+                                                    : "Установка завершена с предупреждением"));
+        }
         installing_.store(false);
     });
 }
@@ -2521,7 +2749,11 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog,
     bool createRestorePointBefore) {
-    if (installing_.exchange(true)) {
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (stopRequested_.load()) {
+        return;
+    }
+    if (scanning_.load() || checkingOnline_.load() || installing_.exchange(true)) {
         if (onLog) {
             onLog(LogLevel::Warning, "Установка компонентов уже выполняется.");
         }
@@ -2547,13 +2779,13 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
         const size_t total = list.size();
         size_t okCount = 0;
 
-        if (log) {
+        if (!stopRequested_.load() && log) {
             log(LogLevel::Info,
                 "Начинается пакетная установка/обновление компонентов (" +
                     std::to_string(total) + " шт.)...");
         }
 
-        if (createRestorePointBefore && !cancelInstallRequested_.load()) {
+        if (createRestorePointBefore && !cancelInstallRequested_.load() && !stopRequested_.load()) {
             SetPhaseMessage("Создание точки восстановления...");
             progress_.store(0.03f);
             constexpr const char* kRpDesc =
@@ -2561,18 +2793,19 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
             if (IsProcessElevated()) {
                 SystemRestore::CreateRestorePointSync(kRpDesc, log);
             } else {
-                if (log) {
+                if (!stopRequested_.load() && log) {
                     log(LogLevel::Info,
                         "Запрос прав администратора (UAC) для создания точки восстановления...");
                 }
                 const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_sr_comp");
                 const std::wstring args =
-                    L"--cli-restore-point \"" + Utf8ToWide(kRpDesc) +
-                    L"\" --log \"" + tempLog.wstring() + L"\"";
-                const ElevatedRunResult run = ExecuteElevatedSelf(args, true, &tempLog, log);
+                    L"--cli-restore-point " + QuoteWin32Arg(Utf8ToWide(kRpDesc)) +
+                    L" --log " + QuoteWin32Arg(tempLog.wstring());
+                const ElevatedRunResult run =
+                    ExecuteElevatedSelf(args, true, &tempLog, log, nullptr, &stopRequested_);
                 std::error_code ec;
                 std::filesystem::remove(tempLog, ec);
-                if (!run.launched && log) {
+                if (!run.launched && !stopRequested_.load() && log) {
                     log(LogLevel::Warning,
                         run.launchError == ERROR_CANCELLED
                             ? "Пользователь отменил UAC при создании точки восстановления — продолжается обновление компонентов."
@@ -2587,8 +2820,8 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
         progress_.store(baseProg);
         const float span = (1.0f - baseProg) / static_cast<float>(total);
         for (size_t i = 0; i < total; ++i) {
-            if (cancelInstallRequested_.load()) {
-                if (log) {
+            if (stopRequested_.load() || cancelInstallRequested_.load()) {
+                if (!stopRequested_.load() && log) {
                     log(LogLevel::Warning, "Пакетная установка остановлена пользователем.");
                 }
                 break;
@@ -2611,9 +2844,11 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
                    std::to_string(total) + ")")
                 : ("Пакетная установка завершена: успешно — " + std::to_string(okCount) +
                    " из " + std::to_string(total));
-        SetPhaseMessage(doneMsg);
-        if (log) {
-            log(okCount == total ? LogLevel::Success : LogLevel::Warning, doneMsg + ".");
+        if (!stopRequested_.load()) {
+            SetPhaseMessage(doneMsg);
+            if (log) {
+                log(okCount == total ? LogLevel::Success : LogLevel::Warning, doneMsg + ".");
+            }
         }
         installing_.store(false);
     });
@@ -2627,9 +2862,16 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog,
     CatalogInstallCallback onComplete) {
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (stopRequested_.load()) {
+        return;
+    }
     if (scanning_.load() || checkingOnline_.load() || installing_.exchange(true)) {
         if (onLog) {
             onLog(LogLevel::Warning, "Модуль компонентов уже выполняет другую операцию.");
+        }
+        if (onComplete) {
+            onComplete(false, false);
         }
         return;
     }
@@ -2651,7 +2893,7 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
         const std::string primaryKey =
             !searchHardwareKey.empty() ? searchHardwareKey : fullHardwareId;
         if (primaryKey.empty()) {
-            if (log) {
+            if (!stopRequested_.load() && log) {
                 log(LogLevel::Error,
                     "Не удалось определить Hardware ID для поиска в Microsoft Update Catalog («" +
                         deviceName + "»).");
@@ -2659,12 +2901,12 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
             SetPhaseMessage("Недостаточно данных для поиска драйвера");
             progress_.store(1.0f);
             installing_.store(false);
-            if (cb) cb(false, false);
+            if (!stopRequested_.load() && cb) cb(false, false);
             return;
         }
 
         SetPhaseMessage("Поиск драйвера в Microsoft Update Catalog: " + deviceName + "...");
-        if (log) {
+        if (!stopRequested_.load() && log) {
             log(LogLevel::Info,
                 "Поиск WHQL-драйвера в Microsoft Update Catalog для «" + deviceName + "» (" +
                     primaryKey + ")...");
@@ -2673,22 +2915,22 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
         std::string catVer;
         std::string cabUrl;
         const std::string subsysKey = ExtractVenDevSubsysKey(fullHardwareId);
-        if (!subsysKey.empty()) {
+        if (!subsysKey.empty() && !stopRequested_.load()) {
             std::tie(catVer, cabUrl) = ResolveMsCatalogDriverCab(subsysKey);
         }
-        if (cabUrl.empty() && !cancelInstallRequested_.load()) {
+        if (cabUrl.empty() && !cancelInstallRequested_.load() && !stopRequested_.load()) {
             std::tie(catVer, cabUrl) = ResolveMsCatalogDriverCab(primaryKey);
         }
         if (cabUrl.empty() && !fullHardwareId.empty() && fullHardwareId != primaryKey &&
-            fullHardwareId != subsysKey && !cancelInstallRequested_.load()) {
+            fullHardwareId != subsysKey && !cancelInstallRequested_.load() && !stopRequested_.load()) {
             std::tie(catVer, cabUrl) = ResolveMsCatalogDriverCab(fullHardwareId);
         }
 
-        if (cancelInstallRequested_.load()) {
+        if (cancelInstallRequested_.load() || stopRequested_.load()) {
             SetPhaseMessage("Установка отменена");
             progress_.store(1.0f);
             installing_.store(false);
-            if (cb) cb(false, false);
+            if (!stopRequested_.load() && cb) cb(false, false);
             return;
         }
 
@@ -2711,7 +2953,7 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
                 }
                 if (usesOemInf) {
                     SetPhaseMessage("Восстановление системного драйвера Windows...");
-                    if (log) {
+                    if (!stopRequested_.load() && log) {
                         log(LogLevel::Info,
                             "В Microsoft Update Catalog нет .cab для «" + deviceName +
                                 "» — выполняется переключение на актуальный системный драйвер Windows...");
@@ -2725,19 +2967,19 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
                         std::error_code ec;
                         const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_inbox");
                         const std::wstring cliArgs =
-                            L"--cli-restore-inbox \"" + Utf8ToWide(primaryKey) +
-                            L"\" --log \"" + tempLog.wstring() + L"\"";
+                            L"--cli-restore-inbox " + QuoteWin32Arg(Utf8ToWide(primaryKey)) +
+                            L" --log " + QuoteWin32Arg(tempLog.wstring());
                         const ElevatedRunResult run =
-                            ExecuteElevatedSelf(cliArgs, true, &tempLog, log);
+                            ExecuteElevatedSelf(cliArgs, true, &tempLog, log, nullptr, &stopRequested_);
                         std::filesystem::remove(tempLog, ec);
                         if (!run.launched) {
                             if (run.launchError == ERROR_CANCELLED) {
                                 cancelInstallRequested_.store(true);
-                                if (log) {
+                                if (!stopRequested_.load() && log) {
                                     log(LogLevel::Warning,
                                         "Восстановление системного драйвера отменено (UAC).");
                                 }
-                            } else if (log) {
+                            } else if (!stopRequested_.load() && log) {
                                 log(LogLevel::Error,
                                     "Ошибка запуска UAC: " + FormatWin32Error(run.launchError));
                             }
@@ -2750,12 +2992,12 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
                         SetPhaseMessage("Восстановлен системный драйвер Windows");
                         progress_.store(1.0f);
                         installing_.store(false);
-                        if (cb) cb(true, inboxReboot);
+                        if (!stopRequested_.load() && cb) cb(true, inboxReboot);
                         return;
                     }
                 }
 
-                if (log) {
+                if (!stopRequested_.load() && log) {
                     log(LogLevel::Info,
                         "Для «" + deviceName + "» (" + primaryKey +
                             ") отдельный .cab-пакет в Microsoft Update Catalog не выпускается — устройство использует стандартный драйвер Windows / пакета чипсета" +
@@ -2764,7 +3006,7 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
                 }
                 SetPhaseMessage("Используется стандартный драйвер Windows / чипсета");
             } else {
-                if (log) {
+                if (!stopRequested_.load() && log) {
                     log(LogLevel::Warning,
                         "В Microsoft Update Catalog не найден .cab-пакет драйвера для «" +
                             deviceName + "» (" + primaryKey + ").");
@@ -2773,11 +3015,11 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
             }
             progress_.store(1.0f);
             installing_.store(false);
-            if (cb) cb(false, false);
+            if (!stopRequested_.load() && cb) cb(false, false);
             return;
         }
 
-        if (log) {
+        if (!stopRequested_.load() && log) {
             std::string note;
             if (!installedVersion.empty() && !catVer.empty() &&
                 !IsVersionNewer(catVer, installedVersion)) {
@@ -2797,11 +3039,13 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
         const bool ok = InstallSingleComponentSync(
             tempItem, 0.15f, 0.85f, devs, log, &rebootReq);
 
-        SetPhaseMessage(ok ? ("Установлен драйвер " + catVer + " для " + deviceName)
-                           : "Ошибка установки драйвера из Catalog");
+        if (!stopRequested_.load()) {
+            SetPhaseMessage(ok ? ("Установлен драйвер " + catVer + " для " + deviceName)
+                               : "Ошибка установки драйвера из Catalog");
+        }
         progress_.store(1.0f);
         installing_.store(false);
-        if (cb) {
+        if (!stopRequested_.load() && cb) {
             cb(ok, rebootReq);
         }
     });
@@ -3281,7 +3525,7 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
                 mon.statusText = "Вендор-драйвер (" + (d.driverVersion.empty() ? d.infName : d.driverVersion) + ")";
             } else if (app != nullptr) {
                 mon.installedVersion = app->displayVersion;
-                mon.compareVersions = !app->displayVersion.empty();
+                mon.compareVersions = false;
                 mon.statusText = "Утилита установлена (" + d.infName + ")";
             } else {
                 mon.installedVersion = d.driverVersion + " (" + d.infName + ")";

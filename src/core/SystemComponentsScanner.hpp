@@ -118,10 +118,12 @@ private:
     std::atomic<bool> checkingOnline_{false};
     std::atomic<bool> installing_{false};
     std::atomic<bool> cancelInstallRequested_{false};
+    std::atomic<bool> stopRequested_{false};
     std::atomic<float> progress_{0.0f};
     std::atomic<uint64_t> generation_{0};
 
     mutable std::mutex dataMutex_;
+    mutable std::mutex threadMutex_;
     std::vector<SystemComponentItem> items_;
     std::string phaseMessage_;
 

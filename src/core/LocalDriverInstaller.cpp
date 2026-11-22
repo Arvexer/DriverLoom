@@ -25,27 +25,22 @@ bool HasInfExtension(const std::filesystem::path& p) {
     return ext == L".inf";
 }
 
-struct ModuleGuard {
-    HMODULE mod{nullptr};
-    ~ModuleGuard() {
-        if (mod != nullptr) {
-            FreeLibrary(mod);
-        }
-    }
-};
-
 using DiInstallDriverWFn = BOOL(WINAPI*)(HWND, LPCWSTR, DWORD, PBOOL);
 using DiUninstallDriverWFn = BOOL(WINAPI*)(HWND, LPCWSTR, DWORD, PBOOL);
 using SetupGetInfDriverStoreLocationWFn =
     BOOL(WINAPI*)(PCWSTR, PSP_ALTPLATFORM_INFO, PCWSTR, PWSTR, DWORD, PDWORD);
 
-int ParseOemInfNumber(const std::string& oemName) {
+int64_t ParseOemInfNumber(const std::string& oemName) {
     const std::string lower = ToLowerAscii(oemName);
     if (lower.rfind("oem", 0) != 0 || lower.size() <= 7 ||
         lower.compare(lower.size() - 4, 4, ".inf") != 0) {
         return -1;
     }
-    int num = 0;
+    const size_t digitsLen = lower.size() - 7;
+    if (digitsLen > 12) {
+        return -1;
+    }
+    int64_t num = 0;
     for (size_t i = 3; i < lower.size() - 4; ++i) {
         const char ch = lower[i];
         if (ch < '0' || ch > '9') {
@@ -118,23 +113,22 @@ std::wstring GetWindowsInfDirectory() {
 } // namespace
 
 LocalDriverInstaller::~LocalDriverInstaller() {
-    if (pickThread_.joinable()) {
-        pickThread_.join();
-    }
-    if (scanThread_.joinable()) {
-        scanThread_.join();
-    }
-    if (installThread_.joinable()) {
-        installThread_.join();
-    }
-    if (storeThread_.joinable()) {
-        storeThread_.join();
-    }
-    if (backupThread_.joinable()) {
-        backupThread_.join();
-    }
-    if (removeThread_.joinable()) {
-        removeThread_.join();
+    shuttingDown_.store(true);
+    for (;;) {
+        std::thread next;
+        {
+            std::lock_guard<std::mutex> lock(threadMutex_);
+            if (pickThread_.joinable()) next = std::move(pickThread_);
+            else if (backupThread_.joinable()) next = std::move(backupThread_);
+            else if (removeThread_.joinable()) next = std::move(removeThread_);
+            else if (installThread_.joinable()) next = std::move(installThread_);
+            else if (storeThread_.joinable()) next = std::move(storeThread_);
+            else if (scanThread_.joinable()) next = std::move(scanThread_);
+        }
+        if (!next.joinable()) {
+            break;
+        }
+        next.join();
     }
 }
 
@@ -152,14 +146,29 @@ void LocalDriverInstaller::PickFolderAsync(
     HWND ownerWindow,
     LogCallback onLog,
     FolderPickedCallback onPicked) {
-    if (picking_.exchange(true)) {
-        return;
+    (void)ownerWindow;
+    std::thread oldThread;
+    {
+        std::lock_guard<std::mutex> lock(threadMutex_);
+        if (shuttingDown_.load() || picking_.load()) {
+            return;
+        }
+        picking_.store(true);
+        if (pickThread_.joinable()) {
+            oldThread = std::move(pickThread_);
+        }
     }
-    if (pickThread_.joinable()) {
-        pickThread_.join();
+    if (oldThread.joinable()) {
+        oldThread.join();
     }
 
-    pickThread_ = std::thread([this, ownerWindow, log = std::move(onLog), picked = std::move(onPicked)]() {
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (shuttingDown_.load()) {
+        picking_.store(false);
+        return;
+    }
+
+    pickThread_ = std::thread([this, log = std::move(onLog), picked = std::move(onPicked)]() {
         CoInitGuard comInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
         std::wstring chosenPath;
         bool ok = false;
@@ -190,7 +199,8 @@ void LocalDriverInstaller::PickFolderAsync(
                     options | FOS_PICKFOLDERS | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
                 dialog->SetTitle(L"Выберите папку с распакованными драйверами (.inf)");
 
-                hr = dialog->Show(ownerWindow);
+                // Pass nullptr owner across threads so UI thread teardown cannot deadlock in join()
+                hr = dialog->Show(nullptr);
                 if (SUCCEEDED(hr)) {
                     ComPtr<IShellItem> item;
                     if (SUCCEEDED(dialog->GetResult(item.Put())) && item) {
@@ -209,7 +219,7 @@ void LocalDriverInstaller::PickFolderAsync(
         }
 
         picking_.store(false);
-        if (picked) {
+        if (picked && !shuttingDown_.load()) {
             picked(ok, chosenPath);
         }
     });
@@ -251,7 +261,9 @@ std::vector<InfFileEntry> LocalDriverInstaller::EnumerateInfFiles(
         entry.fileName = WideToUtf8(p.filename().wstring());
         std::filesystem::path rel = std::filesystem::relative(p, root, entryEc);
         entry.relativePath = WideToUtf8((entryEc ? p : rel).wstring());
-        entry.sizeBytes = it->file_size(entryEc);
+        std::error_code sizeEc;
+        const uintmax_t sz = it->file_size(sizeEc);
+        entry.sizeBytes = sizeEc ? 0 : static_cast<uint64_t>(sz);
         results.push_back(std::move(entry));
     }
 
@@ -262,24 +274,38 @@ std::vector<InfFileEntry> LocalDriverInstaller::EnumerateInfFiles(
 }
 
 void LocalDriverInstaller::ScanInfFilesAsync(const std::wstring& folderPath, LogCallback onLog) {
-    if (scanning_.exchange(true)) {
-        return;
+    std::thread oldThread;
+    {
+        std::lock_guard<std::mutex> lock(threadMutex_);
+        if (shuttingDown_.load() || scanning_.load()) {
+            return;
+        }
+        scanning_.store(true);
+        if (scanThread_.joinable()) {
+            oldThread = std::move(scanThread_);
+        }
     }
-    if (scanThread_.joinable()) {
-        scanThread_.join();
+    if (oldThread.joinable()) {
+        oldThread.join();
+    }
+
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (shuttingDown_.load()) {
+        scanning_.store(false);
+        return;
     }
 
     scanThread_ = std::thread([this, folderPath, log = std::move(onLog)]() {
         auto files = EnumerateInfFiles(folderPath, log);
+        const size_t foundCount = files.size();
         {
             std::lock_guard<std::mutex> lock(dataMutex_);
             infFiles_ = std::move(files);
         }
         if (log) {
-            std::lock_guard<std::mutex> lock(dataMutex_);
             log(LogLevel::Info,
                 "Найдено .inf файлов в папке \"" + WideToUtf8(folderPath) + "\": " +
-                    std::to_string(infFiles_.size()));
+                    std::to_string(foundCount));
         }
         scanning_.store(false);
     });
@@ -291,20 +317,37 @@ void LocalDriverInstaller::InstallFromFolderAsync(
     bool createRestorePoint,
     LogCallback onLog,
     InstallCompleteCallback onComplete) {
-    if (installing_.exchange(true)) {
-        if (onLog) {
-            onLog(LogLevel::Warning, "Установка локальных драйверов уже выполняется.");
+    std::thread oldThread;
+    {
+        std::lock_guard<std::mutex> lock(threadMutex_);
+        if (shuttingDown_.load()) {
+            return;
         }
-        return;
+        if (installing_.load() || exportingBackup_.load() || removingPackages_.load()) {
+            if (onLog) {
+                onLog(LogLevel::Warning, "Установка локальных драйверов или операция DriverStore уже выполняется.");
+            }
+            return;
+        }
+        installing_.store(true);
+        if (installThread_.joinable()) {
+            oldThread = std::move(installThread_);
+        }
     }
-    if (installThread_.joinable()) {
-        installThread_.join();
+    if (oldThread.joinable()) {
+        oldThread.join();
     }
 
     progress_.store(0.0f);
     {
         std::lock_guard<std::mutex> lock(dataMutex_);
         statusMessage_ = "Подготовка к установке драйверов...";
+    }
+
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (shuttingDown_.load()) {
+        installing_.store(false);
+        return;
     }
 
     installThread_ = std::thread([this,
@@ -333,14 +376,14 @@ void LocalDriverInstaller::InstallFromFolderAsync(
             }
 
             const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_inf");
-            std::wstring args = L"--cli-install-inf \"" + folderPath + L"\"";
+            std::wstring args = L"--cli-install-inf " + QuoteWin32Arg(folderPath);
             if (forceInstall) {
                 args += L" --force";
             }
             if (createRestorePoint) {
                 args += L" --restore-before";
             }
-            args += L" --log \"" + tempLog.wstring() + L"\"";
+            args += L" --log " + QuoteWin32Arg(tempLog.wstring());
 
             {
                 std::lock_guard<std::mutex> lock(dataMutex_);
@@ -348,7 +391,8 @@ void LocalDriverInstaller::InstallFromFolderAsync(
             }
 
             progress_.store(0.25f);
-            const ElevatedRunResult run = ExecuteElevatedSelf(args, true, &tempLog, log);
+            const ElevatedRunResult run =
+                ExecuteElevatedSelf(args, true, &tempLog, log, nullptr, &shuttingDown_);
             std::error_code ec;
             std::filesystem::remove(tempLog, ec);
 
@@ -361,8 +405,10 @@ void LocalDriverInstaller::InstallFromFolderAsync(
                     log(LogLevel::Error,
                         "Ошибка запуска ShellExecuteExW: " + FormatWin32Error(run.launchError));
                 }
+            } else if (run.cancelled || run.timedOutWaiting) {
+                summary.failedCount = 1;
             } else {
-                // Exit code bitmask from elevated worker:
+                // Exit code from elevated worker:
                 // 0 = success, 2 = reboot required (with success), 1 = error(s).
                 if (run.exitCode == 2) {
                     summary.rebootRequired = true;
@@ -383,7 +429,7 @@ void LocalDriverInstaller::InstallFromFolderAsync(
                                  : "Установка локальных драйверов завершена.";
         }
         installing_.store(false);
-        if (complete) {
+        if (complete && !shuttingDown_.load()) {
             complete(summary);
         }
     });
@@ -415,11 +461,11 @@ LocalInstallSummary LocalDriverInstaller::InstallFromFolderSync(
         return summary;
     }
 
-    ModuleGuard newdevMod{LoadLibraryW(L"newdev.dll")};
+    ModuleGuard newdevMod(LoadLibraryExW(L"newdev.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
     DiInstallDriverWFn diInstallDriverW = nullptr;
-    if (newdevMod.mod != nullptr) {
+    if (newdevMod) {
         diInstallDriverW = reinterpret_cast<DiInstallDriverWFn>(
-            reinterpret_cast<void*>(GetProcAddress(newdevMod.mod, "DiInstallDriverW")));
+            reinterpret_cast<void*>(GetProcAddress(newdevMod.Get(), "DiInstallDriverW")));
     }
     if (diInstallDriverW == nullptr) {
         if (onLog) {
@@ -532,11 +578,12 @@ DriverStoreSnapshot LocalDriverInstaller::ScanDriverStoreSynchronously(
         }
     }
 
-    ModuleGuard setupMod{LoadLibraryW(L"setupapi.dll")};
+    hdm::ModuleGuard setupMod(
+        LoadLibraryExW(L"setupapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
     SetupGetInfDriverStoreLocationWFn getStoreLoc = nullptr;
-    if (setupMod.mod != nullptr) {
+    if (setupMod.Get() != nullptr) {
         getStoreLoc = reinterpret_cast<SetupGetInfDriverStoreLocationWFn>(
-            reinterpret_cast<void*>(GetProcAddress(setupMod.mod, "SetupGetInfDriverStoreLocationW")));
+            reinterpret_cast<void*>(GetProcAddress(setupMod.Get(), "SetupGetInfDriverStoreLocationW")));
     }
 
     const std::filesystem::path infDir(GetWindowsInfDirectory());
@@ -546,11 +593,29 @@ DriverStoreSnapshot LocalDriverInstaller::ScanDriverStoreSynchronously(
         return snap;
     }
 
-    for (const auto& entry : std::filesystem::directory_iterator(
-             infDir, std::filesystem::directory_options::skip_permission_denied, ec)) {
-        if (ec) {
-            break;
+    auto resolveStorePath = [&](const wchar_t* query) -> std::wstring {
+        if (getStoreLoc == nullptr || query == nullptr) {
+            return {};
         }
+        wchar_t storePathBuf[MAX_PATH]{};
+        DWORD reqChars = 0;
+        if (getStoreLoc(query, nullptr, nullptr, storePathBuf, MAX_PATH, &reqChars)) {
+            return storePathBuf;
+        }
+        if (reqChars > MAX_PATH) {
+            std::wstring dynBuf(reqChars, L'\0');
+            if (getStoreLoc(query, nullptr, nullptr, dynBuf.data(), reqChars, &reqChars)) {
+                return std::wstring(dynBuf.c_str());
+            }
+        }
+        return {};
+    };
+
+    for (std::filesystem::directory_iterator it(
+             infDir, std::filesystem::directory_options::skip_permission_denied, ec);
+         !ec && it != std::filesystem::directory_iterator();
+         it.increment(ec)) {
+        const auto& entry = *it;
         std::error_code entryEc;
         if (!entry.is_regular_file(entryEc)) {
             continue;
@@ -565,26 +630,9 @@ DriverStoreSnapshot LocalDriverInstaller::ScanDriverStoreSynchronously(
         pkg.oemInfName = oemName;
 
         // Resolve original INF location inside DriverStore\FileRepository
-        if (getStoreLoc != nullptr) {
-            wchar_t storePathBuf[MAX_PATH]{};
-            DWORD reqChars = 0;
-            BOOL okLoc = getStoreLoc(fnW.c_str(), nullptr, nullptr, storePathBuf, MAX_PATH, &reqChars);
-            if (!okLoc && reqChars > MAX_PATH) {
-                std::wstring dynBuf(reqChars, L'\0');
-                okLoc = getStoreLoc(
-                    fnW.c_str(), nullptr, nullptr, dynBuf.data(), reqChars, &reqChars);
-                if (okLoc) {
-                    pkg.storeInfPath = dynBuf.c_str();
-                }
-            } else if (!okLoc) {
-                okLoc = getStoreLoc(
-                    entry.path().c_str(), nullptr, nullptr, storePathBuf, MAX_PATH, &reqChars);
-                if (okLoc) {
-                    pkg.storeInfPath = storePathBuf;
-                }
-            } else {
-                pkg.storeInfPath = storePathBuf;
-            }
+        pkg.storeInfPath = resolveStorePath(fnW.c_str());
+        if (pkg.storeInfPath.empty()) {
+            pkg.storeInfPath = resolveStorePath(entry.path().c_str());
         }
 
         if (!pkg.storeInfPath.empty()) {
@@ -593,14 +641,19 @@ DriverStoreSnapshot LocalDriverInstaller::ScanDriverStoreSynchronously(
             pkg.storeFolderPath = p.parent_path().wstring();
 
             std::error_code sizeEc;
-            for (const auto& f : std::filesystem::recursive_directory_iterator(
+            for (std::filesystem::recursive_directory_iterator fit(
                      p.parent_path(),
                      std::filesystem::directory_options::skip_permission_denied,
-                     sizeEc)) {
-                if (sizeEc) break;
+                     sizeEc);
+                 !sizeEc && fit != std::filesystem::recursive_directory_iterator();
+                 fit.increment(sizeEc)) {
                 std::error_code fileEc;
-                if (f.is_regular_file(fileEc)) {
-                    pkg.sizeBytes += f.file_size(fileEc);
+                if (fit->is_regular_file(fileEc)) {
+                    std::error_code szEc;
+                    const uint64_t fsz = fit->file_size(szEc);
+                    if (!szEc) {
+                        pkg.sizeBytes += fsz;
+                    }
                 }
             }
         } else {
@@ -610,19 +663,19 @@ DriverStoreSnapshot LocalDriverInstaller::ScanDriverStoreSynchronously(
 
         // Extract Provider, Class and DriverVer cleanly via native SetupOpenInfFileW
         UINT errLine = 0;
-        HINF hInf = SetupOpenInfFileW(entry.path().c_str(), nullptr, INF_STYLE_WIN4, &errLine);
-        if (hInf != INVALID_HANDLE_VALUE) {
+        hdm::InfFileGuard hInf(SetupOpenInfFileW(entry.path().c_str(), nullptr, INF_STYLE_WIN4, &errLine));
+        if (hInf.IsValid()) {
             INFCONTEXT ctx{};
             wchar_t buf[256]{};
-            if (SetupFindFirstLineW(hInf, L"Version", L"Provider", &ctx) &&
+            if (SetupFindFirstLineW(hInf.Get(), L"Version", L"Provider", &ctx) &&
                 SetupGetStringFieldW(&ctx, 1, buf, static_cast<DWORD>(std::size(buf)), nullptr)) {
                 pkg.provider = WideToUtf8(buf);
             }
-            if (SetupFindFirstLineW(hInf, L"Version", L"Class", &ctx) &&
+            if (SetupFindFirstLineW(hInf.Get(), L"Version", L"Class", &ctx) &&
                 SetupGetStringFieldW(&ctx, 1, buf, static_cast<DWORD>(std::size(buf)), nullptr)) {
                 pkg.className = WideToUtf8(buf);
             }
-            if (SetupFindFirstLineW(hInf, L"Version", L"DriverVer", &ctx)) {
+            if (SetupFindFirstLineW(hInf.Get(), L"Version", L"DriverVer", &ctx)) {
                 if (SetupGetStringFieldW(&ctx, 1, buf, static_cast<DWORD>(std::size(buf)), nullptr)) {
                     pkg.driverDate = WideToUtf8(buf);
                 }
@@ -630,7 +683,6 @@ DriverStoreSnapshot LocalDriverInstaller::ScanDriverStoreSynchronously(
                     pkg.driverVersion = WideToUtf8(buf);
                 }
             }
-            SetupCloseInfFile(hInf);
         }
 
         const auto devIt = activeInfToDevice.find(ToLowerAscii(pkg.oemInfName));
@@ -711,6 +763,10 @@ DriverStoreSnapshot LocalDriverInstaller::ScanDriverStoreSynchronously(
 void LocalDriverInstaller::ScanDriverStoreAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog) {
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (shuttingDown_.load() || removingPackages_.load() || exportingBackup_.load()) {
+        return;
+    }
     if (scanningStore_.exchange(true)) {
         return;
     }
@@ -732,7 +788,7 @@ void LocalDriverInstaller::ScanDriverStoreAsync(
         storeGeneration_.fetch_add(1);
         scanningStore_.store(false);
 
-        if (log) {
+        if (!shuttingDown_.load() && log) {
             log(LogLevel::Info,
                 "DriverStore проанализирован: пакетов — " + std::to_string(totalCount) +
                     " (" + FormatBytes(totBytes) + "), старых дубликатов — " +
@@ -746,9 +802,16 @@ void LocalDriverInstaller::ExportDriverStoreBackupAsync(
     bool skipOldDuplicates,
     LogCallback onLog,
     BackupCompleteCallback onComplete) {
-    if (exportingBackup_.exchange(true)) {
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (shuttingDown_.load()) {
+        return;
+    }
+    if (scanningStore_.load() || removingPackages_.load() || exportingBackup_.exchange(true)) {
         if (onLog) {
-            onLog(LogLevel::Warning, "Экспорт резервной копии драйверов уже выполняется.");
+            onLog(LogLevel::Warning, "Операция с хранилищем драйверов уже выполняется.");
+        }
+        if (onComplete) {
+            onComplete(false, 0);
         }
         return;
     }
@@ -758,7 +821,7 @@ void LocalDriverInstaller::ExportDriverStoreBackupAsync(
 
     progress_.store(0.0f);
     {
-        std::lock_guard<std::mutex> lock(dataMutex_);
+        std::lock_guard<std::mutex> dataLock(dataMutex_);
         statusMessage_ = "Подготовка экспорта драйверов...";
     }
 
@@ -772,8 +835,13 @@ void LocalDriverInstaller::ExportDriverStoreBackupAsync(
             std::lock_guard<std::mutex> lock(dataMutex_);
             snap = storeSnapshot_;
         }
-        if (!snap.valid) {
+        if (!snap.valid && !shuttingDown_.load()) {
             snap = ScanDriverStoreSynchronously({});
+        }
+
+        if (shuttingDown_.load()) {
+            exportingBackup_.store(false);
+            return;
         }
 
         std::vector<DriverStorePackageEntry> toExport;
@@ -785,7 +853,7 @@ void LocalDriverInstaller::ExportDriverStoreBackupAsync(
         }
 
         if (toExport.empty()) {
-            if (log) {
+            if (!shuttingDown_.load() && log) {
                 log(LogLevel::Warning, "Не найдено сторонних пакетов драйверов для экспорта.");
             }
             {
@@ -793,7 +861,7 @@ void LocalDriverInstaller::ExportDriverStoreBackupAsync(
                 statusMessage_ = "Нет пакетов для экспорта.";
             }
             exportingBackup_.store(false);
-            if (complete) complete(false, 0);
+            if (!shuttingDown_.load() && complete) complete(false, 0);
             return;
         }
 
@@ -801,15 +869,19 @@ void LocalDriverInstaller::ExportDriverStoreBackupAsync(
         std::error_code ec;
         std::filesystem::create_directories(destRoot, ec);
         if (ec) {
-            if (log) {
+            if (!shuttingDown_.load() && log) {
                 log(LogLevel::Error, "Не удалось создать папку бэкапа: " + ec.message());
             }
+            {
+                std::lock_guard<std::mutex> lock(dataMutex_);
+                statusMessage_ = "Ошибка создания папки бэкапа.";
+            }
             exportingBackup_.store(false);
-            if (complete) complete(false, 0);
+            if (!shuttingDown_.load() && complete) complete(false, 0);
             return;
         }
 
-        if (log) {
+        if (!shuttingDown_.load() && log) {
             log(LogLevel::Info,
                 "Начинается экспорт " + std::to_string(toExport.size()) +
                     " пакет(ов) драйверов в \"" + WideToUtf8(destFolderPath) + "\"...");
@@ -825,6 +897,9 @@ void LocalDriverInstaller::ExportDriverStoreBackupAsync(
         }
 
         for (size_t i = 0; i < toExport.size(); ++i) {
+            if (shuttingDown_.load()) {
+                break;
+            }
             const auto& pkg = toExport[i];
             {
                 std::lock_guard<std::mutex> lock(dataMutex_);
@@ -844,12 +919,14 @@ void LocalDriverInstaller::ExportDriverStoreBackupAsync(
 
             std::error_code copyEc;
             std::filesystem::create_directories(targetDir, copyEc);
-            std::filesystem::copy(
-                std::filesystem::path(pkg.storeFolderPath),
-                targetDir,
-                std::filesystem::copy_options::overwrite_existing |
-                    std::filesystem::copy_options::recursive,
-                copyEc);
+            if (!copyEc) {
+                std::filesystem::copy(
+                    std::filesystem::path(pkg.storeFolderPath),
+                    targetDir,
+                    std::filesystem::copy_options::overwrite_existing |
+                        std::filesystem::copy_options::recursive,
+                    copyEc);
+            }
 
             if (!copyEc) {
                 ++exportedCount;
@@ -863,7 +940,7 @@ void LocalDriverInstaller::ExportDriverStoreBackupAsync(
                              << (pkg.inUse ? (" | Active: " + pkg.activeDeviceName) : "")
                              << "\r\n";
                 }
-            } else if (log) {
+            } else if (!shuttingDown_.load() && log) {
                 log(LogLevel::Warning,
                     "Пропуск " + pkg.oemInfName + " (" + pkg.originalInfName + "): " + copyEc.message());
             }
@@ -881,13 +958,13 @@ void LocalDriverInstaller::ExportDriverStoreBackupAsync(
                 "Бэкап завершён (" + std::to_string(exportedCount) + " пакетов, " +
                 FormatBytes(exportedBytes) + ").";
         }
-        if (log) {
+        if (!shuttingDown_.load() && log) {
             log(exportedCount > 0 ? LogLevel::Success : LogLevel::Error,
                 "Экспортировано драйверов: " + std::to_string(exportedCount) + " из " +
                     std::to_string(toExport.size()) + " (" + FormatBytes(exportedBytes) + ").");
         }
         exportingBackup_.store(false);
-        if (complete) {
+        if (!shuttingDown_.load() && complete) {
             complete(exportedCount > 0, exportedCount);
         }
     });
@@ -900,6 +977,10 @@ bool LocalDriverInstaller::RemoveDriverStorePackagesSync(
     size_t* outRemovedCount,
     size_t* outFailedCount,
     bool* outRebootRequired) {
+    if (outRemovedCount) *outRemovedCount = 0;
+    if (outFailedCount) *outFailedCount = 0;
+    if (outRebootRequired) *outRebootRequired = false;
+
     size_t removed = 0;
     size_t failed = 0;
     bool rebootReq = false;
@@ -912,11 +993,12 @@ bool LocalDriverInstaller::RemoveDriverStorePackagesSync(
             "DriverLoom: перед очисткой старых пакетов DriverStore", onLog);
     }
 
-    ModuleGuard newdevMod{LoadLibraryW(L"newdev.dll")};
+    hdm::ModuleGuard newdevMod(
+        LoadLibraryExW(L"newdev.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
     DiUninstallDriverWFn diUninstallDriverW = nullptr;
-    if (newdevMod.mod != nullptr) {
+    if (newdevMod.Get() != nullptr) {
         diUninstallDriverW = reinterpret_cast<DiUninstallDriverWFn>(
-            reinterpret_cast<void*>(GetProcAddress(newdevMod.mod, "DiUninstallDriverW")));
+            reinterpret_cast<void*>(GetProcAddress(newdevMod.Get(), "DiUninstallDriverW")));
     }
     if (diUninstallDriverW == nullptr) {
         if (onLog) {
@@ -975,9 +1057,16 @@ void LocalDriverInstaller::RemoveDriverStorePackagesAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog,
     RemoveStoreCompleteCallback onComplete) {
-    if (removingPackages_.exchange(true)) {
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (shuttingDown_.load()) {
+        return;
+    }
+    if (scanningStore_.load() || exportingBackup_.load() || removingPackages_.exchange(true)) {
         if (onLog) {
-            onLog(LogLevel::Warning, "Удаление пакетов из DriverStore уже выполняется.");
+            onLog(LogLevel::Warning, "Операция с хранилищем драйверов уже выполняется.");
+        }
+        if (onComplete) {
+            onComplete(0, 0, false);
         }
         return;
     }
@@ -987,7 +1076,7 @@ void LocalDriverInstaller::RemoveDriverStorePackagesAsync(
 
     progress_.store(0.0f);
     {
-        std::lock_guard<std::mutex> lock(dataMutex_);
+        std::lock_guard<std::mutex> dataLock(dataMutex_);
         statusMessage_ = "Удаление неиспользуемых пакетов из DriverStore...";
     }
 
@@ -1001,9 +1090,9 @@ void LocalDriverInstaller::RemoveDriverStorePackagesAsync(
         size_t failedCount = 0;
         bool rebootReq = false;
 
-        if (names.empty()) {
+        if (names.empty() || shuttingDown_.load()) {
             removingPackages_.store(false);
-            if (complete) complete(0, 0, false);
+            if (!shuttingDown_.load() && complete) complete(0, 0, false);
             return;
         }
 
@@ -1022,26 +1111,27 @@ void LocalDriverInstaller::RemoveDriverStorePackagesAsync(
                 joined += names[i];
             }
             const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_rm_inf");
-            std::wstring args = L"--cli-remove-oem-infs \"" + Utf8ToWide(joined) + L"\"";
+            std::wstring args = L"--cli-remove-oem-infs " + QuoteWin32Arg(Utf8ToWide(joined));
             if (createRestorePoint) {
                 args += L" --restore-before";
             }
-            args += L" --log \"" + tempLog.wstring() + L"\"";
+            args += L" --log " + QuoteWin32Arg(tempLog.wstring());
 
             progress_.store(0.35f);
-            const ElevatedRunResult run = ExecuteElevatedSelf(args, true, &tempLog, log);
+            const ElevatedRunResult run =
+                ExecuteElevatedSelf(args, true, &tempLog, log, nullptr, &shuttingDown_);
             std::error_code ec;
             std::filesystem::remove(tempLog, ec);
 
             if (!run.launched) {
                 failedCount = names.size();
-                if (run.launchError == ERROR_CANCELLED) {
-                    if (log) {
+                if (!shuttingDown_.load() && log) {
+                    if (run.launchError == ERROR_CANCELLED) {
                         log(LogLevel::Warning, "Очистка DriverStore отменена в окне UAC.");
+                    } else {
+                        log(LogLevel::Error,
+                            "Ошибка запуска ShellExecuteExW: " + FormatWin32Error(run.launchError));
                     }
-                } else if (log) {
-                    log(LogLevel::Error,
-                        "Ошибка запуска ShellExecuteExW: " + FormatWin32Error(run.launchError));
                 }
             } else if (run.exitCode == 2) {
                 removedCount = names.size();
@@ -1054,19 +1144,21 @@ void LocalDriverInstaller::RemoveDriverStorePackagesAsync(
             progress_.store(1.0f);
         }
 
-        // Refresh DriverStore snapshot automatically after removal.
-        auto refreshed = ScanDriverStoreSynchronously(devs);
-        {
-            std::lock_guard<std::mutex> lock(dataMutex_);
-            storeSnapshot_ = std::move(refreshed);
-            statusMessage_ =
-                "Очистка DriverStore завершена (удалено пакетов: " +
-                std::to_string(removedCount) + ").";
+        if (!shuttingDown_.load()) {
+            // Refresh DriverStore snapshot automatically after removal.
+            auto refreshed = ScanDriverStoreSynchronously(devs);
+            {
+                std::lock_guard<std::mutex> lock(dataMutex_);
+                storeSnapshot_ = std::move(refreshed);
+                statusMessage_ =
+                    "Очистка DriverStore завершена (удалено пакетов: " +
+                    std::to_string(removedCount) + ").";
+            }
+            storeGeneration_.fetch_add(1);
         }
-        storeGeneration_.fetch_add(1);
         removingPackages_.store(false);
 
-        if (complete) {
+        if (!shuttingDown_.load() && complete) {
             complete(removedCount, failedCount, rebootReq);
         }
     });

@@ -1,5 +1,6 @@
 #include "ui/DriverLoomApp.hpp"
 
+#include <cfgmgr32.h>
 #include <shellapi.h>
 #include <winhttp.h>
 
@@ -12,7 +13,11 @@
 DriverLoomApp::DriverLoomApp(HWND mainHwnd, int initialTab)
     : hwnd_(mainHwnd),
       isElevated_(hdm::IsProcessElevated()),
-      pendingInitialTab_(initialTab) {
+      activeTabIndex_(initialTab >= 0 && initialTab <= PageSettings ? initialTab : PageOverview),
+      logPanelExpanded_(g_isAdvancedMode && g_pinLogPanel) {
+    if (activeTabIndex_ == PageLocalInstaller && !g_isAdvancedMode) {
+        activeTabIndex_ = PageOverview;
+    }
     logBuffer_.Push(
         hdm::LogLevel::Info,
         std::string(hdm::Tr(
@@ -30,175 +35,806 @@ DriverLoomApp::DriverLoomApp(HWND mainHwnd, int initialTab)
 }
 
 DriverLoomApp::~DriverLoomApp() {
+    componentsScanner_.RequestCancelInstall();
+    diagnostics_.RequestCancel();
+    wuManager_.RequestCancel();
     if (appUpdateThread_.joinable()) {
         appUpdateThread_.join();
     }
+}
+
+void DriverLoomApp::NavigateTo(int pageIndex) {
+    if (pageIndex < PageOverview || pageIndex > PageSettings) {
+        return;
+    }
+    if (pageIndex == PageLocalInstaller && !g_isAdvancedMode) {
+        return;
+    }
+    activeTabIndex_ = pageIndex;
+}
+
+bool DriverLoomApp::IsOptionalVendorSoftware(const hdm::SystemComponentItem& item) {
+    // Motherboard suites (Armoury Crate, etc.), peripheral suites (G HUB, Synapse, GG, iCUE),
+    // Intel DSA assistant, and monitor companion apps are always optional third-party software.
+    if (item.category == hdm::ComponentCategory::PeripheralSoftware) {
+        return true;
+    }
+    if (item.id == "intel_dsa" || item.id.rfind("mon_", 0) == 0) {
+        return true;
+    }
+    return false;
+}
+
+bool DriverLoomApp::IsComponentRecommendedAction(const hdm::SystemComponentItem& item) {
+    if (IsOptionalVendorSoftware(item)) {
+        return false;
+    }
+    return (!item.installed || item.updateAvailable) && !item.directInstallerUrl.empty();
+}
+
+bool DriverLoomApp::IsUserRelevantDeviceIssue(const hdm::DeviceInfo& d) {
+    if (d.problemCode == CM_PROB_DISABLED) {
+        return false;
+    }
+    if (d.health == hdm::DeviceHealth::Error) {
+        return true;
+    }
+    if (d.isGenericMonitorDriver) {
+        return true;
+    }
+    if (d.health == hdm::DeviceHealth::Warning) {
+        // Virtual Bluetooth serial ports (COMx over BTHENUM) routinely lack a driver until paired
+        const bool isBtSerial =
+            hdm::ContainsCaseInsensitive(d.hardwareId, "BTHENUM\\") &&
+            d.name.rfind("COM", 0) == 0;
+        if (isBtSerial) {
+            return false;
+        }
+        return true;
+    }
+    return false;
 }
 
 void DriverLoomApp::RenderFrame() {
     SyncScannerSnapshots();
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
 
     constexpr ImGuiWindowFlags kRootFlags =
         ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
         ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoBringToFrontOnFocus |
-        ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoSavedSettings;
+        ImGuiWindowFlags_NoNavFocus | ImGuiWindowFlags_NoSavedSettings |
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse;
 
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, 0.0f));
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, CanvasBgColor());
     ImGui::Begin("##MainWorkspace", nullptr, kRootFlags);
+    ImGui::PopStyleColor();
+    ImGui::PopStyleVar(2);
 
-    RenderHeaderBar();
+    const float sidebarW = std::round(234.0f * uiScale);
+    const float totalH = ImGui::GetContentRegionAvail().y;
+
+    // Left Navigation Sidebar
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, SidebarBgColor());
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(std::round(14.0f * uiScale), std::round(16.0f * uiScale)));
+    ImGui::BeginChild(
+        "##Sidebar",
+        ImVec2(sidebarW, totalH),
+        ImGuiChildFlags_AlwaysUseWindowPadding,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    RenderSidebar();
+    ImGui::EndChild();
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+
+    // Subtle vertical divider between sidebar and main content
+    {
+        const ImVec2 sp = ImGui::GetItemRectMax();
+        const ImVec2 spMin = ImGui::GetItemRectMin();
+        ImGui::GetWindowDrawList()->AddLine(
+            ImVec2(sp.x, spMin.y),
+            ImVec2(sp.x, sp.y),
+            ImGui::ColorConvertFloat4ToU32(PanelBorderColor()),
+            1.0f);
+    }
+
+    ImGui::SameLine(0.0f, 0.0f);
+
+    // Right Main Pane: Active Page + Bottom Status Bar / Collapsible Log Drawer
+    const float rightW = std::max(320.0f, ImGui::GetContentRegionAvail().x);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, CanvasBgColor());
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::BeginChild(
+        "##RightPane",
+        ImVec2(rightW, totalH),
+        ImGuiChildFlags_None,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+
+    const float statusBarH = logPanelExpanded_
+                                 ? std::clamp(totalH * 0.25f, 168.0f * uiScale, 236.0f * uiScale)
+                                 : std::round(44.0f * uiScale);
+    const float contentH = std::max(220.0f, totalH - statusBarH);
+
+    // Main Content Area (open canvas, generous padding, no outer box border!)
+    const float padX = std::round(22.0f * uiScale);
+    const float padY = std::round(16.0f * uiScale);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, CanvasBgColor());
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(padX, padY));
+    ImGui::BeginChild(
+        "##PageCanvas",
+        ImVec2(rightW, contentH),
+        ImGuiChildFlags_AlwaysUseWindowPadding,
+        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar(2);
+    ImGui::PopStyleColor();
+
     if (rebootRequired_.load()) {
         RenderRebootBanner();
+        ImGui::Dummy(ImVec2(0.0f, std::round(6.0f * uiScale)));
     }
 
-    const float availHeight = ImGui::GetContentRegionAvail().y;
-    const float spacingY = ImGui::GetStyle().ItemSpacing.y;
-    const float logPanelHeight = std::clamp(availHeight * 0.20f, 128.0f, 195.0f);
-    const float tabAreaHeight = std::max(280.0f, availHeight - logPanelHeight - spacingY);
-
-    ImGui::BeginChild(
-        "##TabsRegion",
-        ImVec2(0.0f, tabAreaHeight),
-        false,
-        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
-    auto pushMainTabBarStyle = [uiScale]() {
-        PushFontSafe(g_fontMainTab);
-        ImGui::PushStyleVar(
-            ImGuiStyleVar_FramePadding,
-            ImVec2(std::round(14.0f * uiScale), std::round(7.0f * uiScale)));
-        ImGui::PushStyleVar(ImGuiStyleVar_TabBorderSize, 1.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_TabBarBorderSize, std::round(1.0f * uiScale));
-        ImGui::PushStyleVar(ImGuiStyleVar_TabBarOverlineSize, std::max(2.0f, 2.5f * uiScale));
-        if (g_isLightTheme) {
-            ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.89f, 0.92f, 0.96f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.93f, 0.96f, 0.99f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_TabSelected, ImVec4(0.99f, 0.995f, 1.00f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_TabSelectedOverline, ImVec4(0.14f, 0.45f, 0.88f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_TabDimmed, ImVec4(0.89f, 0.92f, 0.96f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_TabDimmedSelected, ImVec4(0.99f, 0.995f, 1.00f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_TabDimmedSelectedOverline, ImVec4(0.14f, 0.45f, 0.88f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.75f, 0.80f, 0.87f, 0.90f));
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Tab, ImVec4(0.072f, 0.088f, 0.122f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_TabHovered, ImVec4(0.108f, 0.138f, 0.195f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_TabSelected, ImVec4(0.128f, 0.172f, 0.248f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_TabSelectedOverline, ImVec4(0.36f, 0.70f, 1.00f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_TabDimmed, ImVec4(0.072f, 0.088f, 0.122f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_TabDimmedSelected, ImVec4(0.128f, 0.172f, 0.248f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_TabDimmedSelectedOverline, ImVec4(0.36f, 0.70f, 1.00f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.15f, 0.19f, 0.26f, 0.85f));
-        }
-    };
-    auto popMainTabBarStyle = []() {
-        ImGui::PopStyleColor(8);
-        ImGui::PopStyleVar(4);
-        PopFontSafe(g_fontMainTab);
-    };
-
-    pushMainTabBarStyle();
-    if (ImGui::BeginTabBar("##MainTabs", ImGuiTabBarFlags_DrawSelectedOverline)) {
-        auto tabFlag = [this](int idx) {
-            return (pendingInitialTab_ == idx)
-                       ? ImGuiTabItemFlags_SetSelected
-                       : ImGuiTabItemFlags_None;
-        };
-        auto beginMainTab = [&](const char* label, int idx) -> bool {
-            const bool isSel =
-                (pendingInitialTab_ >= 0) ? (pendingInitialTab_ == idx) : (activeTabIndex_ == idx);
-            const ImVec4 borderCol =
-                g_isLightTheme
-                    ? (isSel ? ImVec4(0.32f, 0.54f, 0.84f, 0.95f) : ImVec4(0.75f, 0.80f, 0.87f, 0.90f))
-                    : (isSel ? ImVec4(0.28f, 0.46f, 0.72f, 0.95f) : ImVec4(0.15f, 0.19f, 0.26f, 0.85f));
-            const ImVec4 textCol =
-                g_isLightTheme
-                    ? (isSel ? ImVec4(0.06f, 0.14f, 0.28f, 1.00f) : ImVec4(0.36f, 0.42f, 0.52f, 1.00f))
-                    : (isSel ? ImVec4(0.97f, 0.99f, 1.00f, 1.00f) : ImVec4(0.60f, 0.67f, 0.78f, 1.00f));
-            ImGui::PushStyleColor(ImGuiCol_Border, borderCol);
-            ImGui::PushStyleColor(ImGuiCol_Text, textCol);
-            const bool open = ImGui::BeginTabItem(label, nullptr, tabFlag(idx));
-            ImGui::PopStyleColor(2);
-            return open;
-        };
-        auto runTabCard = [&](const char* childId, auto&& drawFn) {
-            popMainTabBarStyle();
-            const ImVec4 cardBorder = g_isLightTheme
-                                          ? ImVec4(0.68f, 0.75f, 0.85f, 0.95f)
-                                          : ImVec4(0.22f, 0.31f, 0.44f, 0.95f);
-            ImGui::PushStyleColor(ImGuiCol_Border, cardBorder);
-            ImGui::BeginChild(
-                childId,
-                ImVec2(0.0f, 0.0f),
-                true,
-                ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-            ImGui::PopStyleColor();
-            drawFn();
-            ImGui::EndChild();
-            pushMainTabBarStyle();
-        };
-
-        if (beginMainTab(
-                hdm::Tr(
-                    "  Устройства и мониторы  ###Tab0",
-                    "  Пристрої та монітори  ###Tab0",
-                    "  Devices & Monitors  ###Tab0"),
-                0)) {
-            activeTabIndex_ = 0;
-            runTabCard("##TabCardDevices", [&]() { RenderDevicesTab(); });
-            ImGui::EndTabItem();
-        }
-        if (beginMainTab(
-                hdm::Tr(
-                    "  Компоненты и периферия  ###Tab1",
-                    "  Компоненти та периферія  ###Tab1",
-                    "  Components & Peripherals  ###Tab1"),
-                1)) {
-            activeTabIndex_ = 1;
-            runTabCard("##TabCardComponents", [&]() { RenderComponentsTab(); });
-            ImGui::EndTabItem();
-        }
-        if (beginMainTab("  Windows Update  ###Tab2", 2)) {
-            activeTabIndex_ = 2;
-            runTabCard("##TabCardWu", [&]() { RenderWindowsUpdateTab(); });
-            ImGui::EndTabItem();
-        }
-        if (g_isAdvancedMode &&
-            beginMainTab(
-                hdm::Tr(
-                    "  Локальные (.inf)  ###Tab3",
-                    "  Локальні (.inf)  ###Tab3",
-                    "  Local (.inf)  ###Tab3"),
-                3)) {
-            activeTabIndex_ = 3;
-            runTabCard("##TabCardLocal", [&]() { RenderLocalInstallerTab(); });
-            ImGui::EndTabItem();
-        }
-        if (beginMainTab(
-                hdm::Tr(
-                    "  Система и диагностика  ###Tab4",
-                    "  Система та діагностика  ###Tab4",
-                    "  System & Diagnostics  ###Tab4"),
-                4)) {
-            activeTabIndex_ = 4;
-            runTabCard("##TabCardDiag", [&]() { RenderDiagnosticsTab(); });
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
+    if (activeTabIndex_ == PageLocalInstaller && !g_isAdvancedMode) {
+        activeTabIndex_ = PageOverview;
     }
-    popMainTabBarStyle();
-    pendingInitialTab_ = -1;
+
+    switch (activeTabIndex_) {
+    case PageOverview:
+        RenderOverviewTab();
+        break;
+    case PageComponents:
+        RenderComponentsTab();
+        break;
+    case PageWindowsUpdate:
+        RenderWindowsUpdateTab();
+        break;
+    case PageDevices:
+        RenderDevicesTab();
+        break;
+    case PageDiagnostics:
+        RenderDiagnosticsTab();
+        break;
+    case PageLocalInstaller:
+        RenderLocalInstallerTab();
+        break;
+    case PageSettings:
+        RenderSettingsTab();
+        break;
+    default:
+        RenderOverviewTab();
+        break;
+    }
+
+    ImGui::EndChild(); // ##PageCanvas
+
+    // Bottom Status Bar / Collapsible Log Drawer
+    RenderStatusBarAndLogDrawer();
+
+    ImGui::EndChild(); // ##RightPane
+
     HandleKeyboardShortcuts();
-    ImGui::EndChild();
-
-    RenderLogPanel();
-
     RenderAboutModal();
 
     ImGui::End();
+}
+
+void DriverLoomApp::RenderSidebar() {
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const bool isAppForeground = (GetForegroundWindow() == hwnd_);
+
+    AppUpdateState updState = AppUpdateState::Idle;
+    std::string latestVer;
+    {
+        std::lock_guard<std::mutex> lock(appUpdateMutex_);
+        updState = appUpdateState_;
+        latestVer = appLatestVersion_;
+    }
+    const bool hasUpdate =
+        (updState == AppUpdateState::UpdateAvailable && !latestVer.empty());
+
+    // Brand Header
+    {
+        const float logoSz = std::round(30.0f * uiScale);
+        const ImVec2 startPos = ImGui::GetCursorScreenPos();
+        const ImVec2 logoMin(startPos.x, startPos.y + 1.0f);
+        const ImVec2 logoMax(logoMin.x + logoSz, logoMin.y + logoSz);
+        const ImVec2 logoCenter((logoMin.x + logoMax.x) * 0.5f, (logoMin.y + logoMax.y) * 0.5f);
+        if (g_appLogoTexture != 0) {
+            ImGui::GetWindowDrawList()->AddImage(g_appLogoTexture, logoMin, logoMax);
+        } else {
+            DrawAppIcon(
+                ImGui::GetWindowDrawList(),
+                logoCenter,
+                logoSz * 0.92f,
+                AppIcon::BrandLogo,
+                ImGui::ColorConvertFloat4ToU32(AccentBarColor()));
+        }
+
+        PushFontSafe(g_fontMainTab);
+        const float titleY = logoCenter.y - ImGui::GetTextLineHeight() * 0.5f - 1.0f;
+        const ImVec4 titleCol = g_isLightTheme
+                                    ? ImVec4(0.07f, 0.13f, 0.25f, 1.00f)
+                                    : ImVec4(0.95f, 0.98f, 1.00f, 1.00f);
+        ImGui::GetWindowDrawList()->AddText(
+            ImVec2(startPos.x + logoSz + std::round(10.0f * uiScale), titleY),
+            ImGui::ColorConvertFloat4ToU32(titleCol),
+            "DriverLoom");
+        PopFontSafe(g_fontMainTab);
+
+        ImGui::Dummy(ImVec2(ImGui::GetContentRegionAvail().x, logoSz + std::round(6.0f * uiScale)));
+
+        // Compact subtle subtitle row: version + optional Admin badge or Update pill
+        PushFontSafe(g_fontSmall);
+        ImGui::TextColored(MutedTextColor(), "v1.0.0");
+        if (isElevated_) {
+            ImGui::SameLine(0.0f, 8.0f * uiScale);
+            ImGui::TextColored(
+                g_isLightTheme ? ImVec4(0.05f, 0.48f, 0.30f, 1.00f) : HealthyColor(),
+                "• %s",
+                hdm::Tr("Админ", "Адмін", "Admin"));
+        }
+        if (hasUpdate) {
+            ImGui::SameLine(0.0f, 8.0f * uiScale);
+            char updLbl[48];
+            std::snprintf(updLbl, sizeof(updLbl), "v%s!###SbUpd", latestVer.c_str());
+            if (RenderPillButton(updLbl, true)) {
+                openAboutPopupNextFrame_ = true;
+                aboutModalOpen_ = true;
+            }
+        }
+        PopFontSafe(g_fontSmall);
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, std::round(10.0f * uiScale)));
+
+    // Compute live badge counts
+    size_t wuCount = 0;
+    for (const auto& u : wuCache_) {
+        if (!u.installedOk && !u.isHidden) {
+            ++wuCount;
+        }
+    }
+    const size_t devBadgeCount = g_isAdvancedMode ? problemDevicesCount_ : userRelevantIssueCount_;
+    const size_t diagBadgeCount =
+        diagCache_.valid ? (diagCache_.disabledCriticalServices + diagCache_.attentionControllers) : 0;
+    const ImVec4 diagBadgeCol =
+        (diagCache_.valid && diagCache_.disabledCriticalServices > 0) ? DangerColor() : WarningColor();
+
+    // Primary Navigation Items
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, std::round(4.0f * uiScale)));
+
+    if (RenderSidebarNavItem(
+            "##NavOverview",
+            AppIcon::Home,
+            hdm::Tr("Обзор", "Огляд", "Overview"),
+            activeTabIndex_ == PageOverview)) {
+        NavigateTo(PageOverview);
+    }
+
+    if (RenderSidebarNavItem(
+            "##NavComponents",
+            AppIcon::Apps,
+            hdm::Tr("Игры и ПО", "Ігри та ПЗ", "Games & Software"),
+            activeTabIndex_ == PageComponents,
+            actionableComponentsCount_,
+            WarningColor())) {
+        NavigateTo(PageComponents);
+    }
+
+    if (RenderSidebarNavItem(
+            "##NavWu",
+            AppIcon::Updates,
+            hdm::Tr("Обновления Windows", "Оновлення Windows", "Windows Update"),
+            activeTabIndex_ == PageWindowsUpdate,
+            wuCount,
+            InfoAccentColor())) {
+        NavigateTo(PageWindowsUpdate);
+    }
+
+    if (RenderSidebarNavItem(
+            "##NavDevices",
+            AppIcon::Devices,
+            hdm::Tr("Устройства", "Пристрої", "Devices"),
+            activeTabIndex_ == PageDevices,
+            devBadgeCount,
+            WarningColor())) {
+        NavigateTo(PageDevices);
+    }
+
+    if (RenderSidebarNavItem(
+            "##NavDiag",
+            AppIcon::Shield,
+            hdm::Tr("Защита и система", "Захист і система", "System & Protection"),
+            activeTabIndex_ == PageDiagnostics,
+            diagBadgeCount,
+            diagBadgeCol)) {
+        NavigateTo(PageDiagnostics);
+    }
+
+    if (g_isAdvancedMode) {
+        if (RenderSidebarNavItem(
+                "##NavLocal",
+                AppIcon::Folder,
+                hdm::Tr("Локальные (.inf)", "Локальні (.inf)", "Local (.inf)"),
+                activeTabIndex_ == PageLocalInstaller,
+                driverStoreCache_.duplicateCount,
+                WarningColor())) {
+            NavigateTo(PageLocalInstaller);
+        }
+    }
+
+    ImGui::PopStyleVar();
+
+    // Bottom Utility Footer pinned accurately with comfortable bottom breathing margin
+    const ImGuiStyle& sbStyle = ImGui::GetStyle();
+    const float footerItemH = std::round(38.0f * uiScale);
+    const float quickRowH = std::round(32.0f * uiScale);
+    const float bottomMargin = std::round(16.0f * uiScale);
+    const float footerTotalH =
+        1.0f + sbStyle.ItemSpacing.y +
+        std::round(4.0f * uiScale) + sbStyle.ItemSpacing.y +
+        footerItemH + sbStyle.ItemSpacing.y +
+        std::round(4.0f * uiScale) + sbStyle.ItemSpacing.y +
+        quickRowH;
+    const float targetY = ImGui::GetWindowHeight() - bottomMargin - footerTotalH;
+    if (ImGui::GetCursorPosY() < targetY) {
+        ImGui::SetCursorPosY(targetY);
+    }
+
+    ImGui::Separator();
+    ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
+
+    if (RenderSidebarNavItem(
+            "##NavSettings",
+            AppIcon::Settings,
+            hdm::Tr("Настройки", "Налаштування", "Settings"),
+            activeTabIndex_ == PageSettings)) {
+        NavigateTo(PageSettings);
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
+
+    // Quick utility row: Mode switch pill + Theme icon + About icon
+    const float availW = ImGui::GetContentRegionAvail().x;
+    const float gap = std::round(6.0f * uiScale);
+    const float iconBtnW = quickRowH + std::round(4.0f * uiScale);
+    const float modeBtnW = std::max(60.0f, availW - iconBtnW * 2.0f - gap * 2.0f);
+
+    const char* modeLbl =
+        g_isAdvancedMode
+            ? hdm::Tr("Эксперт###SbMode", "Експерт###SbMode", "Expert###SbMode")
+            : hdm::Tr("Обычный###SbMode", "Звичайний###SbMode", "Simple###SbMode");
+    if (RenderPillButton(modeLbl, g_isAdvancedMode, ImVec2(modeBtnW, quickRowH))) {
+        g_isAdvancedMode = !g_isAdvancedMode;
+        if (!g_isAdvancedMode) {
+            if (activeTabIndex_ == PageLocalInstaller) {
+                activeTabIndex_ = PageOverview;
+            }
+            wuShowHidden_ = false;
+            wuRestoreBefore_ = true;
+            compRestoreBefore_ = true;
+        }
+        SaveUserPreferences();
+        logBuffer_.Push(
+            hdm::LogLevel::Info,
+            g_isAdvancedMode
+                ? hdm::Tr(
+                      "Режим интерфейса переключён: Эксперт (полный доступ к PnP, DriverStore, .inf и службам).",
+                      "Режим інтерфейсу перемкнуто: Експерт (повний доступ до PnP, DriverStore, .inf і служб).",
+                      "Interface mode switched: Expert (full access to PnP, DriverStore, .inf, and services).")
+                : hdm::Tr(
+                      "Режим интерфейса переключён: Обычный (простой и безопасный режим).",
+                      "Режим інтерфейсу перемкнуто: Звичайний (простий і безпечний режим).",
+                      "Interface mode switched: Simple (clear and safe mode)."));
+    }
+    if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+        ImGui::SetTooltip(
+            "%s",
+            hdm::Tr(
+                "Переключить режим: Обычный (простой) / Эксперт (полный доступ ко всем инструментам).",
+                "Перемкнути режим: Звичайний (простий) / Експерт (повний доступ до всіх інструментів).",
+                "Toggle mode: Simple (everyday use) / Expert (full access to all power tools)."));
+    }
+
+    ImGui::SameLine(0.0f, gap);
+    if (RenderIconButton(
+            "###SbThemeBtn",
+            g_isLightTheme ? AppIcon::Sun : AppIcon::Moon,
+            ImVec2(iconBtnW, quickRowH),
+            isAppForeground
+                ? hdm::Tr("Переключить тему (Тёмная / Светлая)", "Перемкнути тему (Темна / Світла)", "Toggle Theme (Dark / Light)")
+                : nullptr)) {
+        ApplyAppTheme(hwnd_, g_dpiScale, !g_isLightTheme);
+        SaveUserPreferences();
+    }
+
+    ImGui::SameLine(0.0f, gap);
+    if (RenderIconButton(
+            "###SbAboutBtn",
+            AppIcon::Info,
+            ImVec2(iconBtnW, quickRowH),
+            isAppForeground
+                ? hdm::Tr("О программе DriverLoom (F1)", "Про програму DriverLoom (F1)", "About DriverLoom (F1)")
+                : nullptr,
+            hasUpdate)) {
+        openAboutPopupNextFrame_ = true;
+        aboutModalOpen_ = true;
+    }
+}
+
+void DriverLoomApp::RenderSettingsTab() {
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const bool isAppForeground = (GetForegroundWindow() == hwnd_);
+
+    RenderPageHeader(
+        hdm::Tr("Настройки", "Налаштування", "Settings"),
+        hdm::Tr(
+            "Выберите удобный режим интерфейса, тему оформления, язык и параметры безопасности.",
+            "Виберіть зручний режим інтерфейсу, тему оформлення, мову та параметри безпеки.",
+            "Choose your preferred interface mode, appearance theme, language, and safety options."));
+
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::BeginChild(
+        "##SettingsScroll",
+        ImVec2(0.0f, 0.0f),
+        ImGuiChildFlags_None,
+        ImGuiWindowFlags_None);
+    ImGui::PopStyleColor();
+
+    const float scrollGap = (ImGui::GetScrollMaxY() > 0.0f) ? std::round(12.0f * uiScale) : 0.0f;
+    const float fullW = std::max(320.0f, ImGui::GetContentRegionAvail().x - scrollGap);
+    const float gap = std::round(12.0f * uiScale);
+    const float cardPad = std::round(16.0f * uiScale);
+
+    // 1. Interface Mode Selector (Two clear visual cards)
+    {
+        PushFontSafe(g_fontSecondaryHeader);
+        ImGui::TextUnformatted(hdm::Tr("Режим интерфейса", "Режим інтерфейсу", "Interface Mode"));
+        PopFontSafe(g_fontSecondaryHeader);
+        ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
+
+        const float halfW = std::max(220.0f, (fullW - gap) * 0.5f);
+        const float modeCardH = std::round(112.0f * uiScale);
+
+        auto renderModeCard = [&](const char* id,
+                                  const char* title,
+                                  const char* badge,
+                                  const char* desc,
+                                  bool selected) -> bool {
+            const ImVec2 pMin = ImGui::GetCursorScreenPos();
+            const ImVec2 pMax(pMin.x + halfW, pMin.y + modeCardH);
+            const bool clicked = ImGui::InvisibleButton(id, ImVec2(halfW, modeCardH));
+            const bool hovered = ImGui::IsItemHovered();
+            if (hovered) {
+                ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            }
+
+            ImDrawList* dl = ImGui::GetWindowDrawList();
+            const float rnd = std::round(10.0f * uiScale);
+            const ImVec4 bg =
+                selected
+                    ? (g_isLightTheme ? ImVec4(0.92f, 0.96f, 1.00f, 1.00f)
+                                      : ImVec4(0.11f, 0.17f, 0.27f, 1.00f))
+                    : (hovered ? CardElevatedBgColor() : CardBgColor());
+            const ImVec4 brd = selected ? AccentBarColor() : PanelBorderColor();
+            dl->AddRectFilled(pMin, pMax, ImGui::ColorConvertFloat4ToU32(bg), rnd);
+            dl->AddRect(pMin, pMax, ImGui::ColorConvertFloat4ToU32(brd), rnd, 0, selected ? 2.0f : 1.0f);
+
+            const float inX = pMin.x + cardPad;
+            float curY = pMin.y + std::round(14.0f * uiScale);
+
+            // Selection radio circle
+            const float rad = std::round(7.0f * uiScale);
+            const ImVec2 radioC(inX + rad, curY + ImGui::GetTextLineHeight() * 0.5f);
+            dl->AddCircle(
+                radioC,
+                rad,
+                ImGui::ColorConvertFloat4ToU32(selected ? AccentBarColor() : MutedTextColor()),
+                20,
+                1.6f);
+            if (selected) {
+                dl->AddCircleFilled(
+                    radioC,
+                    rad * 0.52f,
+                    ImGui::ColorConvertFloat4ToU32(AccentBarColor()),
+                    16);
+            }
+
+            PushFontSafe(g_fontSecondaryHeader);
+            dl->AddText(
+                ImVec2(inX + rad * 2.0f + std::round(10.0f * uiScale), curY),
+                ImGui::ColorConvertFloat4ToU32(CardHeaderTextColor()),
+                title);
+            PopFontSafe(g_fontSecondaryHeader);
+
+            if (badge != nullptr && badge[0] != '\0') {
+                PushFontSafe(g_fontSmall);
+                const ImVec2 bs = ImGui::CalcTextSize(badge);
+                const float bpX = std::round(8.0f * uiScale);
+                const float bH = bs.y + std::round(4.0f * uiScale);
+                const ImVec2 bMin(pMax.x - cardPad - bs.x - bpX * 2.0f, curY);
+                const ImVec2 bMax(pMax.x - cardPad, curY + bH);
+                const ImVec4 ac = selected ? HealthyColor() : MutedTextColor();
+                dl->AddRectFilled(bMin, bMax, ImGui::ColorConvertFloat4ToU32(ImVec4(ac.x, ac.y, ac.z, 0.16f)), bH * 0.5f);
+                dl->AddText(
+                    ImVec2(bMin.x + bpX, bMin.y + (bH - bs.y) * 0.5f),
+                    ImGui::ColorConvertFloat4ToU32(g_isLightTheme ? ImVec4(ac.x * 0.5f, ac.y * 0.5f, ac.z * 0.5f, 1.0f) : ac),
+                    badge);
+                PopFontSafe(g_fontSmall);
+            }
+
+            curY += ImGui::GetTextLineHeight() + std::round(10.0f * uiScale);
+            PushFontSafe(g_fontSmall);
+            const float wrapW = halfW - cardPad * 2.0f;
+            dl->AddText(
+                g_fontSmall,
+                g_fontSmall != nullptr ? g_fontSmall->LegacySize : ImGui::GetFontSize(),
+                ImVec2(inX, curY),
+                ImGui::ColorConvertFloat4ToU32(MutedTextColor()),
+                desc,
+                nullptr,
+                wrapW);
+            PopFontSafe(g_fontSmall);
+            return clicked;
+        };
+
+        if (renderModeCard(
+                "##ModeCardSimple",
+                hdm::Tr("Обычный режим", "Звичайний режим", "Simple Mode"),
+                hdm::Tr("Рекомендуется", "Рекомендовано", "Recommended"),
+                hdm::Tr(
+                    "Понятный интерфейс простым языком без сложного жаргона. Перед установкой автоматически создаётся точка восстановления.",
+                    "Зрозумілий інтерфейс простою мовою без складного жаргону. Перед встановленням автоматично створюється точка відновлення.",
+                    "Clear, everyday interface without technical jargon. Automatically creates a System Restore point before updates."),
+                !g_isAdvancedMode)) {
+            if (g_isAdvancedMode) {
+                g_isAdvancedMode = false;
+                wuShowHidden_ = false;
+                wuRestoreBefore_ = true;
+                compRestoreBefore_ = true;
+                SaveUserPreferences();
+            }
+        }
+        ImGui::SameLine(0.0f, gap);
+        if (renderModeCard(
+                "##ModeCardExpert",
+                hdm::Tr("Режим эксперта", "Режим експерта", "Expert Mode"),
+                g_isAdvancedMode ? hdm::Tr("Активен", "Активний", "Active") : "",
+                hdm::Tr(
+                    "Полный доступ: Hardware ID, установка .inf, очистка DriverStore, управление PnP, службы Windows, SFC/DISM и снимок До/После.",
+                    "Повний доступ: Hardware ID, встановлення .inf, очищення DriverStore, керування PnP, служби Windows, SFC/DISM і знімок До/Після.",
+                    "Full power tools: Hardware IDs, manual .inf install, DriverStore cleanup, PnP control, Services, SFC/DISM, and Before/After diff."),
+                g_isAdvancedMode)) {
+            if (!g_isAdvancedMode) {
+                g_isAdvancedMode = true;
+                SaveUserPreferences();
+            }
+        }
+    }
+
+    ImGui::Dummy(ImVec2(0.0f, std::round(12.0f * uiScale)));
+
+    // 2. Appearance & Language Card
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(cardPad, std::round(14.0f * uiScale)));
+    ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
+    ImGui::BeginChild(
+        "##SettingsAppearCard",
+        ImVec2(fullW, 0.0f),
+        ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY,
+        ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleColor();
+    {
+        RenderSecondaryCardHeader(hdm::Tr("Оформление и язык", "Оформлення та мова", "Appearance & Language"));
+        ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
+
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", hdm::Tr("Тема оформления:", "Тема оформлення:", "Color Theme:"));
+        ImGui::SameLine(0.0f, 12.0f * uiScale);
+        if (RenderPillButton(hdm::Tr("Тёмная###SetDark", "Темна###SetDark", "Dark###SetDark"), !g_isLightTheme)) {
+            if (g_isLightTheme) {
+                ApplyAppTheme(hwnd_, g_dpiScale, false);
+                SaveUserPreferences();
+            }
+        }
+        ImGui::SameLine();
+        if (RenderPillButton(hdm::Tr("Светлая###SetLight", "Світла###SetLight", "Light###SetLight"), g_isLightTheme)) {
+            if (!g_isLightTheme) {
+                ApplyAppTheme(hwnd_, g_dpiScale, true);
+                SaveUserPreferences();
+            }
+        }
+
+        ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", hdm::Tr("Язык интерфейса:", "Мова інтерфейсу:", "Language:"));
+        ImGui::SameLine(0.0f, 12.0f * uiScale);
+        const hdm::Lang curLang = hdm::GetLang();
+        if (RenderPillButton("Русский###SetRu", curLang == hdm::Lang::Ru)) {
+            hdm::SetLang(hdm::Lang::Ru);
+            SaveUserPreferences();
+        }
+        ImGui::SameLine();
+        if (RenderPillButton("Українська###SetUk", curLang == hdm::Lang::Uk)) {
+            hdm::SetLang(hdm::Lang::Uk);
+            SaveUserPreferences();
+        }
+        ImGui::SameLine();
+        if (RenderPillButton("English###SetEn", curLang == hdm::Lang::En)) {
+            hdm::SetLang(hdm::Lang::En);
+            SaveUserPreferences();
+        }
+
+        ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
+        if (ImGui::Checkbox(
+                hdm::Tr(
+                    "Всегда держать журнал событий раскрытым внизу###SetPinLog",
+                    "Завжди тримати журнал подій розгорнутим унизу###SetPinLog",
+                    "Keep Event Log drawer expanded at the bottom###SetPinLog"),
+                &g_pinLogPanel)) {
+            logPanelExpanded_ = g_pinLogPanel;
+            SaveUserPreferences();
+        }
+        if (ImGui::Checkbox(
+                hdm::Tr(
+                    "Автоматически проверять обновления DriverLoom при запуске###SetAutoUpd",
+                    "Автоматично перевіряти оновлення DriverLoom при запуску###SetAutoUpd",
+                    "Automatically check for DriverLoom updates on startup###SetAutoUpd"),
+                &g_autoCheckAppUpdates)) {
+            SaveUserPreferences();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+
+    ImGui::Dummy(ImVec2(0.0f, std::round(12.0f * uiScale)));
+
+    // 3. Privileges & Protection Card
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(cardPad, std::round(14.0f * uiScale)));
+    ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
+    ImGui::BeginChild(
+        "##SettingsSecCard",
+        ImVec2(fullW, 0.0f),
+        ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY,
+        ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleColor();
+    {
+        RenderSecondaryCardHeader(hdm::Tr(
+            "Права доступа и точка восстановления",
+            "Права доступу та точка відновлення",
+            "Privileges & System Protection"));
+        ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
+
+        if (isElevated_) {
+            RenderStatusBadge(
+                HealthyColor(),
+                hdm::Tr(
+                    "Запущено с правами администратора",
+                    "Запущено з правами адміністратора",
+                    "Running as Administrator"),
+                false);
+        } else {
+            RenderStatusBadge(
+                InfoAccentColor(),
+                hdm::Tr(
+                    "Обычный режим — права администратора запрашиваются только при установке",
+                    "Звичайний режим — права адміністратора запитуються лише під час встановлення",
+                    "Standard mode — Administrator rights are requested only when installing"),
+                false);
+        }
+
+        ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
+        if (!isElevated_) {
+            if (RenderSecondaryButton(hdm::Tr(
+                    "Перезапустить как администратор###SetElevBtn",
+                    "Перезапустити як адміністратор###SetElevBtn",
+                    "Restart as Administrator###SetElevBtn"))) {
+                const hdm::ElevatedRunResult run = hdm::ExecuteElevatedSelf(L"", false);
+                if (run.launched) {
+                    exitRequested_ = true;
+                } else if (run.launchError != ERROR_CANCELLED) {
+                    logBuffer_.Push(
+                        hdm::LogLevel::Error,
+                        std::string(hdm::Tr(
+                            "Не удалось повысить права: ",
+                            "Не вдалося підвищити права: ",
+                            "Failed to elevate privileges: ")) +
+                            hdm::FormatWin32Error(run.launchError));
+                }
+            }
+            ImGui::SameLine();
+        }
+        ImGui::BeginDisabled(systemRestore_.IsBusy());
+        if (RenderSecondaryButton(
+                systemRestore_.IsBusy()
+                    ? hdm::Tr("Создание точки восстановления...###SetSrBtn", "Створення точки відновлення...###SetSrBtn", "Creating restore point...###SetSrBtn")
+                    : hdm::Tr("Создать точку восстановления сейчас###SetSrBtn", "Створити точку відновлення зараз###SetSrBtn", "Create Restore Point Now###SetSrBtn"))) {
+            systemRestore_.CreateRestorePointAsync(
+                hdm::Tr(
+                    "DriverLoom (ручная точка восстановления)",
+                    "DriverLoom (ручна точка відновлення)",
+                    "DriverLoom (manual restore point)"),
+                MakeLogger(),
+                [this](bool ok, const std::string&) {
+                    if (ok && !diagnostics_.IsBusy()) {
+                        diagnostics_.StartScanAsync(devicesCache_, nullptr);
+                    }
+                });
+        }
+        ImGui::EndDisabled();
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+
+    ImGui::Dummy(ImVec2(0.0f, std::round(12.0f * uiScale)));
+
+    // 4. About & Updates Card
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(cardPad, std::round(14.0f * uiScale)));
+    ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
+    ImGui::BeginChild(
+        "##SettingsAboutCard",
+        ImVec2(fullW, 0.0f),
+        ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY,
+        ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleColor();
+    {
+        RenderSecondaryCardHeader(
+            hdm::Tr("О программе DriverLoom", "Про програму DriverLoom", "About DriverLoom"),
+            "v1.0.0 • MIT License");
+        ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
+        ImGui::TextWrapped(
+            "%s",
+            hdm::Tr(
+                "Безопасный нативный менеджер драйверов, игровых библиотек и диагностики Windows 10/11. Автор: Arvexer.",
+                "Безпечний нативний менеджер драйверів, ігрових бібліотек і діагностики Windows 10/11. Автор: Arvexer.",
+                "Safe native driver, gaming runtime, and Windows 10/11 diagnostics manager. Author: Arvexer."));
+        ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
+
+        if (RenderPrimaryButton(hdm::Tr("Открыть GitHub###SetGh", "Відкрити GitHub###SetGh", "Open GitHub###SetGh"))) {
+            OpenUrlInBrowser("https://github.com/Arvexer/DriverLoom");
+        }
+        ImGui::SameLine();
+        ImGui::BeginDisabled(checkingAppUpdate_.load());
+        if (RenderSecondaryButton(hdm::Tr(
+                "Проверить обновления###SetChkUpd",
+                "Перевірити оновлення###SetChkUpd",
+                "Check for Updates###SetChkUpd"))) {
+            StartAppUpdateCheckAsync(true);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (RenderSecondaryButton(hdm::Tr(
+                "Сообщить о проблеме###SetIss",
+                "Повідомити про проблему###SetIss",
+                "Report Issue###SetIss"))) {
+            OpenUrlInBrowser("https://github.com/Arvexer/DriverLoom/issues");
+        }
+        ImGui::SameLine();
+        if (RenderSecondaryButton(hdm::Tr(
+                "Поддержать (Ko-fi)###SetKofi",
+                "Підтримати (Ko-fi)###SetKofi",
+                "Support (Ko-fi)###SetKofi"))) {
+            OpenUrlInBrowser("https://ko-fi.com/arvexer");
+        }
+        if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
+            ImGui::SetTooltip("https://ko-fi.com/arvexer");
+        }
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleVar();
+
+    (void)style;
+    ImGui::EndChild(); // ##SettingsScroll
 }
 
 bool DriverLoomApp::IsInitialScanSettled() const noexcept {
@@ -208,6 +844,7 @@ bool DriverLoomApp::IsInitialScanSettled() const noexcept {
            !componentsScanner_.IsCheckingOnline() &&
            !diagnostics_.IsScanning() && !localInstaller_.IsScanningStore();
 }
+
 void DriverLoomApp::ConfigureCaptureState(
     int tab,
     int diagSec,
@@ -220,10 +857,10 @@ void DriverLoomApp::ConfigureCaptureState(
         ApplyAppTheme(hwnd_, g_dpiScale, lightTheme);
     }
     activeTabIndex_ = tab;
-    pendingInitialTab_ = tab;
     diagSectionIndex_ = diagSec;
     localSectionIndex_ = localSec;
     pendingSelectDeviceRow_ = selectDevRow;
+    logPanelExpanded_ = false;
     if (selectDevRow < 0) {
         selectedDeviceInstanceId_.clear();
     }
@@ -263,8 +900,7 @@ std::string DriverLoomApp::FormatSnapshotEntrySummary(
 }
 
 void DriverLoomApp::LoadBaselineSnapshot() {
-    snapshotLoadedFromReg_ =
-        LoadBaselineSnapshotFromRegistry(baselineTimestamp_, baselineEntries_);
+    (void)LoadBaselineSnapshotFromRegistry(baselineTimestamp_, baselineEntries_);
 }
 
 void DriverLoomApp::CaptureCurrentAsBaseline(bool logNotification) {
@@ -286,7 +922,6 @@ void DriverLoomApp::CaptureCurrentAsBaseline(bool logNotification) {
         e.health = static_cast<int>(d.health);
         baselineEntries_.push_back(std::move(e));
     }
-    snapshotLoadedFromReg_ = true;
     SaveBaselineSnapshotToRegistry(baselineTimestamp_, baselineEntries_);
     RebuildSnapshotDiff();
 
@@ -334,7 +969,6 @@ void DriverLoomApp::RebuildSnapshotDiff() {
         row.instanceId = cur.instanceId;
         row.name = cur.name;
         row.deviceClass = cur.deviceClass;
-        row.canRollback = cur.hasDriver;
         row.afterSummary = FormatSnapshotEntrySummary(
             cur.driverVersion, cur.driverDate, cur.infName, cur.statusText);
 
@@ -392,8 +1026,10 @@ void DriverLoomApp::RebuildSnapshotDiff() {
         row.deviceClass = base.deviceClass;
         row.beforeSummary = FormatSnapshotEntrySummary(
             base.driverVersion, base.driverDate, base.infName, base.statusText);
-        row.afterSummary = hdm::Tr("Устройство удалено / отключено", "Пристрій видалено / відключено", "Device removed / disconnected");
-        row.canRollback = false;
+        row.afterSummary = hdm::Tr(
+            "Устройство удалено / отключено",
+            "Пристрій видалено / відключено",
+            "Device removed / disconnected");
         ++snapshotChangedCount_;
         snapshotDiffRows_.push_back(std::move(row));
     }
@@ -429,10 +1065,16 @@ void DriverLoomApp::SyncScannerSnapshots() {
         lastDeviceGen_ = devGen;
         totalDevicesCount_ = devicesCache_.size();
         problemDevicesCount_ = 0;
+        userRelevantIssueCount_ = 0;
         monitorDevicesCount_ = 0;
         peripheralDevicesCount_ = 0;
         for (const auto& d : devicesCache_) {
-            if (d.health != hdm::DeviceHealth::Ok) ++problemDevicesCount_;
+            if (d.health != hdm::DeviceHealth::Ok || d.isGenericMonitorDriver) {
+                ++problemDevicesCount_;
+            }
+            if (IsUserRelevantDeviceIssue(d)) {
+                ++userRelevantIssueCount_;
+            }
             if (d.category == hdm::DeviceCategory::Monitor) ++monitorDevicesCount_;
             if (d.category == hdm::DeviceCategory::Peripheral) ++peripheralDevicesCount_;
         }
@@ -444,7 +1086,6 @@ void DriverLoomApp::SyncScannerSnapshots() {
             RebuildSnapshotDiff();
         }
 
-        // Automatically refresh gaming runtimes / peripheral software when device list updates.
         if (!componentsScanner_.IsScanning() && !componentsScanner_.IsInstalling()) {
             componentsScanner_.StartLocalScanAsync(devicesCache_, MakeLogger());
         }
@@ -460,6 +1101,22 @@ void DriverLoomApp::SyncScannerSnapshots() {
     if (compGen != lastComponentsGen_) {
         componentsCache_ = componentsScanner_.GetItemsSnapshot();
         lastComponentsGen_ = compGen;
+        actionableComponentsCount_ = 0;
+        gamingComponentsCount_ = 0;
+        peripheralComponentsCount_ = 0;
+        gpuMonitorComponentsCount_ = 0;
+        for (const auto& c : componentsCache_) {
+            if (IsComponentRecommendedAction(c)) {
+                ++actionableComponentsCount_;
+            }
+            if (c.category == hdm::ComponentCategory::GamingRuntime) {
+                ++gamingComponentsCount_;
+            } else if (IsOptionalVendorSoftware(c)) {
+                ++peripheralComponentsCount_;
+            } else {
+                ++gpuMonitorComponentsCount_;
+            }
+        }
         compViewDirty_ = true;
     }
 
@@ -496,455 +1153,18 @@ void DriverLoomApp::SyncScannerSnapshots() {
     }
 }
 
-void DriverLoomApp::RenderHeaderBar() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
-    const ImGuiStyle& style = ImGui::GetStyle();
-    const bool isAppForeground = (GetForegroundWindow() == hwnd_);
-    const float padY = std::round(9.0f * uiScale);
-    const float baseFrameH = ImGui::GetFrameHeight();
-    const float hdrGap = std::round(8.0f * uiScale);
-    const float minSectionGap = 12.0f * uiScale;
-    const float innerAvailW = std::max(280.0f, ImGui::GetContentRegionAvail().x - style.WindowPadding.x * 2.0f);
-
-    AppUpdateState updState = AppUpdateState::Idle;
-    std::string latestVer;
-    {
-        std::lock_guard<std::mutex> lock(appUpdateMutex_);
-        updState = appUpdateState_;
-        latestVer = appLatestVersion_;
-    }
-    const bool hasUpdate =
-        (updState == AppUpdateState::UpdateAvailable && !latestVer.empty());
-    char aboutLabel[112]{};
-    float aboutBtnW = baseFrameH;
-    if (hasUpdate) {
-        char aboutMeasure[96];
-        std::snprintf(
-            aboutMeasure,
-            sizeof(aboutMeasure),
-            hdm::Tr("Обновление v%s", "Оновлення v%s", "Update v%s"),
-            latestVer.c_str());
-        std::snprintf(aboutLabel, sizeof(aboutLabel), "%s###AboutVerBtn", aboutMeasure);
-        aboutBtnW = CalcButtonWidth(aboutMeasure) + 6.0f * uiScale;
-    } else {
-        std::snprintf(aboutLabel, sizeof(aboutLabel), "###AboutVerBtn");
-    }
-
-    const char* srLabel = systemRestore_.IsBusy()
-                              ? hdm::Tr(
-                                    "Создание точки восстановления...###SrBtn",
-                                    "Створення точки відновлення...###SrBtn",
-                                    "Creating restore point...###SrBtn")
-                              : hdm::Tr(
-                                    "Точка восстановления###SrBtn",
-                                    "Точка відновлення###SrBtn",
-                                    "Restore Point###SrBtn");
-    const char* srMeasure = systemRestore_.IsBusy()
-                                ? hdm::Tr(
-                                      "Создание точки восстановления...",
-                                      "Створення точки відновлення...",
-                                      "Creating restore point...")
-                                : hdm::Tr(
-                                      "Точка восстановления",
-                                      "Точка відновлення",
-                                      "Restore Point");
-    const char* srShortLabel = systemRestore_.IsBusy()
-                                   ? hdm::Tr("Точка...###SrBtn", "Точка...###SrBtn", "Restore...###SrBtn")
-                                   : hdm::Tr("Точка восст.###SrBtn", "Точка відн.###SrBtn", "Restore###SrBtn");
-    const char* srShortMeasure = systemRestore_.IsBusy()
-                                     ? hdm::Tr("Точка...", "Точка...", "Restore...")
-                                     : hdm::Tr("Точка восст.", "Точка відн.", "Restore");
-    const float restoreFullW = CalcButtonWidth(srMeasure) + 6.0f * uiScale;
-    const float restoreShortW = CalcButtonWidth(srShortMeasure) + 4.0f * uiScale;
-
-    struct LangOption {
-        hdm::Lang lang;
-        const char* label;
-        const char* shortLabel;
-    };
-    static constexpr LangOption kLangOptions[] = {
-        {hdm::Lang::Ru, "RU — Русский", "RU"},
-        {hdm::Lang::Uk, "UA — Українська", "UA"},
-        {hdm::Lang::En, "EN — English", "EN"},
-    };
-    const hdm::Lang curLang = hdm::GetLang();
-    const char* curLangLabel = kLangOptions[0].label;
-    const char* curLangShortLabel = kLangOptions[0].shortLabel;
-    float maxLangLabelW = 0.0f;
-    float maxLangShortW = 0.0f;
-    for (const auto& opt : kLangOptions) {
-        maxLangLabelW = std::max(maxLangLabelW, ImGui::CalcTextSize(opt.label).x);
-        maxLangShortW = std::max(maxLangShortW, ImGui::CalcTextSize(opt.shortLabel).x);
-        if (opt.lang == curLang) {
-            curLangLabel = opt.label;
-            curLangShortLabel = opt.shortLabel;
-        }
-    }
-    const float fullLangComboW =
-        maxLangLabelW + style.FramePadding.x * 2.0f + baseFrameH + 6.0f * uiScale;
-    const float shortLangComboW =
-        maxLangShortW + style.FramePadding.x * 2.0f + baseFrameH + 4.0f * uiScale;
-
-    const float fullModeBtnW = std::max(
-        CalcButtonWidth(hdm::Tr("Режим: Обычный", "Режим: Звичайний", "Mode: Standard")),
-        CalcButtonWidth(hdm::Tr("Режим: Расширенный", "Режим: Розширений", "Mode: Advanced")));
-    const float shortModeBtnW = std::max(
-        CalcButtonWidth(hdm::Tr("Обычный", "Звичайний", "Standard")),
-        CalcButtonWidth(hdm::Tr("Расширенный", "Розширений", "Advanced")));
-    const float fullThemeBtnW = std::max(
-        CalcButtonWidth(hdm::Tr("Тема: Светлая", "Тема: Світла", "Theme: Light")),
-        CalcButtonWidth(hdm::Tr("Тема: Тёмная", "Тема: Темна", "Theme: Dark")));
-    const float shortThemeBtnW = std::max(
-        CalcButtonWidth(hdm::Tr("Светлая", "Світла", "Light")),
-        CalcButtonWidth(hdm::Tr("Тёмная", "Темна", "Dark")));
-
-    // Measure left group width before creating ##HeaderBar so we know if 2 rows are needed.
-    PushFontSafe(g_fontPrimaryHeader);
-    const ImVec2 titleSize = ImGui::CalcTextSize("DriverLoom");
-    PopFontSafe(g_fontPrimaryHeader);
-    const float divGap = std::round(6.0f * uiScale);
-    const char* privText =
-        isElevated_ ? hdm::Tr("Администратор", "Адміністратор", "Administrator")
-                    : hdm::Tr("Без прав админа", "Без прав адміна", "Standard user");
-    const float textH = ImGui::GetTextLineHeight();
-    const float privBadgeW =
-        std::round(8.0f * uiScale) + std::max(3.2f, textH * 0.21f) * 2.0f +
-        std::round(6.0f * uiScale) + ImGui::CalcTextSize(privText).x + std::round(9.0f * uiScale);
-    const float leftStaticW =
-        titleSize.x + (2.0f + divGap * 2.0f) + (2.0f * uiScale) + ImGui::CalcTextSize("v1.0.0").x +
-        (12.0f * uiScale) + privBadgeW;
-    const float fullElevBtnW =
-        isElevated_ ? 0.0f
-                    : CalcButtonWidth(hdm::Tr(
-                          "Перезапустить как администратор",
-                          "Перезапустити як адміністратор",
-                          "Restart as Administrator"));
-    const float shortElevBtnW =
-        isElevated_ ? 0.0f : CalcButtonWidth(hdm::Tr("Админ-режим", "Права адміна", "Run as Admin"));
-    const float leftFullW = leftStaticW + (isElevated_ ? 0.0f : (10.0f * uiScale + fullElevBtnW));
-    const float leftShortW = leftStaticW + (isElevated_ ? 0.0f : (8.0f * uiScale + shortElevBtnW));
-
-    const float rightFullW =
-        fullModeBtnW + hdrGap + fullThemeBtnW + hdrGap + fullLangComboW + hdrGap + restoreFullW + hdrGap + aboutBtnW;
-    const float rightShortThemeW =
-        fullModeBtnW + hdrGap + shortThemeBtnW + hdrGap + fullLangComboW + hdrGap + restoreFullW + hdrGap + aboutBtnW;
-    const float rightShortModeThemeW =
-        shortModeBtnW + hdrGap + shortThemeBtnW + hdrGap + fullLangComboW + hdrGap + restoreFullW + hdrGap + aboutBtnW;
-    const float rightShortLangW =
-        shortModeBtnW + hdrGap + shortThemeBtnW + hdrGap + shortLangComboW + hdrGap + restoreFullW + hdrGap + aboutBtnW;
-    const float rightMiniW =
-        shortModeBtnW + hdrGap + shortThemeBtnW + hdrGap + shortLangComboW + hdrGap + restoreShortW + hdrGap + aboutBtnW;
-
-    bool twoRows = false;
-    bool useShortElev = false;
-    bool useShortMode = false;
-    bool useShortTheme = false;
-    bool useShortLang = false;
-    bool useShortRestore = false;
-
-    if (leftFullW + minSectionGap + rightFullW <= innerAvailW) {
-        // Fits comfortably on one row with full labels
-    } else if (leftFullW + minSectionGap + rightShortThemeW <= innerAvailW) {
-        useShortTheme = true;
-    } else if (leftFullW + minSectionGap + rightShortModeThemeW <= innerAvailW) {
-        useShortTheme = true;
-        useShortMode = true;
-    } else if (leftShortW + minSectionGap + rightShortLangW <= innerAvailW) {
-        useShortElev = !isElevated_;
-        useShortTheme = true;
-        useShortMode = true;
-        useShortLang = true;
-    } else if (isElevated_ && leftShortW + minSectionGap + rightMiniW <= innerAvailW) {
-        useShortTheme = true;
-        useShortMode = true;
-        useShortLang = true;
-        useShortRestore = true;
-    } else {
-        twoRows = true;
-        useShortElev = (!isElevated_ && leftFullW > innerAvailW);
-        if (rightFullW <= innerAvailW) {
-            // Row 2 fits with full labels
-        } else if (rightShortThemeW <= innerAvailW) {
-            useShortTheme = true;
-        } else if (rightShortModeThemeW <= innerAvailW) {
-            useShortTheme = true;
-            useShortMode = true;
-        } else if (rightShortLangW <= innerAvailW) {
-            useShortTheme = true;
-            useShortMode = true;
-            useShortLang = true;
-        } else {
-            useShortTheme = true;
-            useShortMode = true;
-            useShortLang = true;
-            useShortRestore = true;
-        }
-    }
-
-    const float headerHeight =
-        twoRows ? (baseFrameH * 2.0f + style.ItemSpacing.y + padY * 2.0f)
-                : (baseFrameH + padY * 2.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.WindowPadding.x, padY));
-    ImGui::PushStyleColor(
-        ImGuiCol_Border,
-        g_isLightTheme ? ImVec4(0.70f, 0.77f, 0.87f, 0.95f) : ImVec4(0.24f, 0.36f, 0.54f, 0.95f));
-    ImGui::BeginChild(
-        "##HeaderBar",
-        ImVec2(0.0f, headerHeight),
-        true,
-        ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-    ImGui::PopStyleColor();
-
-    {
-        PushFontSafe(g_fontPrimaryHeader);
-        const ImVec2 startScreen = ImGui::GetCursorScreenPos();
-        const float yOff = std::max(0.0f, (baseFrameH - titleSize.y) * 0.5f);
-        const ImVec4 titleCol = g_isLightTheme
-                                    ? ImVec4(0.08f, 0.34f, 0.74f, 1.00f)
-                                    : ImVec4(0.50f, 0.78f, 1.00f, 1.00f);
-        ImGui::GetWindowDrawList()->AddText(
-            ImVec2(startScreen.x, startScreen.y + yOff),
-            ImGui::ColorConvertFloat4ToU32(titleCol),
-            "DriverLoom");
-        ImGui::Dummy(ImVec2(titleSize.x, baseFrameH));
-        PopFontSafe(g_fontPrimaryHeader);
-    }
-    RenderVerticalDivider(6.0f);
-    ImGui::SameLine(0.0f, 2.0f * uiScale);
-    ImGui::AlignTextToFramePadding();
-    ImGui::TextDisabled("v1.0.0");
-
-    ImGui::SameLine(0.0f, 12.0f * uiScale);
-    if (isElevated_) {
-        RenderStatusBadge(ImVec4(0.20f, 0.83f, 0.60f, 1.00f), privText, true);
-    } else {
-        RenderStatusBadge(ImVec4(0.98f, 0.75f, 0.14f, 1.00f), privText, true);
-        ImGui::SameLine(0.0f, useShortElev ? (8.0f * uiScale) : (10.0f * uiScale));
-        const char* elevLbl =
-            useShortElev
-                ? hdm::Tr("Админ-режим###ElevBtn", "Права адміна###ElevBtn", "Run as Admin###ElevBtn")
-                : hdm::Tr(
-                      "Перезапустить как администратор###ElevBtn",
-                      "Перезапустити як адміністратор###ElevBtn",
-                      "Restart as Administrator###ElevBtn");
-        if (RenderSecondaryButton(elevLbl)) {
-            const hdm::ElevatedRunResult run = hdm::ExecuteElevatedSelf(L"", false);
-            if (run.launched) {
-                exitRequested_ = true;
-            } else if (run.launchError != ERROR_CANCELLED) {
-                logBuffer_.Push(
-                    hdm::LogLevel::Error,
-                    std::string(hdm::Tr(
-                        "Не удалось повысить права: ",
-                        "Не вдалося підвищити права: ",
-                        "Failed to elevate privileges: ")) +
-                        hdm::FormatWin32Error(run.launchError));
-            }
-        }
-    }
-
-    const float modeBtnW = useShortMode ? shortModeBtnW : fullModeBtnW;
-    const char* modeBtnLbl =
-        useShortMode
-            ? (g_isAdvancedMode
-                   ? hdm::Tr("Расширенный###ModeBtn", "Розширений###ModeBtn", "Advanced###ModeBtn")
-                   : hdm::Tr("Обычный###ModeBtn", "Звичайний###ModeBtn", "Standard###ModeBtn"))
-            : (g_isAdvancedMode
-                   ? hdm::Tr("Режим: Расширенный###ModeBtn", "Режим: Розширений###ModeBtn", "Mode: Advanced###ModeBtn")
-                   : hdm::Tr("Режим: Обычный###ModeBtn", "Режим: Звичайний###ModeBtn", "Mode: Standard###ModeBtn"));
-
-    const float themeBtnW = useShortTheme ? shortThemeBtnW : fullThemeBtnW;
-    const char* themeBtnLbl =
-        useShortTheme
-            ? (g_isLightTheme
-                   ? hdm::Tr("Светлая###ThemeBtn", "Світла###ThemeBtn", "Light###ThemeBtn")
-                   : hdm::Tr("Тёмная###ThemeBtn", "Темна###ThemeBtn", "Dark###ThemeBtn"))
-            : (g_isLightTheme
-                   ? hdm::Tr("Тема: Светлая###ThemeBtn", "Тема: Світла###ThemeBtn", "Theme: Light###ThemeBtn")
-                   : hdm::Tr("Тема: Тёмная###ThemeBtn", "Тема: Темна###ThemeBtn", "Theme: Dark###ThemeBtn"));
-
-    const float langComboW = useShortLang ? shortLangComboW : fullLangComboW;
-    const char* shownLangPreview = useShortLang ? curLangShortLabel : curLangLabel;
-    const float restoreBtnW = useShortRestore ? restoreShortW : restoreFullW;
-    const char* shownSrLbl = useShortRestore ? srShortLabel : srLabel;
-
-    const float rightGroupW =
-        modeBtnW + hdrGap + themeBtnW + hdrGap + langComboW + hdrGap + restoreBtnW + hdrGap + aboutBtnW;
-    const float winContentMaxX = ImGui::GetWindowContentRegionMax().x;
-    if (!twoRows) {
-        const float prevItemEndX = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
-        const float rightX = winContentMaxX - rightGroupW;
-        if (rightX > prevItemEndX + minSectionGap) {
-            ImGui::SameLine(rightX);
-        } else {
-            ImGui::SameLine(0.0f, hdrGap);
-        }
-    } else {
-        const float rightX = winContentMaxX - rightGroupW;
-        if (rightX > style.WindowPadding.x) {
-            ImGui::SetCursorPosX(rightX);
-        }
-    }
-
-    if (RenderPillButton(modeBtnLbl, g_isAdvancedMode, ImVec2(modeBtnW, 0.0f))) {
-        g_isAdvancedMode = !g_isAdvancedMode;
-        if (!g_isAdvancedMode) {
-            if (activeTabIndex_ == 3) {
-                pendingInitialTab_ = 0;
-            }
-            wuShowHidden_ = false;
-            wuRestoreBefore_ = true;
-            compRestoreBefore_ = true;
-        }
-        SaveUserPreferences();
-        logBuffer_.Push(
-            hdm::LogLevel::Info,
-            g_isAdvancedMode
-                ? hdm::Tr(
-                      "Режим интерфейса переключён: Расширенный (полный доступ к PnP, DriverStore и скрытию обновлений).",
-                      "Режим інтерфейсу перемкнуто: Розширений (повний доступ до PnP, DriverStore і приховування оновлень).",
-                      "Interface mode switched: Advanced (full access to PnP, DriverStore, and update hiding).")
-                : hdm::Tr(
-                      "Режим интерфейса переключён: Обычный (безопасный режим).",
-                      "Режим інтерфейсу перемкнуто: Звичайний (безпечний режим).",
-                      "Interface mode switched: Standard (safe mode)."));
-    }
-    if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-        ImGui::SetTooltip(
-            "%s",
-            hdm::Tr(
-                "Обычный режим: безопасная работа, скрыты опасные действия PnP и ручное управление DriverStore/.inf.\n"
-                "Расширенный режим: полный доступ ко всем вкладкам, Hardware ID, откату/удалению устройств и скрытию обновлений.",
-                "Звичайний режим: безпечна робота, приховано небезпечні дії PnP та ручне керування DriverStore/.inf.\n"
-                "Розширений режим: повний доступ до всіх вкладок, Hardware ID, відкоту/видалення пристроїв і приховування оновлень.",
-                "Standard mode: safe daily use with destructive PnP actions and DriverStore/.inf hidden.\n"
-                "Advanced mode: full access to all tabs, Hardware IDs, device rollback/uninstall, and update hiding."));
-    }
-
-    ImGui::SameLine(0.0f, hdrGap);
-    if (RenderSecondaryButton(themeBtnLbl, ImVec2(themeBtnW, 0.0f))) {
-        ApplyAppTheme(hwnd_, g_dpiScale, !g_isLightTheme);
-        SaveUserPreferences();
-    }
-    if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-        ImGui::SetTooltip(
-            "%s",
-            hdm::Tr(
-                "Переключить оформление: тёмная / светлая тема",
-                "Перемкнути оформлення: темна / світла тема",
-                "Switch appearance: Dark / Light theme"));
-    }
-
-    ImGui::SameLine(0.0f, hdrGap);
-    ImGui::SetNextItemWidth(langComboW);
-    if (g_isLightTheme) {
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.68f, 0.75f, 0.86f, 0.95f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.94f, 0.96f, 0.99f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.88f, 0.91f, 0.97f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.83f, 0.88f, 0.95f, 1.00f));
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Border, ImVec4(0.25f, 0.36f, 0.52f, 0.95f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(0.106f, 0.133f, 0.184f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, ImVec4(0.145f, 0.184f, 0.255f, 1.00f));
-        ImGui::PushStyleColor(ImGuiCol_FrameBgActive, ImVec4(0.169f, 0.216f, 0.298f, 1.00f));
-    }
-    if (useShortLang) {
-        ImGui::SetNextWindowSizeConstraints(ImVec2(fullLangComboW, 0.0f), ImVec2(10000.0f, 10000.0f));
-    }
-    if (ImGui::BeginCombo("##LangCombo", shownLangPreview, ImGuiComboFlags_HeightSmall)) {
-        for (const auto& opt : kLangOptions) {
-            const bool isSelected = (opt.lang == curLang);
-            if (ImGui::Selectable(opt.label, isSelected)) {
-                hdm::SetLang(opt.lang);
-                SaveUserPreferences();
-            }
-            if (isSelected) {
-                ImGui::SetItemDefaultFocus();
-            }
-        }
-        ImGui::EndCombo();
-    }
-    ImGui::PopStyleColor(4);
-
-    ImGui::SameLine(0.0f, hdrGap);
-    ImGui::BeginDisabled(systemRestore_.IsBusy());
-    if (RenderSecondaryButton(shownSrLbl, ImVec2(restoreBtnW, 0.0f))) {
-        systemRestore_.CreateRestorePointAsync(
-            hdm::Tr(
-                "DriverLoom (ручная точка восстановления)",
-                "DriverLoom (ручна точка відновлення)",
-                "DriverLoom (manual restore point)"),
-            MakeLogger(),
-            [this](bool ok, const std::string&) {
-                if (ok && !diagnostics_.IsBusy()) {
-                    diagnostics_.StartScanAsync(devicesCache_, nullptr);
-                }
-            });
-    }
-    ImGui::EndDisabled();
-
-    ImGui::SameLine(0.0f, hdrGap);
-    const bool clickedAbout = hasUpdate
-                                  ? RenderActionButton(aboutLabel, ImVec2(aboutBtnW, 0.0f), true)
-                                  : RenderSecondaryButton(aboutLabel, ImVec2(aboutBtnW, 0.0f));
-    if (!hasUpdate && ImGui::IsItemVisible()) {
-        const ImVec2 rMin = ImGui::GetItemRectMin();
-        const ImVec2 rMax = ImGui::GetItemRectMax();
-        const bool hovered = isAppForeground && ImGui::IsItemHovered();
-        const float cx = (rMin.x + rMax.x) * 0.5f;
-        const float cy = (rMin.y + rMax.y) * 0.5f;
-        const float r = std::max(6.5f, std::floor((rMax.y - rMin.y) * 0.30f));
-        const ImVec4 colVec =
-            hovered
-                ? AccentTextColor()
-                : (g_isLightTheme ? ImVec4(0.18f, 0.32f, 0.54f, 1.00f)
-                                  : ImVec4(0.74f, 0.85f, 0.98f, 1.00f));
-        const ImU32 iconCol = ImGui::ColorConvertFloat4ToU32(colVec);
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddCircle(ImVec2(cx, cy), r, iconCol, 24, std::max(1.3f, 1.4f * uiScale));
-        dl->AddCircleFilled(
-            ImVec2(cx, cy - r * 0.38f),
-            std::max(1.1f, r * 0.145f),
-            iconCol,
-            12);
-        dl->AddLine(
-            ImVec2(cx, cy - r * 0.08f),
-            ImVec2(cx, cy + r * 0.44f),
-            iconCol,
-            std::max(1.5f, 1.8f * uiScale));
-    }
-    if (clickedAbout) {
-        openAboutPopupNextFrame_ = true;
-        aboutModalOpen_ = true;
-    }
-    if (isAppForeground && ImGui::IsItemHovered()) {
-        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
-    }
-    if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-        ImGui::SetTooltip(
-            "%s",
-            hdm::Tr(
-                "О приложении DriverLoom • Автор (Arvexer), GitHub, обратная связь и проверка обновлений (F1)",
-                "Про програму DriverLoom • Автор (Arvexer), GitHub, зворотний зв'язок і перевірка оновлень (F1)",
-                "About DriverLoom • Author (Arvexer), GitHub, contact & update checker (F1)"));
-    }
-
-    ImGui::EndChild();
-    ImGui::PopStyleVar();
-}
-
 void DriverLoomApp::RenderRebootBanner() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
     const ImGuiStyle& style = ImGui::GetStyle();
-    const float padY = std::round(7.0f * uiScale);
+    const float padY = std::round(8.0f * uiScale);
     const float bannerHeight = ImGui::GetFrameHeight() + padY * 2.0f;
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(style.WindowPadding.x, padY));
     ImGui::PushStyleColor(
         ImGuiCol_ChildBg,
-        g_isLightTheme ? ImVec4(1.00f, 0.96f, 0.84f, 0.98f) : ImVec4(0.24f, 0.16f, 0.05f, 0.95f));
+        g_isLightTheme ? ImVec4(1.00f, 0.96f, 0.86f, 0.98f) : ImVec4(0.22f, 0.16f, 0.06f, 0.96f));
     ImGui::PushStyleColor(
         ImGuiCol_Border,
-        g_isLightTheme ? ImVec4(0.86f, 0.58f, 0.10f, 0.95f) : ImVec4(0.96f, 0.68f, 0.16f, 0.90f));
+        g_isLightTheme ? ImVec4(0.86f, 0.60f, 0.14f, 0.90f) : ImVec4(0.92f, 0.66f, 0.18f, 0.85f));
     ImGui::BeginChild(
         "##RebootBanner",
         ImVec2(0.0f, bannerHeight),
@@ -952,14 +1172,14 @@ void DriverLoomApp::RenderRebootBanner() {
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleColor(2);
     RenderStatusBadge(
-        ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
+        WarningColor(),
         hdm::Tr(
-            "Требуется перезагрузка Windows для завершения установки драйверов.",
-            "Потрібне перезавантаження Windows для завершення встановлення драйверів.",
-            "Windows restart is required to finish driver installation."),
+            "Перезагрузите компьютер, чтобы завершить установку драйверов.",
+            "Перезавантажте комп'ютер, щоб завершити встановлення драйверів.",
+            "Restart your PC to finish applying the installed drivers."),
         true);
-    const char* hideLabel = hdm::Tr("Скрыть###RebHide", "Приховати###RebHide", "Dismiss###RebHide");
-    const float hideW = CalcButtonWidth(hdm::Tr("Скрыть", "Приховати", "Dismiss"));
+    const char* hideLabel = hdm::Tr("Позже###RebHide", "Пізніше###RebHide", "Later###RebHide");
+    const float hideW = CalcButtonWidth(hdm::Tr("Позже", "Пізніше", "Later"));
     ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 12.0f,
                              ImGui::GetWindowContentRegionMax().x - hideW));
     if (RenderSecondaryButton(hideLabel, ImVec2(hideW, 0.0f))) {
@@ -1136,10 +1356,10 @@ void DriverLoomApp::RenderAboutModal() {
     }
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSize(
-        ImVec2(std::min(620.0f * uiScale, vp->WorkSize.x * 0.92f), 0.0f),
+        ImVec2(std::min(580.0f * uiScale, vp->WorkSize.x * 0.92f), 0.0f),
         ImGuiCond_Appearing);
 
     if (!ImGui::BeginPopupModal(
@@ -1151,16 +1371,16 @@ void DriverLoomApp::RenderAboutModal() {
 
     const ImGuiStyle& style = ImGui::GetStyle();
     {
-        PushFontSafe(g_fontPrimaryHeader);
+        PushFontSafe(g_fontMainTab);
         ImGui::TextColored(AccentTextColor(), "DriverLoom v1.0.0 (x64)");
-        PopFontSafe(g_fontPrimaryHeader);
+        PopFontSafe(g_fontMainTab);
     }
     ImGui::TextWrapped(
         "%s",
         hdm::Tr(
-            "Нативный гибридный менеджер драйверов, устройств, системных компонентов и диагностики для Windows 10/11.",
-            "Нативний гібридний менеджер драйверів, пристроїв, системних компонентів і діагностики для Windows 10/11.",
-            "Native hybrid driver, device, runtime component, and diagnostics manager for Windows 10/11."));
+            "Безопасный нативный менеджер драйверов, игровых библиотек и диагностики для Windows 10/11.",
+            "Безпечний нативний менеджер драйверів, ігрових бібліотек і діагностики для Windows 10/11.",
+            "Safe native driver, gaming runtime, and diagnostics manager for Windows 10/11."));
 
     ImGui::Spacing();
     ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
@@ -1171,10 +1391,7 @@ void DriverLoomApp::RenderAboutModal() {
         ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleColor();
     {
-        RenderSecondaryCardHeader(hdm::Tr(
-            "Автор и контакты",
-            "Автор і контакти",
-            "Author & Contact"));
+        RenderSecondaryCardHeader(hdm::Tr("Автор и контакты", "Автор і контакти", "Author & Contact"));
         ImGui::TextDisabled("%s", hdm::Tr("Автор:", "Автор:", "Author:"));
         ImGui::SameLine();
         ImGui::TextColored(AccentTextColor(), "Arvexer");
@@ -1182,24 +1399,15 @@ void DriverLoomApp::RenderAboutModal() {
         ImGui::TextDisabled("GitHub:");
         ImGui::SameLine();
         ImGui::TextUnformatted("https://github.com/Arvexer/DriverLoom");
-        if (RenderActionButton(
-                hdm::Tr("Открыть GitHub###AboutGh", "Відкрити GitHub###AboutGh", "Open GitHub###AboutGh"),
-                ImVec2(0.0f, 0.0f),
-                true)) {
+        if (RenderPrimaryButton(hdm::Tr("Открыть GitHub###AboutGh", "Відкрити GitHub###AboutGh", "Open GitHub###AboutGh"))) {
             OpenUrlInBrowser("https://github.com/Arvexer/DriverLoom");
         }
         ImGui::SameLine();
-        if (RenderSecondaryButton(hdm::Tr(
-                "Релизы###AboutRel",
-                "Релізи###AboutRel",
-                "Releases###AboutRel"))) {
+        if (RenderSecondaryButton(hdm::Tr("Релизы###AboutRel", "Релізи###AboutRel", "Releases###AboutRel"))) {
             OpenUrlInBrowser("https://github.com/Arvexer/DriverLoom/releases");
         }
         ImGui::SameLine();
-        if (RenderSecondaryButton(hdm::Tr(
-                "Сообщить о проблеме###AboutIss",
-                "Повідомити про проблему###AboutIss",
-                "Report Issue###AboutIss"))) {
+        if (RenderSecondaryButton(hdm::Tr("Сообщить о проблеме###AboutIss", "Повідомити про проблему###AboutIss", "Report Issue###AboutIss"))) {
             OpenUrlInBrowser("https://github.com/Arvexer/DriverLoom/issues");
         }
 
@@ -1207,17 +1415,11 @@ void DriverLoomApp::RenderAboutModal() {
         ImGui::TextDisabled("E-mail:");
         ImGui::SameLine();
         ImGui::TextUnformatted("arvexer.dev@proton.me");
-        if (RenderSecondaryButton(hdm::Tr(
-                "Написать письмо###AboutMail",
-                "Написати листа###AboutMail",
-                "Send E-mail###AboutMail"))) {
+        if (RenderSecondaryButton(hdm::Tr("Написать письмо###AboutMail", "Написати листа###AboutMail", "Send E-mail###AboutMail"))) {
             OpenUrlInBrowser("mailto:arvexer.dev@proton.me?subject=DriverLoom%20Feedback");
         }
         ImGui::SameLine();
-        if (RenderSecondaryButton(hdm::Tr(
-                "Копировать e-mail###AboutCopyMail",
-                "Копіювати e-mail###AboutCopyMail",
-                "Copy E-mail###AboutCopyMail"))) {
+        if (RenderSecondaryButton(hdm::Tr("Копировать e-mail###AboutCopyMail", "Копіювати e-mail###AboutCopyMail", "Copy E-mail###AboutCopyMail"))) {
             ImGui::SetClipboardText("arvexer.dev@proton.me");
             logBuffer_.Push(
                 hdm::LogLevel::Info,
@@ -1227,14 +1429,8 @@ void DriverLoomApp::RenderAboutModal() {
                     "Developer e-mail copied: arvexer.dev@proton.me"));
         }
         ImGui::SameLine();
-        if (RenderSecondaryButton(hdm::Tr(
-                "Поддержать (Ko-fi)###AboutKofi",
-                "Підтримати (Ko-fi)###AboutKofi",
-                "Support (Ko-fi)###AboutKofi"))) {
+        if (RenderSecondaryButton(hdm::Tr("Поддержать (Ko-fi)###AboutKofi", "Підтримати (Ko-fi)###AboutKofi", "Support (Ko-fi)###AboutKofi"))) {
             OpenUrlInBrowser("https://ko-fi.com/arvexer");
-        }
-        if (ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
-            ImGui::SetTooltip("https://ko-fi.com/arvexer");
         }
     }
     ImGui::EndChild();
@@ -1248,10 +1444,7 @@ void DriverLoomApp::RenderAboutModal() {
         ImGuiWindowFlags_NoScrollbar);
     ImGui::PopStyleColor();
     {
-        RenderSecondaryCardHeader(hdm::Tr(
-            "Обновления приложения",
-            "Оновлення програми",
-            "Application Updates"));
+        RenderSecondaryCardHeader(hdm::Tr("Обновления приложения", "Оновлення програми", "Application Updates"));
 
         AppUpdateState updState = AppUpdateState::Idle;
         std::string latestVer;
@@ -1264,84 +1457,39 @@ void DriverLoomApp::RenderAboutModal() {
         }
 
         if (updState == AppUpdateState::Checking) {
-            RenderStatusBadge(
-                ImVec4(0.38f, 0.68f, 0.98f, 1.00f),
-                hdm::Tr(
-                    "Проверка обновлений на GitHub...",
-                    "Перевірка оновлень на GitHub...",
-                    "Checking for updates on GitHub..."),
-                true);
+            RenderStatusBadge(InfoAccentColor(), hdm::Tr("Проверка обновлений...", "Перевірка оновлень...", "Checking for updates..."), true);
         } else if (updState == AppUpdateState::UpdateAvailable) {
             const std::string updMsg =
-                std::string(hdm::Tr(
-                    "Доступна новая версия: v",
-                    "Доступна нова версія: v",
-                    "New version available: v")) +
-                latestVer;
-            RenderStatusBadge(ImVec4(0.20f, 0.83f, 0.60f, 1.00f), updMsg.c_str(), true);
+                std::string(hdm::Tr("Доступна новая версия: v", "Доступна нова версія: v", "New version available: v")) + latestVer;
+            RenderStatusBadge(HealthyColor(), updMsg.c_str(), true);
         } else if (updState == AppUpdateState::UpToDate) {
-            RenderStatusBadge(
-                ImVec4(0.20f, 0.83f, 0.60f, 1.00f),
-                hdm::Tr(
-                    "Установлена актуальная версия (v1.0.0)",
-                    "Встановлено актуальну версію (v1.0.0)",
-                    "You have the latest version (v1.0.0)"),
-                true);
+            RenderStatusBadge(HealthyColor(), hdm::Tr("Установлена актуальная версия (v1.0.0)", "Встановлено актуальну версію (v1.0.0)", "You have the latest version (v1.0.0)"), true);
         } else if (updState == AppUpdateState::Error) {
-            RenderStatusBadge(
-                ImVec4(0.98f, 0.75f, 0.14f, 1.00f),
-                hdm::Tr(
-                    "Не удалось проверить обновления",
-                    "Не вдалося перевірити оновлення",
-                    "Failed to check for updates"),
-                true);
+            RenderStatusBadge(WarningColor(), hdm::Tr("Не удалось проверить обновления", "Не вдалося перевірити оновлення", "Failed to check for updates"), true);
         } else {
-            RenderStatusBadge(
-                ImVec4(0.58f, 0.68f, 0.86f, 1.00f),
-                hdm::Tr(
-                    "Автопроверка отключена (текущая: v1.0.0)",
-                    "Автоперевірку вимкнено (поточна: v1.0.0)",
-                    "Auto-check disabled (current: v1.0.0)"),
-                true);
+            RenderStatusBadge(MutedTextColor(), hdm::Tr("Текущая версия: v1.0.0", "Поточна версія: v1.0.0", "Current version: v1.0.0"), true);
         }
 
         const bool busyCheck = checkingAppUpdate_.load();
         ImGui::BeginDisabled(busyCheck);
-        if (RenderSecondaryButton(hdm::Tr(
-                "Проверить обновления###AboutChkUpd",
-                "Перевірити оновлення###AboutChkUpd",
-                "Check for Updates###AboutChkUpd"))) {
+        if (RenderSecondaryButton(hdm::Tr("Проверить обновления###AboutChkUpd", "Перевірити оновлення###AboutChkUpd", "Check for Updates###AboutChkUpd"))) {
             StartAppUpdateCheckAsync(true);
         }
         ImGui::EndDisabled();
 
         if (updState == AppUpdateState::UpdateAvailable) {
             ImGui::SameLine();
-            if (RenderActionButton(
-                    hdm::Tr(
-                        "Скачать новую версию###AboutDlUpd",
-                        "Завантажити нову версію###AboutDlUpd",
-                        "Download Update###AboutDlUpd"),
-                    ImVec2(0.0f, 0.0f),
-                    true)) {
+            if (RenderPrimaryButton(hdm::Tr("Скачать новую версию###AboutDlUpd", "Завантажити нову версію###AboutDlUpd", "Download Update###AboutDlUpd"))) {
                 OpenUrlInBrowser(releaseUrl);
             }
-        }
-
-        if (ImGui::Checkbox(
-                hdm::Tr(
-                    "Автоматически проверять обновления при запуске###AboutAutoUpd",
-                    "Автоматично перевіряти оновлення при запуску###AboutAutoUpd",
-                    "Automatically check for updates on startup###AboutAutoUpd"),
-                &g_autoCheckAppUpdates)) {
-            SaveUserPreferences();
         }
     }
     ImGui::EndChild();
 
     ImGui::Spacing();
-    ImGui::TextDisabled("C++20 • Win32 SetupAPI / WUA COM • DirectX 11 • Dear ImGui • Static CRT");
-    ImGui::TextDisabled("MIT License • Copyright (C) 2026 Arvexer");
+    PushFontSafe(g_fontSmall);
+    ImGui::TextDisabled("C++20 • Win32 SetupAPI / WUA COM • DirectX 11 • Dear ImGui • MIT License © 2026 Arvexer");
+    PopFontSafe(g_fontSmall);
     ImGui::Separator();
 
     const char* closeLbl = hdm::Tr("Закрыть###AboutCloseBtn", "Закрити###AboutCloseBtn", "Close###AboutCloseBtn");
@@ -1350,7 +1498,7 @@ void DriverLoomApp::RenderAboutModal() {
     if (closeX > style.WindowPadding.x) {
         ImGui::SetCursorPosX(closeX);
     }
-    if (RenderActionButton(closeLbl, ImVec2(closeW, 0.0f), true) ||
+    if (RenderPrimaryButton(closeLbl, ImVec2(closeW, 0.0f)) ||
         ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         ImGui::CloseCurrentPopup();
         aboutModalOpen_ = false;
@@ -1393,7 +1541,10 @@ void DriverLoomApp::JumpToDriverStorePackage(const std::string& infName) {
     if (infName.empty()) {
         return;
     }
-    pendingInitialTab_ = 3;
+    if (!g_isAdvancedMode) {
+        g_isAdvancedMode = true;
+    }
+    activeTabIndex_ = PageLocalInstaller;
     localSectionIndex_ = 1;
     storeFilterMode_ = DriverStoreFilterMode::All;
     std::snprintf(storeFilterBuf_, sizeof(storeFilterBuf_), "%s", infName.c_str());
@@ -1405,25 +1556,27 @@ void DriverLoomApp::HandleKeyboardShortcuts() {
 
     if (ImGui::IsKeyPressed(ImGuiKey_F5, false)) {
         switch (activeTabIndex_) {
-        case 0:
+        case PageOverview:
+        case PageDevices:
             if (!scanner_.IsBusy() && !componentsScanner_.IsInstalling()) {
                 scanner_.StartScanAsync(MakeLogger());
             }
             break;
-        case 1:
+        case PageComponents:
             if (!componentsScanner_.IsScanning() &&
                 !componentsScanner_.IsCheckingOnline() &&
                 !componentsScanner_.IsInstalling()) {
                 componentsScanner_.StartLocalScanAsync(devicesCache_, MakeLogger());
             }
             break;
-        case 2:
+        case PageWindowsUpdate:
             if (!wuManager_.IsBusy()) {
                 selectedWuIndex_ = -1;
+                wuHasSearchedOnce_ = true;
                 wuManager_.StartSearchAsync(MakeLogger(), !wuIncludeSystemUpdates_);
             }
             break;
-        case 3:
+        case PageLocalInstaller:
             if (!g_isAdvancedMode) {
                 break;
             }
@@ -1438,7 +1591,7 @@ void DriverLoomApp::HandleKeyboardShortcuts() {
                     hdm::Utf8ToWide(localFolderBuf_), MakeLogger());
             }
             break;
-        case 4:
+        case PageDiagnostics:
             if (!diagnostics_.IsBusy()) {
                 diagnostics_.StartScanAsync(devicesCache_, MakeLogger());
             }
@@ -1449,14 +1602,18 @@ void DriverLoomApp::HandleKeyboardShortcuts() {
     }
 
     if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_F, false)) {
-        if (activeTabIndex_ != 0) {
-            pendingInitialTab_ = 0;
+        if (activeTabIndex_ != PageDevices) {
+            activeTabIndex_ = PageDevices;
         }
         focusDeviceSearchNextFrame_ = true;
     }
 
+    if (io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_L, false)) {
+        logPanelExpanded_ = !logPanelExpanded_;
+    }
+
     if (!io.WantTextInput && io.KeyCtrl && ImGui::IsKeyPressed(ImGuiKey_C, false)) {
-        if (activeTabIndex_ == 0) {
+        if (activeTabIndex_ == PageDevices) {
             if (const hdm::DeviceInfo* sel = FindSelectedDevice()) {
                 if (g_isAdvancedMode && !sel->hardwareId.empty()) {
                     ImGui::SetClipboardText(sel->hardwareId.c_str());
@@ -1478,7 +1635,7 @@ void DriverLoomApp::HandleKeyboardShortcuts() {
                             sel->name);
                 }
             }
-        } else if (activeTabIndex_ == 2) {
+        } else if (activeTabIndex_ == PageWindowsUpdate) {
             if (selectedWuIndex_ >= 0 &&
                 selectedWuIndex_ < static_cast<int>(wuCache_.size())) {
                 const auto& wu = wuCache_[static_cast<size_t>(selectedWuIndex_)];
@@ -1501,62 +1658,160 @@ void DriverLoomApp::HandleKeyboardShortcuts() {
     }
 
     if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
-        if (activeTabIndex_ == 0 && !selectedDeviceInstanceId_.empty()) {
+        if (activeTabIndex_ == PageDevices && !selectedDeviceInstanceId_.empty()) {
             selectedDeviceInstanceId_.clear();
-        } else if (activeTabIndex_ == 2 && selectedWuIndex_ >= 0) {
+        } else if (activeTabIndex_ == PageWindowsUpdate && selectedWuIndex_ >= 0) {
             selectedWuIndex_ = -1;
         }
     }
 }
 
-void DriverLoomApp::RenderLogPanel() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
-    const ImGuiStyle& style = ImGui::GetStyle();
+void DriverLoomApp::RenderStatusBarAndLogDrawer() {
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
     bool wasDirty = false;
     const auto entries = logBuffer_.Snapshot(&wasDirty);
 
-    ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
+    // Top separator line above status bar / drawer
+    {
+        const ImVec2 p = ImGui::GetCursorScreenPos();
+        ImGui::GetWindowDrawList()->AddLine(
+            p,
+            ImVec2(p.x + ImGui::GetContentRegionAvail().x, p.y),
+            ImGui::ColorConvertFloat4ToU32(PanelBorderColor()),
+            1.0f);
+    }
+
+    const ImVec4 barBg = g_isLightTheme
+                             ? ImVec4(0.937f, 0.949f, 0.973f, 1.00f)
+                             : ImVec4(0.051f, 0.066f, 0.098f, 1.00f);
+
+    if (!logPanelExpanded_) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, barBg);
+        ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(std::round(18.0f * uiScale), std::round(5.0f * uiScale)));
+        ImGui::BeginChild(
+            "##StatusBar",
+            ImVec2(0.0f, 0.0f),
+            ImGuiChildFlags_AlwaysUseWindowPadding,
+            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+        ImGui::PopStyleVar(2);
+        ImGui::PopStyleColor();
+
+        const float barH = ImGui::GetContentRegionAvail().y;
+        const bool anyBusy = scanner_.IsBusy() || componentsScanner_.IsScanning() ||
+                             componentsScanner_.IsCheckingOnline() || componentsScanner_.IsInstalling() ||
+                             wuManager_.IsBusy() || diagnostics_.IsBusy() ||
+                             localInstaller_.IsInstalling() || localInstaller_.IsExportingBackup() ||
+                             systemRestore_.IsBusy();
+
+        ImVec4 dotCol = HealthyColor();
+        std::string statusText;
+        if (componentsScanner_.IsInstalling()) {
+            dotCol = InfoAccentColor();
+            statusText = hdm::TrDyn(componentsScanner_.PhaseMessage());
+        } else if (wuManager_.IsBusy()) {
+            dotCol = InfoAccentColor();
+            statusText = hdm::TrDyn(wuManager_.PhaseMessage());
+        } else if (diagnostics_.IsRunningAction()) {
+            dotCol = WarningColor();
+            statusText = hdm::TrDyn(diagnostics_.ActionPhase());
+        } else if (anyBusy) {
+            dotCol = InfoAccentColor();
+            statusText = hdm::Tr("Выполняется проверка...", "Виконується перевірка...", "Checking system...");
+        } else if (!entries.empty()) {
+            const auto& last = entries.back();
+            if (last.level == hdm::LogLevel::Error) dotCol = DangerColor();
+            else if (last.level == hdm::LogLevel::Warning) dotCol = WarningColor();
+            else if (last.level == hdm::LogLevel::Success) dotCol = HealthyColor();
+            else dotCol = InfoAccentColor();
+            statusText = hdm::TrDyn(last.message);
+        } else {
+            statusText = hdm::Tr("Готово", "Готово", "Ready");
+        }
+
+        // Right-side Journal toggle button (comfortable regular font size + chevron)
+        char logBtnLbl[64];
+        std::snprintf(
+            logBtnLbl,
+            sizeof(logBtnLbl),
+            hdm::Tr("Журнал (%zu)    ###ToggleLogBtn", "Журнал (%zu)    ###ToggleLogBtn", "Log (%zu)    ###ToggleLogBtn"),
+            entries.size());
+        const float toggleBtnW =
+            ImGui::CalcTextSize(logBtnLbl, nullptr, true).x + std::round(30.0f * uiScale);
+        const float availW = ImGui::GetContentRegionAvail().x;
+        const float maxTextW = std::max(80.0f, availW - toggleBtnW - std::round(26.0f * uiScale));
+
+        const ImVec2 p0 = ImGui::GetCursorScreenPos();
+        const float cy = p0.y + barH * 0.5f;
+        const float dotR = std::round(4.2f * uiScale);
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddCircleFilled(ImVec2(p0.x + dotR, cy), dotR, ImGui::ColorConvertFloat4ToU32(dotCol));
+
+        const std::string shownStatus = EllipsizeUtf8(statusText, maxTextW);
+        const ImVec2 ts = ImGui::CalcTextSize(shownStatus.c_str());
+        const ImVec4 statusTextCol = g_isLightTheme
+                                         ? ImVec4(0.18f, 0.24f, 0.34f, 1.00f)
+                                         : ImVec4(0.80f, 0.86f, 0.94f, 1.00f);
+        dl->AddText(
+            ImVec2(p0.x + dotR * 2.0f + std::round(10.0f * uiScale), cy - ts.y * 0.5f),
+            ImGui::ColorConvertFloat4ToU32(statusTextCol),
+            shownStatus.c_str());
+
+        ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - toggleBtnW);
+        const float btnH = std::min(barH, std::round(30.0f * uiScale));
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + std::max(0.0f, (barH - btnH) * 0.5f));
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(std::round(10.0f * uiScale), 0.0f));
+        if (RenderSecondaryButton(logBtnLbl, ImVec2(toggleBtnW, btnH))) {
+            logPanelExpanded_ = true;
+        }
+        ImGui::PopStyleVar();
+        if (ImGui::IsItemVisible()) {
+            const ImVec2 rMax = ImGui::GetItemRectMax();
+            const ImVec2 rMin = ImGui::GetItemRectMin();
+            DrawAppIcon(
+                dl,
+                ImVec2(rMax.x - std::round(12.0f * uiScale), (rMin.y + rMax.y) * 0.5f),
+                std::round(10.0f * uiScale),
+                AppIcon::ChevronUp,
+                ImGui::ColorConvertFloat4ToU32(statusTextCol));
+        }
+        ImGui::EndChild();
+        return;
+    }
+
+    // Expanded Event Log Drawer
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, barBg);
+    ImGui::PushStyleVar(ImGuiStyleVar_ChildRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(std::round(18.0f * uiScale), std::round(8.0f * uiScale)));
     ImGui::BeginChild(
-        "##LogPanel",
+        "##LogDrawer",
         ImVec2(0.0f, 0.0f),
-        true,
+        ImGuiChildFlags_AlwaysUseWindowPadding,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+    ImGui::PopStyleVar(2);
     ImGui::PopStyleColor();
 
-    const float frameH = ImGui::GetFrameHeight();
-    {
-        const float barW = std::max(2.5f, std::round(3.0f * uiScale));
-        const float barPadY = std::round(4.0f * uiScale);
-        const ImVec2 pMin = ImGui::GetCursorScreenPos();
-        ImGui::GetWindowDrawList()->AddRectFilled(
-            ImVec2(pMin.x, pMin.y + barPadY),
-            ImVec2(pMin.x + barW, pMin.y + frameH - barPadY),
-            ImGui::ColorConvertFloat4ToU32(AccentBarColor()),
-            barW * 0.5f);
-        ImGui::Dummy(ImVec2(barW + std::round(6.0f * uiScale), frameH));
-    }
-    ImGui::SameLine(0.0f, 0.0f);
+    const ImGuiStyle& style = ImGui::GetStyle();
     {
         PushFontSafe(g_fontSecondaryHeader);
         ImGui::AlignTextToFramePadding();
-        ImGui::TextColored(
-            CardHeaderTextColor(),
-            "%s",
-            hdm::Tr("Журнал событий", "Журнал подій", "Event Log"));
+        ImGui::TextColored(CardHeaderTextColor(), "%s", hdm::Tr("Журнал событий", "Журнал подій", "Event Log"));
         PopFontSafe(g_fontSecondaryHeader);
     }
     ImGui::SameLine(0.0f, 8.0f);
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("(%zu)", entries.size());
 
-    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(9.0f * uiScale, 3.0f * uiScale));
-    const char* copyLogTxt = hdm::Tr("Копировать", "Копіювати", "Copy");
-    const char* clearLogTxt = hdm::Tr("Очистить", "Очистити", "Clear");
-    const char* autoLogTxt = hdm::Tr("Автопрокрутка", "Автопрокрутка", "Auto-scroll");
-    const float copyW = ImGui::CalcTextSize(copyLogTxt).x + 18.0f * uiScale;
-    const float clearW = ImGui::CalcTextSize(clearLogTxt).x + 18.0f * uiScale;
-    const float autoW = ImGui::CalcTextSize(autoLogTxt).x + ImGui::GetFrameHeight() + 8.0f;
-    const float totalRightW = autoW + copyW + clearW + style.ItemSpacing.x * 2.0f;
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f * uiScale, 4.0f * uiScale));
+    const char* copyTxt = hdm::Tr("Копировать", "Копіювати", "Copy");
+    const char* clearTxt = hdm::Tr("Очистить", "Очистити", "Clear");
+    const char* hideTxt = hdm::Tr("Свернуть", "Згорнути", "Collapse");
+    const char* autoTxt = hdm::Tr("Автопрокрутка", "Автопрокрутка", "Auto-scroll");
+    const float copyW = ImGui::CalcTextSize(copyTxt).x + 20.0f * uiScale;
+    const float clearW = ImGui::CalcTextSize(clearTxt).x + 20.0f * uiScale;
+    const float hideW = ImGui::CalcTextSize(hideTxt).x + 22.0f * uiScale;
+    const float autoW = ImGui::CalcTextSize(autoTxt).x + ImGui::GetFrameHeight() + 8.0f;
+    const float totalRightW = autoW + copyW + clearW + hideW + style.ItemSpacing.x * 3.0f;
     const float winRight = ImGui::GetWindowContentRegionMax().x;
     if (winRight - totalRightW > ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x + 12.0f) {
         ImGui::SameLine(winRight - totalRightW);
@@ -1564,13 +1819,9 @@ void DriverLoomApp::RenderLogPanel() {
         ImGui::SameLine(0.0f, 16.0f);
     }
 
-    ImGui::Checkbox(
-        hdm::Tr("Автопрокрутка###LogAuto", "Автопрокрутка###LogAuto", "Auto-scroll###LogAuto"),
-        &logAutoScroll_);
+    ImGui::Checkbox(hdm::Tr("Автопрокрутка###LogAuto", "Автопрокрутка###LogAuto", "Auto-scroll###LogAuto"), &logAutoScroll_);
     ImGui::SameLine();
-    if (RenderSecondaryButton(
-            hdm::Tr("Копировать###LogCopy", "Копіювати###LogCopy", "Copy###LogCopy"),
-            ImVec2(copyW, 0.0f))) {
+    if (RenderSecondaryButton(hdm::Tr("Копировать###LogCopy", "Копіювати###LogCopy", "Copy###LogCopy"), ImVec2(copyW, 0.0f))) {
         std::string all;
         for (const auto& e : entries) {
             all += "[" + e.timestamp + "] " + hdm::TrDyn(e.message) + "\n";
@@ -1578,50 +1829,43 @@ void DriverLoomApp::RenderLogPanel() {
         ImGui::SetClipboardText(all.c_str());
     }
     ImGui::SameLine();
-    if (RenderSecondaryButton(
-            hdm::Tr("Очистить###LogClr", "Очистити###LogClr", "Clear###LogClr"),
-            ImVec2(clearW, 0.0f))) {
+    if (RenderSecondaryButton(hdm::Tr("Очистить###LogClr", "Очистити###LogClr", "Clear###LogClr"), ImVec2(clearW, 0.0f))) {
         logBuffer_.Clear();
+    }
+    ImGui::SameLine();
+    if (RenderSecondaryButton(hdm::Tr("Свернуть###LogHide", "Згорнути###LogHide", "Collapse###LogHide"), ImVec2(hideW, 0.0f))) {
+        logPanelExpanded_ = false;
     }
     ImGui::PopStyleVar();
     ImGui::Separator();
 
-    ImGui::BeginChild("##LogScroll", ImVec2(0.0f, 0.0f), false, ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::BeginChild("##LogScroll", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None, ImGuiWindowFlags_HorizontalScrollbar);
+    ImGui::PopStyleColor();
     ImGuiListClipper clipper;
     clipper.Begin(static_cast<int>(entries.size()));
     while (clipper.Step()) {
         for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
             const auto& entry = entries[static_cast<size_t>(i)];
             ImVec4 col = g_isLightTheme
-                             ? ImVec4(0.14f, 0.18f, 0.26f, 1.00f)
-                             : ImVec4(0.84f, 0.88f, 0.94f, 1.00f);
+                             ? ImVec4(0.16f, 0.21f, 0.30f, 1.00f)
+                             : ImVec4(0.84f, 0.89f, 0.96f, 1.00f);
             if (entry.level == hdm::LogLevel::Success) {
-                col = g_isLightTheme
-                          ? ImVec4(0.05f, 0.48f, 0.30f, 1.00f)
-                          : ImVec4(0.20f, 0.83f, 0.60f, 1.00f);
+                col = g_isLightTheme ? ImVec4(0.05f, 0.48f, 0.30f, 1.00f) : HealthyColor();
             } else if (entry.level == hdm::LogLevel::Warning) {
-                col = g_isLightTheme
-                          ? ImVec4(0.68f, 0.42f, 0.02f, 1.00f)
-                          : ImVec4(0.98f, 0.75f, 0.14f, 1.00f);
+                col = WarningTextColor();
             } else if (entry.level == hdm::LogLevel::Error) {
-                col = g_isLightTheme
-                          ? ImVec4(0.75f, 0.14f, 0.16f, 1.00f)
-                          : ImVec4(0.97f, 0.44f, 0.44f, 1.00f);
+                col = g_isLightTheme ? ImVec4(0.76f, 0.14f, 0.14f, 1.00f) : DangerColor();
             }
-            const ImVec4 tsCol = g_isLightTheme
-                                     ? ImVec4(0.44f, 0.50f, 0.60f, 1.00f)
-                                     : ImVec4(0.49f, 0.56f, 0.67f, 1.00f);
-            ImGui::TextColored(tsCol, "[%s]", entry.timestamp.c_str());
-            ImGui::SameLine();
-            ImGui::PushStyleColor(ImGuiCol_Text, col);
-            ImGui::TextUnformatted(hdm::TrDyn(entry.message).c_str());
-            ImGui::PopStyleColor();
+            const std::string msgShown = hdm::TrDyn(entry.message);
+            ImGui::TextDisabled("[%s]", entry.timestamp.c_str());
+            ImGui::SameLine(0.0f, 8.0f);
+            ImGui::TextColored(col, "%s", msgShown.c_str());
         }
     }
     if (logAutoScroll_ && wasDirty) {
         ImGui::SetScrollHereY(1.0f);
     }
     ImGui::EndChild();
-
     ImGui::EndChild();
 }

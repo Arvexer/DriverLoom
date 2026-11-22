@@ -69,6 +69,35 @@ inline std::string ToLowerAscii(std::string_view input) {
     return out;
 }
 
+// Safely quotes a Win32 command-line argument according to CommandLineToArgvW rules
+// (properly escapes embedded quotes and trailing backslashes such as "D:\").
+inline std::wstring QuoteWin32Arg(std::wstring_view arg) {
+    std::wstring out;
+    out.reserve(arg.size() + 8);
+    out.push_back(L'"');
+    size_t backslashes = 0;
+    for (wchar_t ch : arg) {
+        if (ch == L'\\') {
+            ++backslashes;
+        } else if (ch == L'"') {
+            out.append(backslashes * 2 + 1, L'\\');
+            out.push_back(L'"');
+            backslashes = 0;
+        } else {
+            if (backslashes > 0) {
+                out.append(backslashes, L'\\');
+                backslashes = 0;
+            }
+            out.push_back(ch);
+        }
+    }
+    if (backslashes > 0) {
+        out.append(backslashes * 2, L'\\');
+    }
+    out.push_back(L'"');
+    return out;
+}
+
 inline bool ContainsCaseInsensitive(std::string_view haystack, std::string_view needle) {
     if (needle.empty()) {
         return true;
@@ -206,6 +235,72 @@ public:
 
 private:
     T* ptr_{nullptr};
+};
+
+class ModuleGuard {
+public:
+    explicit ModuleGuard(HMODULE mod = nullptr) noexcept : mod_(mod) {}
+    ~ModuleGuard() { Reset(); }
+
+    ModuleGuard(const ModuleGuard&) = delete;
+    ModuleGuard& operator=(const ModuleGuard&) = delete;
+
+    void Reset(HMODULE mod = nullptr) noexcept {
+        if (mod_ != nullptr) {
+            FreeLibrary(mod_);
+        }
+        mod_ = mod;
+    }
+
+    [[nodiscard]] HMODULE Get() const noexcept { return mod_; }
+    explicit operator bool() const noexcept { return mod_ != nullptr; }
+
+private:
+    HMODULE mod_{nullptr};
+};
+
+class LocalFreeGuard {
+public:
+    explicit LocalFreeGuard(HLOCAL ptr = nullptr) noexcept : ptr_(ptr) {}
+    ~LocalFreeGuard() { Reset(); }
+
+    LocalFreeGuard(const LocalFreeGuard&) = delete;
+    LocalFreeGuard& operator=(const LocalFreeGuard&) = delete;
+
+    void Reset(HLOCAL ptr = nullptr) noexcept {
+        if (ptr_ != nullptr) {
+            LocalFree(ptr_);
+        }
+        ptr_ = ptr;
+    }
+
+    [[nodiscard]] void* Get() const noexcept { return ptr_; }
+    explicit operator bool() const noexcept { return ptr_ != nullptr; }
+
+private:
+    HLOCAL ptr_{nullptr};
+};
+
+class InfFileGuard {
+public:
+    explicit InfFileGuard(HINF hInf = INVALID_HANDLE_VALUE) noexcept : hInf_(hInf) {}
+    ~InfFileGuard() { Reset(); }
+
+    InfFileGuard(const InfFileGuard&) = delete;
+    InfFileGuard& operator=(const InfFileGuard&) = delete;
+
+    void Reset(HINF hInf = INVALID_HANDLE_VALUE) noexcept {
+        if (hInf_ != INVALID_HANDLE_VALUE) {
+            SetupCloseInfFile(hInf_);
+        }
+        hInf_ = hInf;
+    }
+
+    [[nodiscard]] bool IsValid() const noexcept { return hInf_ != INVALID_HANDLE_VALUE; }
+    [[nodiscard]] HINF Get() const noexcept { return hInf_; }
+
+private:
+    HINF hInf_{INVALID_HANDLE_VALUE};
 };
 
 class BstrGuard {

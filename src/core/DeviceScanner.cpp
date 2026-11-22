@@ -116,7 +116,7 @@ std::wstring ReadRegString(HKEY hKey, const wchar_t* valueName) {
         bytes == 0 || (type != REG_SZ && type != REG_EXPAND_SZ)) {
         return {};
     }
-    std::wstring buf(bytes / sizeof(wchar_t) + 1, L'\0');
+    std::wstring buf(bytes / sizeof(wchar_t) + 2, L'\0');
     if (RegQueryValueExW(hKey, valueName, nullptr, &type,
                          reinterpret_cast<LPBYTE>(buf.data()), &bytes) != ERROR_SUCCESS) {
         return {};
@@ -435,7 +435,7 @@ void EnrichMonitorsAndGpus(std::vector<DeviceInfo>& devices) {
             factory) {
             for (UINT i = 0;; ++i) {
                 ComPtr<IDXGIAdapter1> adapter;
-                if (factory->EnumAdapters1(i, adapter.Put()) == DXGI_ERROR_NOT_FOUND) {
+                if (FAILED(factory->EnumAdapters1(i, adapter.Put())) || !adapter) {
                     break;
                 }
                 DXGI_ADAPTER_DESC1 desc{};
@@ -603,15 +603,6 @@ bool CheckDevNodeNeedsReboot(HDEVINFO devInfoSet, PSP_DEVINFO_DATA devInfoData) 
     return (params.Flags & (DI_NEEDRESTART | DI_NEEDREBOOT)) != 0;
 }
 
-struct NewdevModuleGuard {
-    HMODULE mod{nullptr};
-    ~NewdevModuleGuard() {
-        if (mod != nullptr) {
-            FreeLibrary(mod);
-        }
-    }
-};
-
 using DiRollbackDriverFn = BOOL(WINAPI*)(HDEVINFO, PSP_DEVINFO_DATA, HWND, DWORD, PBOOL);
 using DiUninstallDeviceFn = BOOL(WINAPI*)(HWND, HDEVINFO, PSP_DEVINFO_DATA, DWORD, PBOOL);
 
@@ -630,20 +621,46 @@ const char* DeviceActionDisplayLabel(DeviceAction action) noexcept {
 } // namespace
 
 DeviceScanner::~DeviceScanner() {
-    if (worker_.joinable()) {
-        worker_.join();
+    stopRequested_.store(true);
+    std::thread w;
+    std::thread a;
+    {
+        std::lock_guard<std::mutex> lock(threadMutex_);
+        if (worker_.joinable()) {
+            w = std::move(worker_);
+        }
+        if (actionWorker_.joinable()) {
+            a = std::move(actionWorker_);
+        }
     }
-    if (actionWorker_.joinable()) {
-        actionWorker_.join();
+    if (w.joinable()) {
+        w.join();
+    }
+    if (a.joinable()) {
+        a.join();
     }
 }
 
 void DeviceScanner::StartScanAsync(LogCallback onLog) {
-    if (scanning_.exchange(true)) {
-        return;
+    std::thread oldWorker;
+    {
+        std::lock_guard<std::mutex> lock(threadMutex_);
+        if (stopRequested_.load() || scanning_.load() || runningAction_.load()) {
+            return;
+        }
+        scanning_.store(true);
+        if (worker_.joinable()) {
+            oldWorker = std::move(worker_);
+        }
     }
-    if (worker_.joinable()) {
-        worker_.join();
+    if (oldWorker.joinable()) {
+        oldWorker.join();
+    }
+
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (stopRequested_.load()) {
+        scanning_.store(false);
+        return;
     }
     worker_ = std::thread([this, log = std::move(onLog)]() {
         auto result = ScanSynchronously(log);
@@ -684,6 +701,13 @@ std::vector<DeviceInfo> DeviceScanner::ScanSynchronously(const LogCallback& onLo
     size_t monitorCount = 0;
 
     for (DWORD idx = 0; SetupDiEnumDeviceInfo(devInfoSet.Get(), idx, &devInfoData); ++idx) {
+        const std::wstring wInstanceId =
+            GetDeviceInstanceIdString(devInfoSet.Get(), &devInfoData);
+        // Skip Windows synthetic PnP tree root node (not a real hardware device)
+        if (_wcsicmp(wInstanceId.c_str(), L"HTREE\\ROOT\\0") == 0) {
+            continue;
+        }
+
         DeviceInfo info;
 
         std::wstring friendly =
@@ -707,8 +731,6 @@ std::vector<DeviceInfo> DeviceScanner::ScanSynchronously(const LogCallback& onLo
         info.usbVendorId = ExtractHex4AfterTag(upperHw, "VID_");
         info.pciVendorId = ExtractHex4AfterTag(upperHw, "VEN_");
 
-        const std::wstring wInstanceId =
-            GetDeviceInstanceIdString(devInfoSet.Get(), &devInfoData);
         info.instanceId = WideToUtf8(wInstanceId);
 
         const std::wstring driverKey =
@@ -933,12 +955,12 @@ bool DeviceScanner::RunDeviceActionSync(
     }
 
     if (action == DeviceAction::RollbackDriver) {
-        NewdevModuleGuard newdev{
-            LoadLibraryExW(L"newdev.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+        ModuleGuard newdev(
+            LoadLibraryExW(L"newdev.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
         DiRollbackDriverFn diRollbackDriver = nullptr;
-        if (newdev.mod != nullptr) {
+        if (newdev) {
             diRollbackDriver = reinterpret_cast<DiRollbackDriverFn>(
-                reinterpret_cast<void*>(GetProcAddress(newdev.mod, "DiRollbackDriver")));
+                reinterpret_cast<void*>(GetProcAddress(newdev.Get(), "DiRollbackDriver")));
         }
         if (diRollbackDriver == nullptr) {
             const DWORD err = GetLastError();
@@ -981,12 +1003,12 @@ bool DeviceScanner::RunDeviceActionSync(
     }
 
     if (action == DeviceAction::UninstallDevice) {
-        NewdevModuleGuard newdev{
-            LoadLibraryExW(L"newdev.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+        ModuleGuard newdev(
+            LoadLibraryExW(L"newdev.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
         DiUninstallDeviceFn diUninstallDevice = nullptr;
-        if (newdev.mod != nullptr) {
+        if (newdev) {
             diUninstallDevice = reinterpret_cast<DiUninstallDeviceFn>(
-                reinterpret_cast<void*>(GetProcAddress(newdev.mod, "DiUninstallDevice")));
+                reinterpret_cast<void*>(GetProcAddress(newdev.Get(), "DiUninstallDevice")));
         }
         if (diUninstallDevice == nullptr) {
             const DWORD err = GetLastError();
@@ -1152,12 +1174,12 @@ bool DeviceScanner::RestoreInboxDriverByHardwareKeySync(
 
     using DiInstallDeviceFn = BOOL(WINAPI*)(
         HWND, HDEVINFO, PSP_DEVINFO_DATA, PSP_DRVINFO_DATA_W, DWORD, PBOOL);
-    NewdevModuleGuard newdev{
-        LoadLibraryExW(L"newdev.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32)};
+    hdm::ModuleGuard newdev(
+        LoadLibraryExW(L"newdev.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
     DiInstallDeviceFn diInstallDevice = nullptr;
-    if (newdev.mod != nullptr) {
+    if (newdev) {
         diInstallDevice = reinterpret_cast<DiInstallDeviceFn>(
-            reinterpret_cast<void*>(GetProcAddress(newdev.mod, "DiInstallDevice")));
+            reinterpret_cast<void*>(GetProcAddress(newdev.Get(), "DiInstallDevice")));
     }
     if (diInstallDevice == nullptr) {
         const DWORD err = GetLastError();
@@ -1200,12 +1222,25 @@ void DeviceScanner::RunDeviceActionAsync(
     const std::string& deviceName,
     LogCallback onLog,
     ActionCallback onComplete) {
-    if (IsBusy()) {
-        return;
+    std::thread oldAction;
+    {
+        std::lock_guard<std::mutex> lock(threadMutex_);
+        if (stopRequested_.load() || scanning_.load() || runningAction_.load()) {
+            return;
+        }
+        runningAction_.store(true);
+        if (actionWorker_.joinable()) {
+            oldAction = std::move(actionWorker_);
+        }
     }
-    runningAction_.store(true);
-    if (actionWorker_.joinable()) {
-        actionWorker_.join();
+    if (oldAction.joinable()) {
+        oldAction.join();
+    }
+
+    std::lock_guard<std::mutex> lock(threadMutex_);
+    if (stopRequested_.load()) {
+        runningAction_.store(false);
+        return;
     }
 
     actionWorker_ = std::thread(
@@ -1228,14 +1263,14 @@ void DeviceScanner::RunDeviceActionAsync(
             } else {
                 const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_dev_");
                 std::wstring args =
-                    L"--cli-device-action " + Utf8ToWide(DeviceActionToCliVerb(action));
+                    L"--cli-device-action " + QuoteWin32Arg(Utf8ToWide(DeviceActionToCliVerb(action)));
                 if (!instanceId.empty()) {
-                    args += L" --instance \"" + Utf8ToWide(instanceId) + L"\"";
+                    args += L" --instance " + QuoteWin32Arg(Utf8ToWide(instanceId));
                 }
-                args += L" --log \"" + tempLog.wstring() + L"\"";
+                args += L" --log " + QuoteWin32Arg(tempLog.wstring());
 
                 const ElevatedRunResult res =
-                    ExecuteElevatedSelf(args, true, &tempLog, log);
+                    ExecuteElevatedSelf(args, true, &tempLog, log, nullptr, &stopRequested_);
                 std::error_code ec;
                 std::filesystem::remove(tempLog, ec);
 
@@ -1249,7 +1284,7 @@ void DeviceScanner::RunDeviceActionAsync(
                     }
                 } else {
                     rebootReq = (res.exitCode == 2);
-                    ok = (res.exitCode == 0 || res.exitCode == 2);
+                    ok = (!res.cancelled && !res.timedOutWaiting && (res.exitCode == 0 || res.exitCode == 2));
                 }
             }
 
@@ -1261,7 +1296,7 @@ void DeviceScanner::RunDeviceActionAsync(
             generation_.fetch_add(1);
             runningAction_.store(false);
 
-            if (cb) {
+            if (cb && !stopRequested_.load()) {
                 cb(ok, rebootReq);
             }
         });

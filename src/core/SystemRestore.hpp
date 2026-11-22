@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <functional>
+#include <mutex>
 #include <string>
 #include <thread>
 
@@ -34,6 +35,8 @@ public:
 
 private:
     std::atomic<bool> busy_{false};
+    std::atomic<bool> stopRequested_{false};
+    std::mutex threadMutex_;
     std::thread worker_;
 };
 

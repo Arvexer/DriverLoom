@@ -13,7 +13,6 @@ namespace hdm {
 
 struct DriverUpdateItem {
     std::string updateId;
-    int revisionNumber{0};
     std::string title;
     std::string description;
     std::string driverModel;
@@ -62,7 +61,7 @@ public:
         InstallDoneCallback onComplete = nullptr,
         bool driversOnly = true);
 
-    void RequestCancel() noexcept;
+    void RequestCancel();
 
     [[nodiscard]] bool IsSearching() const noexcept;
     [[nodiscard]] bool IsInstalling() const noexcept;
@@ -78,14 +77,12 @@ public:
     void SetUpdatesHiddenAsync(
         const std::vector<std::string>& updateIds,
         bool hide,
-        LogCallback onLog,
-        bool driversOnly = true);
+        LogCallback onLog);
 
     static bool SetUpdatesHiddenSync(
         const std::vector<std::string>& updateIds,
         bool hide,
-        const LogCallback& onLog,
-        bool driversOnly = false);
+        const LogCallback& onLog);
 
     // Synchronous execution used directly (when elevated) or inside the elevated CLI worker.
     static WuInstallSummary DownloadAndInstallSync(
