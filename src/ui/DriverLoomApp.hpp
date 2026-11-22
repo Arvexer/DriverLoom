@@ -130,6 +130,7 @@ private:
     bool exitRequested_{false};
     std::atomic<bool> rebootRequired_{false};
     std::atomic<bool> pendingDeviceRescan_{false};
+    bool silentDeviceRescan_{false};
     double lastFocusRefreshTime_{-10.0};
 
     hdm::LogBuffer logBuffer_;

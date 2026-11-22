@@ -61,7 +61,9 @@ public:
         bool autoCheckOnline = true);
 
     // Silent fast local re-check preserving previously fetched online versions & direct URLs.
-    void RefreshLocalPreserveOnlineAsync(std::vector<DeviceInfo> devicesSnapshot);
+    void RefreshLocalPreserveOnlineAsync(
+        std::vector<DeviceInfo> devicesSnapshot,
+        bool rescanDevices = false);
 
     // Background WinHTTP check for latest official online versions (.NET, official endpoints).
     void StartOnlineVersionCheckAsync(LogCallback onLog);
@@ -98,6 +100,9 @@ public:
     [[nodiscard]] bool IsInstalling() const noexcept { return installing_.load(); }
     [[nodiscard]] float Progress() const noexcept { return progress_.load(); }
     [[nodiscard]] uint64_t Generation() const noexcept { return generation_.load(); }
+    [[nodiscard]] bool ConsumeDeviceRescanNeeded() noexcept {
+        return deviceRescanNeeded_.exchange(false);
+    }
     [[nodiscard]] std::string PhaseMessage() const;
 
     std::vector<SystemComponentItem> GetItemsSnapshot() const;
@@ -111,7 +116,7 @@ private:
         const SystemComponentItem& item,
         float baseProgress,
         float progressSpan,
-        const std::vector<DeviceInfo>& devs,
+        std::vector<DeviceInfo>& devs,
         const LogCallback& log,
         bool* outRebootRequired = nullptr);
 
@@ -120,6 +125,7 @@ private:
     std::atomic<bool> installing_{false};
     std::atomic<bool> cancelInstallRequested_{false};
     std::atomic<bool> stopRequested_{false};
+    std::atomic<bool> deviceRescanNeeded_{false};
     std::atomic<float> progress_{0.0f};
     std::atomic<uint64_t> generation_{0};
 

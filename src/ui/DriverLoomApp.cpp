@@ -1095,6 +1095,8 @@ void DriverLoomApp::RebuildSnapshotDiff() {
 void DriverLoomApp::SyncScannerSnapshots() {
     const uint64_t devGen = scanner_.Generation();
     if (devGen != lastDeviceGen_) {
+        const bool wasSilentRescan = silentDeviceRescan_;
+        silentDeviceRescan_ = false;
         devicesCache_ = scanner_.GetDevicesSnapshot();
         lastDeviceGen_ = devGen;
         totalDevicesCount_ = devicesCache_.size();
@@ -1125,10 +1127,14 @@ void DriverLoomApp::SyncScannerSnapshots() {
         }
 
         if (!componentsScanner_.IsScanning() && !componentsScanner_.IsInstalling()) {
-            componentsScanner_.StartLocalScanAsync(devicesCache_, MakeLogger());
+            if (wasSilentRescan && !componentsCache_.empty()) {
+                componentsScanner_.RefreshLocalPreserveOnlineAsync(devicesCache_);
+            } else {
+                componentsScanner_.StartLocalScanAsync(devicesCache_, MakeLogger());
+            }
         }
         if (!diagnostics_.IsBusy()) {
-            diagnostics_.StartScanAsync(devicesCache_, MakeLogger());
+            diagnostics_.StartScanAsync(devicesCache_, wasSilentRescan ? nullptr : MakeLogger());
         }
         if (!localInstaller_.IsScanningStore() && !localInstaller_.IsRemovingStorePackages()) {
             localInstaller_.ScanDriverStoreAsync(devicesCache_, nullptr);
@@ -1171,22 +1177,26 @@ void DriverLoomApp::SyncScannerSnapshots() {
         storeViewDirty_ = true;
     }
 
-    if (pendingDeviceRescan_.exchange(false) && !scanner_.IsScanning()) {
-        scanner_.StartScanAsync(MakeLogger());
+    if (componentsScanner_.ConsumeDeviceRescanNeeded()) {
+        silentDeviceRescan_ = true;
+        pendingDeviceRescan_.store(true);
+    }
+    if (!scanner_.IsScanning() && pendingDeviceRescan_.exchange(false)) {
+        scanner_.StartScanAsync(silentDeviceRescan_ ? nullptr : MakeLogger());
     }
 
     if (g_windowRegainedFocus.exchange(false)) {
         const double now = ImGui::GetTime();
         if (now - lastFocusRefreshTime_ > 2.5 &&
             !devicesCache_.empty() &&
+            !scanner_.IsScanning() &&
+            !pendingDeviceRescan_.load() &&
             !componentsScanner_.IsScanning() &&
             !componentsScanner_.IsInstalling() &&
             !componentsScanner_.IsCheckingOnline()) {
             lastFocusRefreshTime_ = now;
-            componentsScanner_.RefreshLocalPreserveOnlineAsync(devicesCache_);
-            if (!diagnostics_.IsBusy()) {
-                diagnostics_.StartScanAsync(devicesCache_, nullptr);
-            }
+            silentDeviceRescan_ = true;
+            scanner_.StartScanAsync(nullptr);
         }
     }
 }

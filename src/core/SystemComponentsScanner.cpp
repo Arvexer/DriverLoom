@@ -1897,7 +1897,8 @@ void SystemComponentsScanner::StartLocalScanAsync(
 }
 
 void SystemComponentsScanner::RefreshLocalPreserveOnlineAsync(
-    std::vector<DeviceInfo> devicesSnapshot) {
+    std::vector<DeviceInfo> devicesSnapshot,
+    bool rescanDevices) {
     std::lock_guard<std::mutex> lock(threadMutex_);
     if (stopRequested_.load() || scanning_.exchange(true)) {
         return;
@@ -1906,8 +1907,10 @@ void SystemComponentsScanner::RefreshLocalPreserveOnlineAsync(
         scanThread_.join();
     }
 
-    scanThread_ = std::thread([this, devs = std::move(devicesSnapshot)]() {
-        auto refreshed = ScanLocalSynchronously(devs);
+    scanThread_ = std::thread([this, devs = std::move(devicesSnapshot), rescanDevices]() {
+        const auto actualDevs =
+            (rescanDevices || devs.empty()) ? DeviceScanner::ScanSynchronously() : devs;
+        auto refreshed = ScanLocalSynchronously(actualDevs);
         if (!stopRequested_.load()) {
             {
                 std::lock_guard<std::mutex> lock(dataMutex_);
@@ -2305,7 +2308,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
     const SystemComponentItem& item,
     float baseProgress,
     float progressSpan,
-    const std::vector<DeviceInfo>& devs,
+    std::vector<DeviceInfo>& devs,
     const LogCallback& log,
     bool* outRebootRequired) {
     if (outRebootRequired != nullptr) {
@@ -2439,27 +2442,62 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         std::filesystem::remove_all(cabExtractDir, ec);
 
         if (!stopRequested_.load()) {
-            const auto freshDevs = DeviceScanner::ScanSynchronously();
-            auto refreshed = ScanLocalSynchronously(freshDevs);
-            if (cabOk && !cabReboot && !item.installedVersion.empty()) {
-                for (const auto& r : refreshed) {
-                    if (r.id == item.id && r.installedVersion == item.installedVersion) {
-                        if (log) {
-                            log(LogLevel::Warning,
-                                "Пакет .cab добавлен в DriverStore, но Windows оставила текущую версию драйвера (" +
-                                    item.installedVersion +
-                                    ") — пакет не подходит к ревизии устройства или требуется перезагрузка.");
+            const int maxAttempts =
+                (cabOk && !cabReboot && !item.installedVersion.empty()) ? 6 : 1;
+            std::vector<DeviceInfo> freshDevs;
+            std::vector<SystemComponentItem> refreshed;
+            bool versionUnchanged = false;
+
+            for (int attempt = 0; attempt < maxAttempts; ++attempt) {
+                if (attempt > 0) {
+                    for (int step = 0; step < 5; ++step) {
+                        if (stopRequested_.load()) {
+                            break;
                         }
-                        cabOk = false;
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    }
+                    if (stopRequested_.load()) {
                         break;
                     }
                 }
+
+                freshDevs = DeviceScanner::ScanSynchronously();
+                refreshed = ScanLocalSynchronously(freshDevs);
+
+                versionUnchanged = false;
+                if (cabOk && !cabReboot && !item.installedVersion.empty()) {
+                    for (const auto& r : refreshed) {
+                        if (r.id == item.id && r.installedVersion == item.installedVersion) {
+                            versionUnchanged = true;
+                            break;
+                        }
+                    }
+                }
+                if (!versionUnchanged) {
+                    break;
+                }
             }
-            {
-                std::lock_guard<std::mutex> lock(dataMutex_);
-                MergeOnlineMetadataIntoRefreshed(refreshed, items_);
-                items_ = std::move(refreshed);
-                generation_.fetch_add(1);
+
+            if (!stopRequested_.load()) {
+                devs = std::move(freshDevs);
+                if (versionUnchanged) {
+                    if (log) {
+                        log(LogLevel::Warning,
+                            "Пакет .cab добавлен в DriverStore, но Windows оставила текущую версию драйвера (" +
+                                item.installedVersion +
+                                ") — пакет не подходит к ревизии устройства или требуется перезагрузка.");
+                    }
+                    cabOk = false;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(dataMutex_);
+                    MergeOnlineMetadataIntoRefreshed(refreshed, items_);
+                    items_ = std::move(refreshed);
+                    generation_.fetch_add(1);
+                }
+                if (cabOk || cabReboot) {
+                    deviceRescanNeeded_.store(true);
+                }
             }
         }
         progress_.store(std::clamp(baseProgress + progressSpan, 0.0f, 1.0f));
@@ -2692,6 +2730,9 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
     }
 
     auto refreshAndCompare = [&]() {
+        if (item.category == ComponentCategory::MonitorAndGpu) {
+            devs = DeviceScanner::ScanSynchronously();
+        }
         auto refreshed = ScanLocalSynchronously(devs);
         std::lock_guard<std::mutex> lock(dataMutex_);
         if (!dlVer.empty() &&
@@ -2735,6 +2776,9 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
                 refreshAndCompare();
             }
         }
+        if (item.category == ComponentCategory::MonitorAndGpu && !stopRequested_.load()) {
+            deviceRescanNeeded_.store(true);
+        }
     }
 
     progress_.store(std::clamp(baseProgress + progressSpan, 0.0f, 1.0f));
@@ -2766,7 +2810,7 @@ void SystemComponentsScanner::DownloadAndInstallAsync(
     cancelInstallRequested_.store(false);
     progress_.store(0.0f);
 
-    installThread_ = std::thread([this, item, devs = std::move(devicesSnapshot), log = std::move(onLog)]() {
+    installThread_ = std::thread([this, item, devs = std::move(devicesSnapshot), log = std::move(onLog)]() mutable {
         bool rebootReq = false;
         const bool ok = InstallSingleComponentSync(item, 0.0f, 1.0f, devs, log, &rebootReq);
         progress_.store(1.0f);
@@ -2811,7 +2855,7 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
                                   list = std::move(itemsToInstall),
                                   devs = std::move(devicesSnapshot),
                                   log = std::move(onLog),
-                                  createRestorePointBefore]() {
+                                  createRestorePointBefore]() mutable {
         const size_t total = list.size();
         size_t okCount = 0;
 
@@ -2925,7 +2969,7 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
                                   installedVersion,
                                   devs = std::move(devicesSnapshot),
                                   log = std::move(onLog),
-                                  cb = std::move(onComplete)]() {
+                                  cb = std::move(onComplete)]() mutable {
         const std::string primaryKey =
             !searchHardwareKey.empty() ? searchHardwareKey : fullHardwareId;
         if (primaryKey.empty()) {
