@@ -378,25 +378,11 @@ void DriverLoomApp::RenderWindowsUpdateTab() {
             ImGui::PushID(i);
 
             ImGui::TableSetColumnIndex(0);
-            const float cbOffset = std::max(0.0f, (ImGui::GetContentRegionAvail().x - frameH) * 0.5f);
-            if (cbOffset > 0.0f) {
-                ImGui::SetCursorPosX(ImGui::GetCursorPosX() + cbOffset);
-            }
-            bool checked = item.selected;
-            ImGui::BeginDisabled(busy || item.installedOk);
-            if (ImGui::Checkbox("##sel", &checked)) {
-                wuManager_.SetUpdateSelected(item.updateId, checked);
-                item.selected = checked;
-            }
-            ImGui::EndDisabled();
-
-            ImGui::TableSetColumnIndex(1);
-            const std::string shownTitle = EllipsizeUtf8(item.title, ImGui::GetContentRegionAvail().x - 2.0f);
-            const std::string selLabel = shownTitle + "##wuRow";
-            ImGui::AlignTextToFramePadding();
+            const ImVec2 cellStart = ImGui::GetCursorPos();
+            const float col0AvailW = ImGui::GetContentRegionAvail().x;
             const bool isSelectedRow = (selectedWuIndex_ == i);
             if (ImGui::Selectable(
-                    selLabel.c_str(),
+                    "##wuRow",
                     isSelectedRow,
                     ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
                     ImVec2(0.0f, frameH))) {
@@ -435,7 +421,19 @@ void DriverLoomApp::RenderWindowsUpdateTab() {
                 }
                 ImGui::EndPopup();
             }
-            if (shownTitle != item.title && isAppForeground &&
+
+            const float cbOffset = std::floor(std::max(0.0f, (col0AvailW - frameH) * 0.5f));
+            ImGui::SetCursorPos(ImVec2(cellStart.x + cbOffset, cellStart.y));
+            bool checked = item.selected;
+            ImGui::BeginDisabled(busy || item.installedOk);
+            if (ImGui::Checkbox("##sel", &checked)) {
+                wuManager_.SetUpdateSelected(item.updateId, checked);
+                item.selected = checked;
+            }
+            ImGui::EndDisabled();
+
+            ImGui::TableSetColumnIndex(1);
+            if (RenderCellText(item.title, false, true) && isAppForeground &&
                 ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                 ImGui::SetTooltip("%s", item.title.c_str());
             }
