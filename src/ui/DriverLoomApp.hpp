@@ -229,4 +229,5 @@ private:
     std::mutex appHttpMutex_;
     void* activeAppUpdateRequest_{nullptr};
     std::thread appUpdateThread_;
+    std::thread baselineSaveThread_;
 };

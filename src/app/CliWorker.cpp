@@ -117,14 +117,47 @@ int RunCliModeIfRequested() {
     }
 
     std::mutex fileLogMutex;
-    std::ofstream ofs(std::filesystem::path(logPath), std::ios::binary | std::ios::app);
+    hdm::HandleGuard logFile;
+    if (!logPath.empty()) {
+        const std::filesystem::path logFsPath(logPath);
+        const DWORD attrs = GetFileAttributesW(logFsPath.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES) {
+            logFile.Reset(CreateFileW(
+                logFsPath.c_str(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ,
+                nullptr,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr));
+        } else if ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+            logFile.Reset(CreateFileW(
+                logFsPath.c_str(),
+                GENERIC_WRITE,
+                FILE_SHARE_READ,
+                nullptr,
+                TRUNCATE_EXISTING,
+                FILE_ATTRIBUTE_NORMAL,
+                nullptr));
+        }
+    }
     auto writeRawLine = [&](const std::string& rawLine) {
         std::lock_guard<std::mutex> lock(fileLogMutex);
-        if (!ofs.is_open()) {
+        if (!logFile.IsValid()) {
             return;
         }
-        ofs << rawLine << "\n";
-        ofs.flush();
+        const std::string line = rawLine + "\n";
+        DWORD offset = 0;
+        const DWORD total = static_cast<DWORD>(line.size());
+        while (offset < total) {
+            DWORD written = 0;
+            if (!WriteFile(logFile.Get(), line.data() + offset, total - offset, &written, nullptr) ||
+                written == 0) {
+                break;
+            }
+            offset += written;
+        }
+        FlushFileBuffers(logFile.Get());
     };
     hdm::LogCallback fileLogger = [&](hdm::LogLevel lvl, const std::string& msg) {
         const char* tag = "[INFO] ";
@@ -144,6 +177,11 @@ int RunCliModeIfRequested() {
         const hdm::LocalInstallSummary summary =
             hdm::LocalDriverInstaller::InstallFromFolderSync(
                 targetArg, forceInf, restoreBefore, fileLogger);
+        writeRawLine("[META] INF_SUMMARY " + std::to_string(summary.totalFiles) + " " +
+                     std::to_string(summary.installedCount) + " " +
+                     std::to_string(summary.stagedOnlyCount) + " " +
+                     std::to_string(summary.failedCount) + " " +
+                     (summary.rebootRequired ? "1" : "0"));
         if (summary.totalFiles == 0 || summary.failedCount > 0) {
             return 1;
         }
@@ -164,7 +202,10 @@ int RunCliModeIfRequested() {
         bool rebootReq = false;
         hdm::LocalDriverInstaller::RemoveDriverStorePackagesSync(
             names, restoreBefore, fileLogger, &removed, &failed, &rebootReq);
-        if (names.empty() || (failed > 0 && removed == 0)) {
+        writeRawLine("[META] RM_SUMMARY " + std::to_string(removed) + " " +
+                     std::to_string(failed) + " " +
+                     (rebootReq ? "1" : "0"));
+        if (names.empty() || failed > 0) {
             return 1;
         }
         return rebootReq ? 2 : 0;

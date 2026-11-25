@@ -38,7 +38,7 @@ inline void DetectSystemLanguage() noexcept {
         SetLang(Lang::Uk);
     } else if (primary == LANG_RUSSIAN) {
         SetLang(Lang::Ru);
-    } else if (primary == LANG_ENGLISH) {
+    } else {
         SetLang(Lang::En);
     }
 }
@@ -569,10 +569,32 @@ inline void ReplaceAllInPlace(std::string& s, std::string_view from, std::string
     }
 
     if (lang == Lang::En) {
-        detail::ReplaceAllInPlace(out, " ГБ", " GB");
-        detail::ReplaceAllInPlace(out, " МБ", " MB");
-        detail::ReplaceAllInPlace(out, " КБ", " KB");
-        detail::ReplaceAllInPlace(out, " Б", " B");
+        auto replaceByteUnit = [](std::string& text, std::string_view from, std::string_view to) {
+            size_t pos = 0;
+            while ((pos = text.find(from, pos)) != std::string::npos) {
+                const bool precededByDigit =
+                    (pos > 0 && text[pos - 1] >= '0' && text[pos - 1] <= '9');
+                const size_t afterPos = pos + from.size();
+                const unsigned char nextCh =
+                    (afterPos < text.size()) ? static_cast<unsigned char>(text[afterPos]) : 0;
+                const bool followedByWordChar =
+                    (afterPos < text.size()) &&
+                    ((nextCh >= 'A' && nextCh <= 'Z') ||
+                     (nextCh >= 'a' && nextCh <= 'z') ||
+                     (nextCh >= '0' && nextCh <= '9') ||
+                     (nextCh >= 0x80));
+                if (precededByDigit && !followedByWordChar) {
+                    text.replace(pos, from.size(), to);
+                    pos += to.size();
+                } else {
+                    pos += from.size();
+                }
+            }
+        };
+        replaceByteUnit(out, " ГБ", " GB");
+        replaceByteUnit(out, " МБ", " MB");
+        replaceByteUnit(out, " КБ", " KB");
+        replaceByteUnit(out, " Б", " B");
     }
     return out;
 }

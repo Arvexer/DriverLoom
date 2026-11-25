@@ -408,7 +408,9 @@ void LocalDriverInstaller::InstallFromFolderAsync(
             if (createRestorePoint) {
                 args += L" --restore-before";
             }
-            args += L" --log " + QuoteWin32Arg(tempLog.wstring());
+            if (!tempLog.empty()) {
+                args += L" --log " + QuoteWin32Arg(tempLog.wstring());
+            }
 
             {
                 std::lock_guard<std::mutex> lock(dataMutex_);
@@ -416,10 +418,31 @@ void LocalDriverInstaller::InstallFromFolderAsync(
             }
 
             progress_.store(0.25f);
-            const ElevatedRunResult run =
-                ExecuteElevatedSelf(args, true, &tempLog, log, nullptr, &shuttingDown_);
+            bool gotSummary = false;
+            auto onControlLine = [&](const std::string& ctrl) {
+                if (ctrl.rfind("INF_SUMMARY ", 0) == 0) {
+                    std::istringstream iss(ctrl.substr(12));
+                    size_t tot = 0;
+                    size_t inst = 0;
+                    size_t staged = 0;
+                    size_t fail = 0;
+                    int reb = 0;
+                    if (iss >> tot >> inst >> staged >> fail >> reb) {
+                        summary.totalFiles = tot;
+                        summary.installedCount = inst;
+                        summary.stagedOnlyCount = staged;
+                        summary.failedCount = fail;
+                        summary.rebootRequired = (reb != 0);
+                        gotSummary = true;
+                    }
+                }
+            };
+            const ElevatedRunResult run = ExecuteElevatedSelf(
+                args, true, tempLog.empty() ? nullptr : &tempLog, log, onControlLine, &shuttingDown_);
             std::error_code ec;
-            std::filesystem::remove(tempLog, ec);
+            if (!tempLog.empty()) {
+                std::filesystem::remove(tempLog, ec);
+            }
 
             if (!run.launched) {
                 if (run.launchError == ERROR_CANCELLED) {
@@ -431,9 +454,11 @@ void LocalDriverInstaller::InstallFromFolderAsync(
                         "Ошибка запуска ShellExecuteExW: " + FormatWin32Error(run.launchError));
                 }
             } else if (run.cancelled || run.timedOutWaiting) {
-                summary.failedCount = 1;
-            } else {
-                // Exit code from elevated worker:
+                if (!gotSummary) {
+                    summary.failedCount = 1;
+                }
+            } else if (!gotSummary) {
+                // Fallback from exit code from elevated worker:
                 // 0 = success, 2 = reboot required (with success), 1 = error(s).
                 if (run.exitCode == 2) {
                     summary.rebootRequired = true;
@@ -1157,13 +1182,32 @@ void LocalDriverInstaller::RemoveDriverStorePackagesAsync(
             if (createRestorePoint) {
                 args += L" --restore-before";
             }
-            args += L" --log " + QuoteWin32Arg(tempLog.wstring());
+            if (!tempLog.empty()) {
+                args += L" --log " + QuoteWin32Arg(tempLog.wstring());
+            }
 
             progress_.store(0.35f);
-            const ElevatedRunResult run =
-                ExecuteElevatedSelf(args, true, &tempLog, log, nullptr, &shuttingDown_);
+            bool gotSummary = false;
+            auto onControlLine = [&](const std::string& ctrl) {
+                if (ctrl.rfind("RM_SUMMARY ", 0) == 0) {
+                    std::istringstream iss(ctrl.substr(11));
+                    size_t rem = 0;
+                    size_t fail = 0;
+                    int reb = 0;
+                    if (iss >> rem >> fail >> reb) {
+                        removedCount = rem;
+                        failedCount = fail;
+                        rebootReq = (reb != 0);
+                        gotSummary = true;
+                    }
+                }
+            };
+            const ElevatedRunResult run = ExecuteElevatedSelf(
+                args, true, tempLog.empty() ? nullptr : &tempLog, log, onControlLine, &shuttingDown_);
             std::error_code ec;
-            std::filesystem::remove(tempLog, ec);
+            if (!tempLog.empty()) {
+                std::filesystem::remove(tempLog, ec);
+            }
 
             if (!run.launched) {
                 failedCount = names.size();
@@ -1175,13 +1219,15 @@ void LocalDriverInstaller::RemoveDriverStorePackagesAsync(
                             "Ошибка запуска ShellExecuteExW: " + FormatWin32Error(run.launchError));
                     }
                 }
-            } else if (run.exitCode == 2) {
-                removedCount = names.size();
-                rebootReq = true;
-            } else if (run.exitCode == 0) {
-                removedCount = names.size();
-            } else {
-                failedCount = names.size();
+            } else if (!gotSummary) {
+                if (run.exitCode == 2) {
+                    removedCount = names.size();
+                    rebootReq = true;
+                } else if (run.exitCode == 0) {
+                    removedCount = names.size();
+                } else {
+                    failedCount = names.size();
+                }
             }
             progress_.store(1.0f);
         }

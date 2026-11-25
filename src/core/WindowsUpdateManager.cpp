@@ -365,8 +365,13 @@ JobWaitOutcome WaitForWuJob(
         }
 
         VARIANT_BOOL done = VARIANT_FALSE;
-        if (SUCCEEDED(job->get_IsCompleted(&done)) && done == VARIANT_TRUE) {
+        const HRESULT hrDone = job->get_IsCompleted(&done);
+        if (SUCCEEDED(hrDone) && done == VARIANT_TRUE) {
             outcome = JobWaitOutcome::Completed;
+            break;
+        }
+        if (FAILED(hrDone)) {
+            outcome = JobWaitOutcome::TimedOut;
             break;
         }
 
@@ -421,6 +426,26 @@ JobWaitOutcome WaitForWuJob(
         *outAbortedCleanly = aborted;
     }
     return outcome;
+}
+
+bool RecreateWuSessionAndSearcher(
+    ComPtr<IUpdateSession>& session,
+    ComPtr<IUpdateSearcher>& searcher) {
+    session.Reset();
+    searcher.Reset();
+    HRESULT hr = CoCreateInstance(
+        CLSID_UpdateSession,
+        nullptr,
+        CLSCTX_INPROC_SERVER,
+        IID_IUpdateSession,
+        reinterpret_cast<void**>(session.Put()));
+    if (FAILED(hr) || !session) {
+        return false;
+    }
+    BstrGuard appId(L"DriverLoom");
+    session->put_ClientApplicationID(appId.Get());
+    hr = session->CreateUpdateSearcher(searcher.Put());
+    return SUCCEEDED(hr) && searcher;
 }
 
 HRESULT RunAsyncSearch(
@@ -1319,7 +1344,8 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
     }
 
     // Pass 2: Online fallback only if some requested UpdateIDs are absent from local cache.
-    if (matchedById.size() < requestedSet.size() && session && searcher) {
+    if (matchedById.size() < requestedSet.size() &&
+        ((session && searcher) || RecreateWuSessionAndSearcher(session, searcher))) {
         setProg(0.07f, "Запрос метаданных на сервере Windows Update...");
         if (onLog) {
             onLog(LogLevel::Info, "Запрос недостающих метаданных с сервера Windows Update...");
@@ -2024,7 +2050,8 @@ bool WindowsUpdateManager::SetUpdatesHiddenSync(
             collectMatches(offlineRes.Get());
         }
     }
-    if (matchedById.size() < requestedSet.size() && session && searcher) {
+    if (matchedById.size() < requestedSet.size() &&
+        ((session && searcher) || RecreateWuSessionAndSearcher(session, searcher))) {
         ComPtr<ISearchResult> onlineRes;
         bool aborted = true;
         JobWaitOutcome outcome = JobWaitOutcome::Completed;

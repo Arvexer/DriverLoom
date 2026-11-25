@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <sstream>
 
 std::atomic<bool> g_windowRegainedFocus{false};
@@ -93,7 +94,33 @@ std::string UrlEncode(const std::string& value) {
 }
 
 void OpenUrlInBrowser(const std::string& url) {
-    const std::wstring wUrl = hdm::Utf8ToWide(url);
+    size_t start = 0;
+    size_t end = url.size();
+    while (start < end && (url[start] == ' ' || url[start] == '\t' ||
+                           url[start] == '\r' || url[start] == '\n')) {
+        ++start;
+    }
+    while (end > start && (url[end - 1] == ' ' || url[end - 1] == '\t' ||
+                           url[end - 1] == '\r' || url[end - 1] == '\n')) {
+        --end;
+    }
+    const std::string_view clean(url.data() + start, end - start);
+    if (clean.empty()) {
+        return;
+    }
+    for (unsigned char ch : clean) {
+        if (ch < 0x20 || ch == 0x7F) {
+            return;
+        }
+    }
+    const std::string lower = hdm::ToLowerAscii(clean.substr(0, 10));
+    const bool allowed = (lower.rfind("https://", 0) == 0) ||
+                         (lower.rfind("http://", 0) == 0) ||
+                         (lower.rfind("mailto:", 0) == 0);
+    if (!allowed) {
+        return;
+    }
+    const std::wstring wUrl = hdm::Utf8ToWide(clean);
     ShellExecuteW(nullptr, L"open", wUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
@@ -511,14 +538,28 @@ bool LoadBaselineSnapshotFromRegistry(
             type != REG_SZ || bytes < sizeof(wchar_t)) {
             return false;
         }
-        std::vector<wchar_t> buf(bytes / sizeof(wchar_t) + 2, L'\0');
-        if (RegQueryValueExW(
+        std::vector<wchar_t> buf;
+        LSTATUS st = ERROR_MORE_DATA;
+        for (int attempt = 0; attempt < 4; ++attempt) {
+            buf.assign(bytes / sizeof(wchar_t) + 2, L'\0');
+            DWORD bufBytes = static_cast<DWORD>(buf.size() * sizeof(wchar_t));
+            st = RegQueryValueExW(
                 key.Get(),
                 name,
                 nullptr,
                 &type,
                 reinterpret_cast<LPBYTE>(buf.data()),
-                &bytes) != ERROR_SUCCESS) {
+                &bufBytes);
+            if (st == ERROR_SUCCESS && type == REG_SZ) {
+                bytes = bufBytes;
+                break;
+            }
+            if (st != ERROR_MORE_DATA) {
+                return false;
+            }
+            bytes = bufBytes;
+        }
+        if (st != ERROR_SUCCESS) {
             return false;
         }
         const size_t maxChars = bytes / sizeof(wchar_t);
@@ -1586,13 +1627,31 @@ int CompareVersionOrString(const std::string& a, const std::string& b) {
     if (a.empty()) return 1;
     if (b.empty()) return -1;
 
-    auto extractNums = [](const std::string& s) {
+    auto splitSemVer = [](std::string_view s) -> std::pair<std::string_view, std::string_view> {
+        const size_t plusPos = s.find('+');
+        if (plusPos != std::string_view::npos) {
+            s = s.substr(0, plusPos);
+        }
+        const size_t dashPos = s.find('-');
+        if (dashPos == std::string_view::npos) {
+            return {s, {}};
+        }
+        return {s.substr(0, dashPos), s.substr(dashPos + 1)};
+    };
+
+    auto extractNums = [](std::string_view s) {
         std::vector<unsigned long long> nums;
         unsigned long long cur = 0;
         bool inNum = false;
         for (char ch : s) {
             if (ch >= '0' && ch <= '9') {
-                cur = cur * 10 + static_cast<unsigned long long>(ch - '0');
+                const unsigned long long d = static_cast<unsigned long long>(ch - '0');
+                constexpr unsigned long long kMaxVal = (std::numeric_limits<unsigned long long>::max)();
+                if (cur > (kMaxVal - d) / 10ULL) {
+                    cur = kMaxVal;
+                } else {
+                    cur = cur * 10ULL + d;
+                }
                 inNum = true;
             } else if (inNum) {
                 nums.push_back(cur);
@@ -1604,14 +1663,77 @@ int CompareVersionOrString(const std::string& a, const std::string& b) {
         return nums;
     };
 
-    const auto va = extractNums(a);
-    const auto vb = extractNums(b);
+    auto comparePrerelease = [](std::string_view pa, std::string_view pb) -> int {
+        auto splitParts = [](std::string_view sv) {
+            std::vector<std::string_view> parts;
+            size_t i = 0;
+            while (i < sv.size()) {
+                while (i < sv.size() && (sv[i] == '.' || sv[i] == '-')) ++i;
+                if (i >= sv.size()) break;
+                size_t j = i;
+                while (j < sv.size() && sv[j] != '.' && sv[j] != '-') ++j;
+                parts.push_back(sv.substr(i, j - i));
+                i = j;
+            }
+            return parts;
+        };
+        auto isDigits = [](std::string_view tok) {
+            if (tok.empty()) return false;
+            for (char c : tok) {
+                if (c < '0' || c > '9') return false;
+            }
+            return true;
+        };
+        auto parseUint = [](std::string_view tok) {
+            unsigned long long v = 0;
+            constexpr unsigned long long kMaxVal = (std::numeric_limits<unsigned long long>::max)();
+            for (char c : tok) {
+                const unsigned long long d = static_cast<unsigned long long>(c - '0');
+                v = (v > (kMaxVal - d) / 10ULL) ? kMaxVal : (v * 10ULL + d);
+            }
+            return v;
+        };
+
+        const auto sa = splitParts(pa);
+        const auto sb = splitParts(pb);
+        const size_t n = std::min(sa.size(), sb.size());
+        for (size_t i = 0; i < n; ++i) {
+            const bool da = isDigits(sa[i]);
+            const bool db = isDigits(sb[i]);
+            if (da && db) {
+                const auto va = parseUint(sa[i]);
+                const auto vb = parseUint(sb[i]);
+                if (va != vb) return (va < vb) ? -1 : 1;
+            } else if (da != db) {
+                return da ? -1 : 1;
+            } else {
+                const std::string la = hdm::ToLowerAscii(sa[i]);
+                const std::string lb = hdm::ToLowerAscii(sb[i]);
+                if (la != lb) return (la < lb) ? -1 : 1;
+            }
+        }
+        if (sa.size() != sb.size()) {
+            return (sa.size() < sb.size()) ? -1 : 1;
+        }
+        return 0;
+    };
+
+    const auto [coreA, preA] = splitSemVer(a);
+    const auto [coreB, preB] = splitSemVer(b);
+    const auto va = extractNums(coreA);
+    const auto vb = extractNums(coreB);
     if (!va.empty() && !vb.empty()) {
         const size_t n = std::max(va.size(), vb.size());
         for (size_t i = 0; i < n; ++i) {
             const auto na = i < va.size() ? va[i] : 0ULL;
             const auto nb = i < vb.size() ? vb[i] : 0ULL;
             if (na != nb) return (na < nb) ? -1 : 1;
+        }
+        if (preA.empty() != preB.empty()) {
+            return preA.empty() ? 1 : -1;
+        }
+        if (!preA.empty() && !preB.empty()) {
+            return comparePrerelease(preA, preB);
         }
         return 0;
     }

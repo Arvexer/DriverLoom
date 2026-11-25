@@ -655,6 +655,21 @@ void EmitDecodedLines(
     }
 }
 
+bool IsServiceActive(SC_HANDLE scm, const wchar_t* svcName) {
+    ScHandleGuard svc(OpenServiceW(scm, svcName, SERVICE_QUERY_STATUS));
+    if (!svc.IsValid()) {
+        return false;
+    }
+    SERVICE_STATUS_PROCESS ssp{};
+    DWORD bytes = 0;
+    if (!QueryServiceStatusEx(
+            svc.Get(), SC_STATUS_PROCESS_INFO,
+            reinterpret_cast<LPBYTE>(&ssp), sizeof(ssp), &bytes)) {
+        return false;
+    }
+    return ssp.dwCurrentState != SERVICE_STOPPED;
+}
+
 bool StopServiceWithWait(SC_HANDLE scm, const wchar_t* svcName, const LogCallback& onLog) {
     ScHandleGuard svc(OpenServiceW(scm, svcName, SERVICE_STOP | SERVICE_QUERY_STATUS));
     if (!svc.IsValid()) {
@@ -1144,7 +1159,7 @@ void SystemDiagnostics::StartScanAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog) {
     std::lock_guard<std::mutex> lock(threadMutex_);
-    if (stopRequested_.load() || scanning_.exchange(true)) {
+    if (stopRequested_.load() || runningAction_.load() || scanning_.exchange(true)) {
         return;
     }
     if (scanThread_.joinable()) {
@@ -1155,7 +1170,7 @@ void SystemDiagnostics::StartScanAsync(
         auto snap = CollectSynchronously(devs);
         const size_t disabledSvc = snap.disabledCriticalServices;
         const size_t attCtrl = snap.attentionControllers;
-        if (!stopRequested_.load()) {
+        if (!stopRequested_.load() && !runningAction_.load()) {
             {
                 std::lock_guard<std::mutex> dataLock(dataMutex_);
                 snapshot_ = std::move(snap);
@@ -1375,9 +1390,33 @@ bool SystemDiagnostics::ResetWuDownloadCacheSync(const LogCallback& onLog) {
         onLog(LogLevel::Info, "Остановка служб wuauserv и BITS...");
     }
     ScHandleGuard scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));
-    if (scm.IsValid()) {
-        StopServiceWithWait(scm.Get(), L"bits", onLog);
-        StopServiceWithWait(scm.Get(), L"wuauserv", onLog);
+    if (!scm.IsValid()) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Не удалось открыть диспетчер служб Windows: " +
+                      FormatWin32Error(GetLastError()));
+        }
+        return false;
+    }
+
+    const bool wasBitsRunning = IsServiceActive(scm.Get(), L"bits");
+    const bool wasWuRunning = IsServiceActive(scm.Get(), L"wuauserv");
+    const bool bitsStopped = !wasBitsRunning || StopServiceWithWait(scm.Get(), L"bits", onLog);
+    const bool wuStopped = !wasWuRunning || StopServiceWithWait(scm.Get(), L"wuauserv", onLog);
+    if (!bitsStopped || !wuStopped) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Не удалось остановить службы wuauserv/BITS — очистка кэша Windows Update отменена.");
+        }
+        if (wasWuRunning) {
+            ScHandleGuard wuSvc(OpenServiceW(scm.Get(), L"wuauserv", SERVICE_START));
+            if (wuSvc.IsValid()) StartServiceW(wuSvc.Get(), 0, nullptr);
+        }
+        if (wasBitsRunning) {
+            ScHandleGuard bitsSvc(OpenServiceW(scm.Get(), L"bits", SERVICE_START));
+            if (bitsSvc.IsValid()) StartServiceW(bitsSvc.Get(), 0, nullptr);
+        }
+        return false;
     }
 
     wchar_t winDir[MAX_PATH]{};
@@ -1385,6 +1424,14 @@ bool SystemDiagnostics::ResetWuDownloadCacheSync(const LogCallback& onLog) {
     if (winLen == 0 || winLen >= MAX_PATH) {
         if (onLog) {
             onLog(LogLevel::Error, "Не удалось определить папку Windows.");
+        }
+        if (wasWuRunning) {
+            ScHandleGuard wuSvc(OpenServiceW(scm.Get(), L"wuauserv", SERVICE_START));
+            if (wuSvc.IsValid()) StartServiceW(wuSvc.Get(), 0, nullptr);
+        }
+        if (wasBitsRunning) {
+            ScHandleGuard bitsSvc(OpenServiceW(scm.Get(), L"bits", SERVICE_START));
+            if (bitsSvc.IsValid()) StartServiceW(bitsSvc.Get(), 0, nullptr);
         }
         return false;
     }
@@ -1411,10 +1458,16 @@ bool SystemDiagnostics::ResetWuDownloadCacheSync(const LogCallback& onLog) {
         }
     }
 
-    if (scm.IsValid()) {
+    if (wasWuRunning) {
         ScHandleGuard wuSvc(OpenServiceW(scm.Get(), L"wuauserv", SERVICE_START));
         if (wuSvc.IsValid()) {
             StartServiceW(wuSvc.Get(), 0, nullptr);
+        }
+    }
+    if (wasBitsRunning) {
+        ScHandleGuard bitsSvc(OpenServiceW(scm.Get(), L"bits", SERVICE_START));
+        if (bitsSvc.IsValid()) {
+            StartServiceW(bitsSvc.Get(), 0, nullptr);
         }
     }
 

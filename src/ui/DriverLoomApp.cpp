@@ -53,6 +53,9 @@ DriverLoomApp::~DriverLoomApp() {
     if (appUpdateThread_.joinable()) {
         appUpdateThread_.join();
     }
+    if (baselineSaveThread_.joinable()) {
+        baselineSaveThread_.join();
+    }
     ShutdownTaskbarOverlay();
 }
 
@@ -551,7 +554,9 @@ void DriverLoomApp::RenderSettingsTab() {
         ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
 
         const float halfW = std::max(220.0f, (fullW - gap) * 0.5f);
-        const float modeCardH = std::round(112.0f * uiScale);
+        const float modeCardH = std::max(
+            std::round(124.0f * uiScale),
+            ImGui::GetTextLineHeightWithSpacing() * 5.0f + std::round(26.0f * uiScale));
 
         auto renderModeCard = [&](const char* id,
                                   const char* title,
@@ -846,30 +851,35 @@ void DriverLoomApp::RenderSettingsTab() {
                 "Safe native driver, gaming runtime, and Windows 10/11 diagnostics manager. Author: Arvexer."));
         ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
 
-        if (RenderPrimaryButton(hdm::Tr("Открыть GitHub###SetGh", "Відкрити GitHub###SetGh", "Open GitHub###SetGh"))) {
+        const char* ghLbl = hdm::Tr("Открыть GitHub###SetGh", "Відкрити GitHub###SetGh", "Open GitHub###SetGh");
+        const char* chkLbl = hdm::Tr(
+            "Проверить обновления###SetChkUpd",
+            "Перевірити оновлення###SetChkUpd",
+            "Check for Updates###SetChkUpd");
+        const char* issLbl = hdm::Tr(
+            "Сообщить о проблеме###SetIss",
+            "Повідомити про проблему###SetIss",
+            "Report Issue###SetIss");
+        const char* kofiLbl = hdm::Tr(
+            "Поддержать (Ko-fi)###SetKofi",
+            "Підтримати (Ko-fi)###SetKofi",
+            "Support (Ko-fi)###SetKofi");
+
+        if (RenderPrimaryButton(ghLbl)) {
             OpenUrlInBrowser("https://github.com/Arvexer/DriverLoom");
         }
-        ImGui::SameLine();
+        SameLineWrapIfNeeded(CalcButtonWidth(chkLbl));
         ImGui::BeginDisabled(checkingAppUpdate_.load());
-        if (RenderSecondaryButton(hdm::Tr(
-                "Проверить обновления###SetChkUpd",
-                "Перевірити оновлення###SetChkUpd",
-                "Check for Updates###SetChkUpd"))) {
+        if (RenderSecondaryButton(chkLbl)) {
             StartAppUpdateCheckAsync(true);
         }
         ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (RenderSecondaryButton(hdm::Tr(
-                "Сообщить о проблеме###SetIss",
-                "Повідомити про проблему###SetIss",
-                "Report Issue###SetIss"))) {
+        SameLineWrapIfNeeded(CalcButtonWidth(issLbl));
+        if (RenderSecondaryButton(issLbl)) {
             OpenUrlInBrowser("https://github.com/Arvexer/DriverLoom/issues");
         }
-        ImGui::SameLine();
-        if (RenderSecondaryButton(hdm::Tr(
-                "Поддержать (Ko-fi)###SetKofi",
-                "Підтримати (Ko-fi)###SetKofi",
-                "Support (Ko-fi)###SetKofi"))) {
+        SameLineWrapIfNeeded(CalcButtonWidth(kofiLbl));
+        if (RenderSecondaryButton(kofiLbl)) {
             OpenUrlInBrowser("https://ko-fi.com/arvexer");
         }
         if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
@@ -968,7 +978,13 @@ void DriverLoomApp::CaptureCurrentAsBaseline(bool logNotification) {
         e.health = static_cast<int>(d.health);
         baselineEntries_.push_back(std::move(e));
     }
-    SaveBaselineSnapshotToRegistry(baselineTimestamp_, baselineEntries_);
+    if (baselineSaveThread_.joinable()) {
+        baselineSaveThread_.join();
+    }
+    baselineSaveThread_ = std::thread(
+        [ts = baselineTimestamp_, entries = baselineEntries_]() {
+            SaveBaselineSnapshotToRegistry(ts, entries);
+        });
     RebuildSnapshotDiff();
 
     if (logNotification) {
@@ -1652,7 +1668,7 @@ void DriverLoomApp::SameLineWrapIfNeeded(float nextItemWidth) {
 }
 
 float DriverLoomApp::CalcButtonWidth(const char* label) {
-    return ImGui::CalcTextSize(label).x + ImGui::GetStyle().FramePadding.x * 2.0f;
+    return ImGui::CalcTextSize(label, nullptr, true).x + ImGui::GetStyle().FramePadding.x * 2.0f;
 }
 
 const hdm::DeviceInfo* DriverLoomApp::FindSelectedDevice() const {

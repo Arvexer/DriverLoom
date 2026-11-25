@@ -217,6 +217,20 @@ void DriverLoomApp::RenderOverviewTab() {
 
         // Action Buttons Row
         const float btnH = std::round(34.0f * uiScale);
+        bool hasPrevBtn = false;
+        const char* instAllLblFmt = hdm::Tr(
+            "Установить рекомендуемое (%zu)###HeroInstAll",
+            "Встановити рекомендоване (%zu)###HeroInstAll",
+            "Install Recommended (%zu)###HeroInstAll");
+        const char* rescanLbl = hdm::Tr(
+            "Проверить снова###HeroRescan",
+            "Перевірити знову###HeroRescan",
+            "Rescan PC###HeroRescan");
+        const char* wuLbl = hdm::Tr(
+            "Проверить Windows Update###HeroWu",
+            "Перевірити Windows Update###HeroWu",
+            "Check Windows Update###HeroWu");
+
         if (disabledSvcs > 0) {
             if (RenderPrimaryButton(
                     hdm::Tr("Перейти к службам###HeroFixSvc", "Перейти до служб###HeroFixSvc", "Fix Disabled Services###HeroFixSvc"),
@@ -224,7 +238,7 @@ void DriverLoomApp::RenderOverviewTab() {
                 diagSectionIndex_ = 1;
                 NavigateTo(PageDiagnostics);
             }
-            ImGui::SameLine();
+            hasPrevBtn = true;
         } else if (criticalDeviceErrorCount_ > 0) {
             if (RenderPrimaryButton(
                     hdm::Tr("Открыть проблемные устройства###HeroFixDev", "Відкрити проблемні пристрої###HeroFixDev", "View Failing Devices###HeroFixDev"),
@@ -233,42 +247,31 @@ void DriverLoomApp::RenderOverviewTab() {
                 deviceViewDirty_ = true;
                 NavigateTo(PageDevices);
             }
-            ImGui::SameLine();
+            hasPrevBtn = true;
             if (!batchTargets.empty()) {
                 char instAllLbl[96];
-                std::snprintf(
-                    instAllLbl,
-                    sizeof(instAllLbl),
-                    hdm::Tr(
-                        "Установить рекомендуемое (%zu)###HeroInstAll",
-                        "Встановити рекомендоване (%zu)###HeroInstAll",
-                        "Install Recommended (%zu)###HeroInstAll"),
-                    batchTargets.size());
+                std::snprintf(instAllLbl, sizeof(instAllLbl), instAllLblFmt, batchTargets.size());
+                if (hasPrevBtn) {
+                    SameLineWrapIfNeeded(CalcButtonWidth(instAllLbl));
+                }
                 ImGui::BeginDisabled(anyBusy);
                 if (RenderSecondaryButton(instAllLbl, ImVec2(0.0f, btnH))) {
                     componentsScanner_.DownloadAndInstallBatchAsync(
                         batchTargets, devicesCache_, MakeLogger(), true);
                 }
                 ImGui::EndDisabled();
-                ImGui::SameLine();
+                hasPrevBtn = true;
             }
         } else if (!batchTargets.empty()) {
             char instAllLbl[96];
-            std::snprintf(
-                instAllLbl,
-                sizeof(instAllLbl),
-                hdm::Tr(
-                    "Установить рекомендуемое (%zu)###HeroInstAll",
-                    "Встановити рекомендоване (%zu)###HeroInstAll",
-                    "Install Recommended (%zu)###HeroInstAll"),
-                batchTargets.size());
+            std::snprintf(instAllLbl, sizeof(instAllLbl), instAllLblFmt, batchTargets.size());
             ImGui::BeginDisabled(anyBusy);
             if (RenderPrimaryButton(instAllLbl, ImVec2(0.0f, btnH))) {
                 componentsScanner_.DownloadAndInstallBatchAsync(
                     batchTargets, devicesCache_, MakeLogger(), true);
             }
             ImGui::EndDisabled();
-            ImGui::SameLine();
+            hasPrevBtn = true;
         } else {
             ImGui::BeginDisabled(anyBusy);
             if (RenderPrimaryButton(
@@ -277,24 +280,26 @@ void DriverLoomApp::RenderOverviewTab() {
                 scanner_.StartScanAsync(MakeLogger());
             }
             ImGui::EndDisabled();
-            ImGui::SameLine();
+            hasPrevBtn = true;
         }
 
         if (!batchTargets.empty() || disabledSvcs > 0 || criticalDeviceErrorCount_ > 0) {
+            if (hasPrevBtn) {
+                SameLineWrapIfNeeded(CalcButtonWidth(rescanLbl));
+            }
             ImGui::BeginDisabled(anyBusy);
-            if (RenderSecondaryButton(
-                    hdm::Tr("Проверить снова###HeroRescan", "Перевірити знову###HeroRescan", "Rescan PC###HeroRescan"),
-                    ImVec2(0.0f, btnH))) {
+            if (RenderSecondaryButton(rescanLbl, ImVec2(0.0f, btnH))) {
                 scanner_.StartScanAsync(MakeLogger());
             }
             ImGui::EndDisabled();
-            ImGui::SameLine();
+            hasPrevBtn = true;
         }
 
+        if (hasPrevBtn) {
+            SameLineWrapIfNeeded(CalcButtonWidth(wuLbl));
+        }
         ImGui::BeginDisabled(wuManager_.IsBusy());
-        if (RenderSecondaryButton(
-                hdm::Tr("Проверить Windows Update###HeroWu", "Перевірити Windows Update###HeroWu", "Check Windows Update###HeroWu"),
-                ImVec2(0.0f, btnH))) {
+        if (RenderSecondaryButton(wuLbl, ImVec2(0.0f, btnH))) {
             wuHasSearchedOnce_ = true;
             selectedWuIndex_ = -1;
             wuManager_.StartSearchAsync(MakeLogger(), !wuIncludeSystemUpdates_);
@@ -331,7 +336,11 @@ void DriverLoomApp::RenderOverviewTab() {
     // 2. FOUR SUMMARY TILES (2x2 Grid)
     // =========================================================================
     const float tileW = std::max(220.0f, (fullW - gap) * 0.5f);
-    const float tileH = std::round(126.0f * uiScale);
+    const float extraTileLine = (tileW < 430.0f * uiScale) ? ImGui::GetTextLineHeightWithSpacing() : 0.0f;
+    const float tileH = std::max(
+        std::round(138.0f * uiScale),
+        ImGui::GetTextLineHeightWithSpacing() * 4.5f + ImGui::GetFrameHeight() +
+            std::round(32.0f * uiScale) + extraTileLine);
     const float tilePad = std::round(15.0f * uiScale);
 
     auto renderSummaryTile = [&](const char* id,

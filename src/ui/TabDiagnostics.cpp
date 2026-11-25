@@ -712,7 +712,7 @@ void DriverLoomApp::RenderDiagnosticsTab() {
             oss << "## DriverLoom Before / After (" << baselineTimestamp_ << ")\n";
             for (const auto& r : snapshotDiffRows_) {
                 if (r.kind == SnapshotDiffKind::Unchanged) continue;
-                oss << "- **" << r.name << "** (" << r.deviceClass << "): `"
+                oss << "- **" << hdm::TrDyn(r.name) << "** (" << r.deviceClass << "): `"
                     << r.beforeSummary << "` -> `" << r.afterSummary << "`\n";
             }
             ImGui::SetClipboardText(oss.str().c_str());

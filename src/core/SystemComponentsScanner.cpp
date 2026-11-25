@@ -376,7 +376,7 @@ bool IsHostWindows11() {
     return sIsWin11;
 }
 
-bool IsVersionNewer(const std::string& latest, const std::string& current) {
+bool IsDriverVersionNewer(const std::string& latest, const std::string& current) {
     if (latest.empty() || current.empty()) {
         return false;
     }
@@ -391,6 +391,26 @@ bool IsVersionNewer(const std::string& latest, const std::string& current) {
         TryExtractTrailingVersionDate(b, dateB) &&
         dateA != dateB) {
         return dateA > dateB;
+    }
+    const size_t n = std::max(a.size(), b.size());
+    for (size_t i = 0; i < n; ++i) {
+        const uint64_t va = i < a.size() ? a[i] : 0;
+        const uint64_t vb = i < b.size() ? b[i] : 0;
+        if (va != vb) {
+            return va > vb;
+        }
+    }
+    return false;
+}
+
+bool IsVersionNewer(const std::string& latest, const std::string& current) {
+    if (latest.empty() || current.empty()) {
+        return false;
+    }
+    const auto a = ParseVersionParts(latest);
+    const auto b = ParseVersionParts(current);
+    if (a.empty() || b.empty()) {
+        return false;
     }
     const size_t n = std::max(a.size(), b.size());
     for (size_t i = 0; i < n; ++i) {
@@ -592,6 +612,7 @@ std::string FormatNvidiaDriverVersion(const std::string& infDriverVer) {
 
 struct HttpResponse {
     bool ok{false};
+    bool truncated{false};
     DWORD statusCode{0};
     std::string body;
     std::string locationHeader;
@@ -700,6 +721,7 @@ HttpResponse WinHttpRequest(
         DWORD avail = 0;
         while (WinHttpQueryDataAvailable(request.Get(), &avail) && avail > 0) {
             if (res.body.size() >= maxBytes) {
+                res.truncated = true;
                 break;
             }
             const size_t toRead = std::min<size_t>(avail, maxBytes - res.body.size());
@@ -997,7 +1019,7 @@ CatalogDriverMatch ResolveMsCatalogDriverCab(const std::string& searchKey) {
     const std::wstring searchUrl = Utf8ToWide(
         "https://www.catalog.update.microsoft.com/Search.aspx?q=" +
         UrlEncodeCatalogParam(searchKey));
-    const HttpResponse searchResp = WinHttpRequest(searchUrl, L"GET", true, 512 * 1024);
+    const HttpResponse searchResp = WinHttpRequest(searchUrl, L"GET", true, 1024 * 1024);
     if (!searchResp.ok || searchResp.body.empty()) {
         return {};
     }
@@ -1397,6 +1419,26 @@ std::string SanitizeWingetSilentArgs(std::string_view rawArgs) {
     return sanitized;
 }
 
+std::string StripYamlInlineComment(std::string_view rawVal) {
+    for (size_t i = 0; i < rawVal.size(); ++i) {
+        if (rawVal[i] == '#' && i > 0 && (rawVal[i - 1] == ' ' || rawVal[i - 1] == '\t')) {
+            return TrimCopy(rawVal.substr(0, i));
+        }
+    }
+    return TrimCopy(rawVal);
+}
+
+bool IsPrereleaseVersionLabel(std::string_view ver) {
+    const std::string lower = ToLowerAscii(ver);
+    return lower.find("-alpha") != std::string::npos ||
+           lower.find("-beta") != std::string::npos ||
+           lower.find("-rc") != std::string::npos ||
+           lower.find("-preview") != std::string::npos ||
+           lower.find("-dev") != std::string::npos ||
+           lower.find("-canary") != std::string::npos ||
+           lower.find("-nightly") != std::string::npos;
+}
+
 WingetManifestInfo ParseWingetInstallerYaml(
     const std::string& yaml,
     const std::string& preferredArch) {
@@ -1412,6 +1454,7 @@ WingetManifestInfo ParseWingetInstallerYaml(
     Entry current;
     bool inInstallers = false;
     bool inNestedFiles = false;
+    size_t nestedIndent = std::string::npos;
     std::string topType;
     std::string topNestedPath;
     std::string topSilent;
@@ -1424,15 +1467,25 @@ WingetManifestInfo ParseWingetInstallerYaml(
         if (trimmed.empty() || trimmed[0] == '#') {
             continue;
         }
+        size_t indent = 0;
+        while (indent < rawLine.size() && (rawLine[indent] == ' ' || rawLine[indent] == '\t')) {
+            ++indent;
+        }
 
         if (trimmed == "Installers:") {
             inInstallers = true;
             inNestedFiles = false;
+            nestedIndent = std::string::npos;
             continue;
+        }
+        if (inNestedFiles && indent <= nestedIndent && trimmed.rfind("- ", 0) != 0) {
+            inNestedFiles = false;
+            nestedIndent = std::string::npos;
         }
         if (!rawLine.empty() && rawLine[0] != ' ' && rawLine[0] != '-' &&
             trimmed != "NestedInstallerFiles:") {
             inNestedFiles = false;
+            nestedIndent = std::string::npos;
             if (trimmed.rfind("ManifestType:", 0) == 0 ||
                 trimmed.rfind("ManifestVersion:", 0) == 0) {
                 if (inInstallers && !current.url.empty()) {
@@ -1444,6 +1497,7 @@ WingetManifestInfo ParseWingetInstallerYaml(
         }
         if (trimmed == "NestedInstallerFiles:") {
             inNestedFiles = true;
+            nestedIndent = indent;
             continue;
         }
 
@@ -1459,7 +1513,7 @@ WingetManifestInfo ParseWingetInstallerYaml(
             continue;
         }
         const std::string key = TrimCopy(keyPart.substr(0, colon));
-        const std::string val = TrimCopy(keyPart.substr(colon + 1));
+        const std::string val = StripYamlInlineComment(keyPart.substr(colon + 1));
 
         if (!inInstallers) {
             if (key == "PackageVersion" && !val.empty()) {
@@ -1477,8 +1531,7 @@ WingetManifestInfo ParseWingetInstallerYaml(
             continue;
         }
 
-        if (isListItem &&
-            (key == "Architecture" || key == "InstallerUrl" || key == "InstallerLocale")) {
+        if (isListItem && !inNestedFiles) {
             if (!current.url.empty()) {
                 entries.push_back(current);
                 current = Entry{};
@@ -1507,9 +1560,20 @@ WingetManifestInfo ParseWingetInstallerYaml(
         return info;
     }
 
+    constexpr WORD kProcArchArm64 = 12; // PROCESSOR_ARCHITECTURE_ARM64
+    SYSTEM_INFO sysInfo{};
+    GetNativeSystemInfo(&sysInfo);
+    const bool hostIsArm64 = (sysInfo.wProcessorArchitecture == kProcArchArm64);
+
     auto isSupportedEntry = [&](const Entry& e) {
         const std::string t = e.installerType.empty() ? topType : e.installerType;
-        return t != "msix" && t != "appx" && IsHttpsUrl(e.url);
+        if (t == "msix" || t == "appx" || !IsHttpsUrl(e.url)) {
+            return false;
+        }
+        if (!hostIsArm64 && e.arch == "arm64") {
+            return false;
+        }
+        return true;
     };
 
     const Entry* chosen = nullptr;
@@ -1578,14 +1642,21 @@ WingetManifestInfo ResolveWingetPkgManifest(
     }
 
     const std::vector<std::string> dirs = ExtractGithubTreeNames(treeResp.body, "directory");
-    std::string bestVer;
+    std::string bestStable;
+    std::string bestAny;
     for (const auto& d : dirs) {
         if (!d.empty() && std::isdigit(static_cast<unsigned char>(d[0]))) {
-            if (bestVer.empty() || IsVersionNewer(d, bestVer)) {
-                bestVer = d;
+            if (!IsPrereleaseVersionLabel(d)) {
+                if (bestStable.empty() || IsVersionNewer(d, bestStable)) {
+                    bestStable = d;
+                }
+            }
+            if (bestAny.empty() || IsVersionNewer(d, bestAny)) {
+                bestAny = d;
             }
         }
     }
+    const std::string& bestVer = !bestStable.empty() ? bestStable : bestAny;
     if (bestVer.empty()) {
         return result;
     }
@@ -1661,6 +1732,18 @@ bool HasZipMagicHeader(const std::filesystem::path& filePath) {
     unsigned char hdr[4]{};
     ifs.read(reinterpret_cast<char*>(hdr), 4);
     return ifs.gcount() == 4 && hdr[0] == 'P' && hdr[1] == 'K' && hdr[2] == 0x03 && hdr[3] == 0x04;
+}
+
+bool HasMsiMagicHeader(const std::filesystem::path& filePath) {
+    std::ifstream ifs(filePath, std::ios::binary);
+    if (!ifs.is_open()) {
+        return false;
+    }
+    unsigned char hdr[8]{};
+    ifs.read(reinterpret_cast<char*>(hdr), 8);
+    return ifs.gcount() == 8 &&
+           hdr[0] == 0xD0 && hdr[1] == 0xCF && hdr[2] == 0x11 && hdr[3] == 0xE0 &&
+           hdr[4] == 0xA1 && hdr[5] == 0xB1 && hdr[6] == 0x1A && hdr[7] == 0xE1;
 }
 
 bool DownloadFileViaWinHttp(
@@ -1752,6 +1835,7 @@ bool DownloadFileViaWinHttp(
         return false;
     }
 
+    constexpr ULONGLONG kMaxInstallerBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
     ULONGLONG totalSize = 0;
     wchar_t lenBuf[64]{};
     DWORD lenBufBytes = sizeof(lenBuf);
@@ -1763,6 +1847,12 @@ bool DownloadFileViaWinHttp(
             &lenBufBytes,
             WINHTTP_NO_HEADER_INDEX)) {
         totalSize = _wcstoui64(lenBuf, nullptr, 10);
+    }
+    if (totalSize > kMaxInstallerBytes) {
+        if (outError) {
+            *outError = "Размер загружаемого файла превышает допустимый лимит (2 ГБ).";
+        }
+        return false;
     }
 
     HandleGuard outFile(CreateFileW(
@@ -1810,6 +1900,11 @@ bool DownloadFileViaWinHttp(
             break;
         }
         if (readBytes == 0) {
+            break;
+        }
+        if (downloaded + readBytes > kMaxInstallerBytes) {
+            ioError = true;
+            ioErrMsg = "Размер загружаемого файла превысил допустимый лимит (2 ГБ).";
             break;
         }
         DWORD offset = 0;
@@ -2088,6 +2183,8 @@ bool LaunchAndWaitProcess(
     DWORD* outLaunchErr,
     const std::atomic<bool>* cancelFlag = nullptr,
     const std::atomic<bool>* stopFlag = nullptr) {
+    CoInitGuard comInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
     SHELLEXECUTEINFOW sei{};
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
@@ -2110,6 +2207,8 @@ bool LaunchAndWaitProcess(
             }
             if ((stopFlag != nullptr && stopFlag->load()) ||
                 (cancelFlag != nullptr && cancelFlag->load())) {
+                TerminateProcess(proc.Get(), ERROR_CANCELLED);
+                WaitForSingleObject(proc.Get(), 2000);
                 if (outLaunchErr) *outLaunchErr = ERROR_CANCELLED;
                 return false;
             }
@@ -2466,7 +2565,6 @@ void SystemComponentsScanner::StartLocalScanAsync(
             generation_.fetch_add(1);
             SetPhaseMessage("Локальная проверка завершена");
         }
-        scanning_.store(false);
         if (!stopRequested_.load() && log) {
             log(LogLevel::Success,
                 "Проверка игровых библиотек, мониторов и ПО периферии завершена.");
@@ -2474,6 +2572,7 @@ void SystemComponentsScanner::StartLocalScanAsync(
         if (autoCheckOnline && !stopRequested_.load()) {
             StartOnlineVersionCheckAsync(log);
         }
+        scanning_.store(false);
     });
 }
 
@@ -2508,7 +2607,7 @@ void SystemComponentsScanner::RefreshLocalPreserveOnlineAsync(
 
 void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
     std::lock_guard<std::mutex> lock(threadMutex_);
-    if (stopRequested_.load() || checkingOnline_.exchange(true)) {
+    if (stopRequested_.load() || installing_.load() || checkingOnline_.exchange(true)) {
         return;
     }
     if (onlineThread_.joinable()) {
@@ -2606,9 +2705,9 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                     L"https://edgeupdates.microsoft.com/api/products?view=enterprise",
                     L"GET",
                     true,
-                    128 * 1024);
+                    512 * 1024);
                 std::string latestWv2;
-                if (resp.ok && !resp.body.empty()) {
+                if (resp.ok && !resp.truncated && !resp.body.empty()) {
                     const size_t stablePos = resp.body.find("\"Product\":\"Stable\"");
                     if (stablePos != std::string::npos) {
                         latestWv2 = ExtractJsonStringField(resp.body, "ProductVersion", stablePos);
@@ -2626,8 +2725,11 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
 
             {
                 const HttpResponse resp = WinHttpRequest(
-                    L"https://vulkan.lunarg.com/sdk/files", L"GET", true, 512 * 1024);
-                const auto [vkLatest, vkUrl] = ParseLatestVulkanRuntimeFromJson(resp.body);
+                    L"https://vulkan.lunarg.com/sdk/files", L"GET", true, 2 * 1024 * 1024);
+                const auto [vkLatest, vkUrl] =
+                    (resp.ok && !resp.truncated)
+                        ? ParseLatestVulkanRuntimeFromJson(resp.body)
+                        : std::pair<std::string, std::string>{};
                 updateItem("rt_vulkan", [&](SystemComponentItem& item) {
                     if (!vkLatest.empty() && !vkUrl.empty()) {
                         item.directInstallerUrl = vkUrl;
@@ -2864,11 +2966,16 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                         item.directInstallerUrl = cabUrl;
                     }
                     if (!catVer.empty()) {
+                        int instDateYmd = item.installedDateYmd;
+                        if (instDateYmd == 0 && !item.installedVersion.empty()) {
+                            TryExtractTrailingVersionDate(
+                                ParseVersionParts(item.installedVersion), instDateYmd);
+                        }
                         const bool catalogIsOlderByDate =
-                            (match.dateYmd > 0 && item.installedDateYmd > 0 &&
-                             match.dateYmd < item.installedDateYmd);
+                            (match.dateYmd > 0 && instDateYmd > 0 &&
+                             match.dateYmd < instDateYmd);
                         if (item.installed && !item.installedVersion.empty() &&
-                            (catalogIsOlderByDate || IsVersionNewer(item.installedVersion, catVer))) {
+                            (catalogIsOlderByDate || IsDriverVersionNewer(item.installedVersion, catVer))) {
                             item.latestVersion = catVer + " (WHQL)";
                             item.updateAvailable = false;
                             item.statusText = "Актуален (" + item.installedVersion + ")";
@@ -3103,6 +3210,16 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         if (!rec) {
             destFile = zipRenamed;
             isZipPackage = true;
+        }
+    } else if (!isZipPackage && !isCabPackage &&
+               !EndsWithCaseInsensitive(WideToUtf8(destFile.extension().wstring()), ".msi") &&
+               HasMsiMagicHeader(destFile)) {
+        std::filesystem::path msiRenamed = destFile;
+        msiRenamed.replace_extension(L".msi");
+        std::error_code rec;
+        std::filesystem::rename(destFile, msiRenamed, rec);
+        if (!rec) {
+            destFile = msiRenamed;
         }
     }
 
@@ -3717,7 +3834,7 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
         if (!stopRequested_.load() && log) {
             std::string note;
             if (!installedVersion.empty() && !catVer.empty() &&
-                !IsVersionNewer(catVer, installedVersion)) {
+                !IsDriverVersionNewer(catVer, installedVersion)) {
                 note = " (в системе уже установлена версия " + installedVersion + ")";
             }
             log(LogLevel::Info,

@@ -16,7 +16,8 @@ include(FetchContent)
 
 FetchContent_Declare(
     imgui
-    URL                        https://github.com/ocornut/imgui/archive/refs/heads/docking.zip
+    URL                        https://github.com/ocornut/imgui/archive/d613c9f597eb75a6779d667dfaedad8085ee2693.zip
+    URL_HASH                   SHA256=DBD9613615626994E9386833A0694EA0C56F6977966F61BAB44292C19CA1E6F6
     DOWNLOAD_EXTRACT_TIMESTAMP TRUE
 )
 FetchContent_MakeAvailable(imgui)

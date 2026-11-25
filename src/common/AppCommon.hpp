@@ -15,6 +15,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -598,6 +599,8 @@ inline ElevatedRunResult ExecuteElevatedSelf(
         return result;
     }
 
+    CoInitGuard comInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+
     SHELLEXECUTEINFOW sei{};
     sei.cbSize = sizeof(sei);
     sei.fMask = waitForCompletion ? SEE_MASK_NOCLOSEPROCESS : 0;
@@ -625,7 +628,7 @@ inline ElevatedRunResult ExecuteElevatedSelf(
     std::string pendingLine;
 
     auto flushLogFile = [&]() {
-        if (utf8LogPath == nullptr || (!onLog && !onControlLine)) {
+        if (utf8LogPath == nullptr || utf8LogPath->empty() || (!onLog && !onControlLine)) {
             return;
         }
         std::ifstream ifs(*utf8LogPath, std::ios::binary);
@@ -719,13 +722,70 @@ inline ElevatedRunResult ExecuteElevatedSelf(
 }
 
 inline std::filesystem::path CreateTempLogPath(const wchar_t* prefix) {
-    wchar_t tempDir[MAX_PATH]{};
-    GetTempPathW(MAX_PATH, tempDir);
-    wchar_t tempFile[MAX_PATH]{};
-    if (GetTempFileNameW(tempDir, prefix, 0, tempFile) != 0) {
-        return std::filesystem::path(tempFile);
+    std::filesystem::path tempRoot;
+    const DWORD needed = GetTempPathW(0, nullptr);
+    if (needed > 0) {
+        std::wstring buf(static_cast<size_t>(needed) + 1, L'\0');
+        const DWORD len = GetTempPathW(needed + 1, buf.data());
+        if (len > 0 && len <= needed) {
+            tempRoot = std::filesystem::path(buf.c_str());
+        }
     }
-    return std::filesystem::path(tempDir) / L"hdm_worker.log";
+    if (tempRoot.empty()) {
+        std::error_code ec;
+        tempRoot = std::filesystem::temp_directory_path(ec);
+    }
+    if (tempRoot.empty()) {
+        return {};
+    }
+
+    std::wstring cleanPrefix = (prefix != nullptr && prefix[0] != L'\0') ? prefix : L"log";
+    for (wchar_t& ch : cleanPrefix) {
+        const bool ok = (ch >= L'0' && ch <= L'9') ||
+                        (ch >= L'A' && ch <= L'Z') ||
+                        (ch >= L'a' && ch <= L'z') ||
+                        ch == L'_' || ch == L'-';
+        if (!ok) {
+            ch = L'_';
+        }
+    }
+
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        GUID guid{};
+        if (FAILED(CoCreateGuid(&guid))) {
+            continue;
+        }
+        wchar_t suffix[48]{};
+        std::swprintf(
+            suffix,
+            std::size(suffix),
+            L"_%08lx%04x%04x%02x%02x%02x%02x%02x%02x%02x%02x.log",
+            static_cast<unsigned long>(guid.Data1),
+            guid.Data2,
+            guid.Data3,
+            guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
+            guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
+        const std::filesystem::path candidate = tempRoot / (L"DriverLoom_" + cleanPrefix + suffix);
+        HandleGuard file(CreateFileW(
+            candidate.c_str(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ,
+            nullptr,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL,
+            nullptr));
+        if (file.IsValid()) {
+            file.Reset();
+            const DWORD attrs = GetFileAttributesW(candidate.c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+                return candidate;
+            }
+            std::error_code rmEc;
+            std::filesystem::remove(candidate, rmEc);
+            return {};
+        }
+    }
+    return {};
 }
 
 } // namespace hdm

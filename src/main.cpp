@@ -11,6 +11,7 @@
 #include <dxgi.h>
 #include <shellapi.h>
 
+#include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -33,6 +34,57 @@ UINT g_resizeHeight = 0;
 
 DriverLoomApp* g_appInstance = nullptr;
 bool g_isRenderingFrame = false;
+bool g_pendingDpiReload = false;
+float g_pendingDpiScale = 1.0f;
+
+void LoadAppFonts(float dpiScale) {
+    ImGuiIO& io = ImGui::GetIO();
+    io.Fonts->Clear();
+
+    const float fontScale = (dpiScale > 0.5f ? dpiScale : 1.0f);
+    auto tryLoadCyrillicFont = [&](const char* path, float sizePx) -> ImFont* {
+        std::error_code ec;
+        if (!std::filesystem::exists(path, ec)) {
+            return nullptr;
+        }
+        ImFontConfig cfg{};
+        cfg.Flags |= ImFontFlags_NoLoadError;
+        return io.Fonts->AddFontFromFileTTF(
+            path, sizePx, &cfg, io.Fonts->GetGlyphRangesCyrillic());
+    };
+
+    g_fontRegular = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeui.ttf", 15.5f * fontScale);
+    if (g_fontRegular == nullptr) {
+        g_fontRegular = io.Fonts->AddFontDefault();
+    }
+    io.FontDefault = g_fontRegular;
+
+    g_fontSmall = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeui.ttf", 13.5f * fontScale);
+    if (g_fontSmall == nullptr) {
+        g_fontSmall = g_fontRegular;
+    }
+
+    g_fontSecondaryHeader =
+        tryLoadCyrillicFont("C:\\Windows\\Fonts\\seguisb.ttf", 16.0f * fontScale);
+    if (g_fontSecondaryHeader == nullptr) {
+        g_fontSecondaryHeader =
+            tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 16.0f * fontScale);
+    }
+    if (g_fontSecondaryHeader == nullptr) {
+        g_fontSecondaryHeader = g_fontRegular;
+    }
+
+    g_fontMainTab = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 19.0f * fontScale);
+    if (g_fontMainTab == nullptr) {
+        g_fontMainTab = g_fontSecondaryHeader;
+    }
+
+    g_fontPrimaryHeader =
+        tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 22.0f * fontScale);
+    if (g_fontPrimaryHeader == nullptr) {
+        g_fontPrimaryHeader = g_fontMainTab;
+    }
+}
 
 void RenderSingleFrame(
     const std::wstring* screenshotPath = nullptr,
@@ -323,10 +375,41 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         break;
     case WM_ERASEBKGND:
         return 1;
+    case WM_DPICHANGED: {
+        const float newScale = static_cast<float>(HIWORD(wParam)) / 96.0f;
+        if (newScale >= 0.5f && newScale <= 4.0f) {
+            g_pendingDpiScale = newScale;
+            g_pendingDpiReload = true;
+        }
+        const auto* rc = reinterpret_cast<const RECT*>(lParam);
+        if (rc != nullptr) {
+            SetWindowPos(
+                hWnd,
+                nullptr,
+                rc->left,
+                rc->top,
+                rc->right - rc->left,
+                rc->bottom - rc->top,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return 0;
+    }
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-        mmi->ptMinTrackSize.x = 980;
-        mmi->ptMinTrackSize.y = 640;
+        const float scale = (g_dpiScale > 0.5f ? g_dpiScale : 1.0f);
+        LONG minW = static_cast<LONG>(std::round(980.0f * scale));
+        LONG minH = static_cast<LONG>(std::round(640.0f * scale));
+        HMONITOR mon = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (mon != nullptr && GetMonitorInfoW(mon, &mi)) {
+            const LONG workW = mi.rcWork.right - mi.rcWork.left;
+            const LONG workH = mi.rcWork.bottom - mi.rcWork.top;
+            if (workW > 320 && minW > workW) minW = workW;
+            if (workH > 240 && minH > workH) minH = workH;
+        }
+        mmi->ptMinTrackSize.x = minW;
+        mmi->ptMinTrackSize.y = minH;
         return 0;
     }
     case WM_SYSCOMMAND:
@@ -591,50 +674,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
 
     g_dpiScale = ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd);
     ApplyAppTheme(hwnd, g_dpiScale, g_isLightTheme, true);
-
-    const float fontScale = (g_dpiScale > 0.5f ? g_dpiScale : 1.0f);
-    auto tryLoadCyrillicFont = [&](const char* path, float sizePx) -> ImFont* {
-        std::error_code ec;
-        if (!std::filesystem::exists(path, ec)) {
-            return nullptr;
-        }
-        ImFontConfig cfg{};
-        cfg.Flags |= ImFontFlags_NoLoadError;
-        return io.Fonts->AddFontFromFileTTF(
-            path, sizePx, &cfg, io.Fonts->GetGlyphRangesCyrillic());
-    };
-
-    g_fontRegular = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeui.ttf", 15.5f * fontScale);
-    if (g_fontRegular == nullptr) {
-        g_fontRegular = io.Fonts->AddFontDefault();
-    }
-    io.FontDefault = g_fontRegular;
-
-    g_fontSmall = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeui.ttf", 13.5f * fontScale);
-    if (g_fontSmall == nullptr) {
-        g_fontSmall = g_fontRegular;
-    }
-
-    g_fontSecondaryHeader =
-        tryLoadCyrillicFont("C:\\Windows\\Fonts\\seguisb.ttf", 16.0f * fontScale);
-    if (g_fontSecondaryHeader == nullptr) {
-        g_fontSecondaryHeader =
-            tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 16.0f * fontScale);
-    }
-    if (g_fontSecondaryHeader == nullptr) {
-        g_fontSecondaryHeader = g_fontRegular;
-    }
-
-    g_fontMainTab = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 19.0f * fontScale);
-    if (g_fontMainTab == nullptr) {
-        g_fontMainTab = g_fontSecondaryHeader;
-    }
-
-    g_fontPrimaryHeader =
-        tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 22.0f * fontScale);
-    if (g_fontPrimaryHeader == nullptr) {
-        g_fontPrimaryHeader = g_fontMainTab;
-    }
+    LoadAppFonts(g_dpiScale);
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
@@ -673,6 +713,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                 continue;
             }
             g_swapChainOccluded = false;
+
+            if (g_pendingDpiReload) {
+                g_dpiScale = g_pendingDpiScale;
+                g_pendingDpiReload = false;
+                ApplyAppTheme(hwnd, g_dpiScale, g_isLightTheme, true);
+                ImGui_ImplDX11_InvalidateDeviceObjects();
+                LoadAppFonts(g_dpiScale);
+                ImGui_ImplDX11_CreateDeviceObjects();
+            }
 
             RenderSingleFrame(&screenshotPath, &screenshotTaken, &done, &captureSuiteDir, &suiteStep);
         }
