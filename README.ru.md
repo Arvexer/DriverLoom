@@ -151,7 +151,7 @@
 ## Безопасность и совместимость (АВ / Античиты)
 
 - **Минимальные привилегии (`asInvoker`)**: в [`resources/app.manifest`](resources/app.manifest) отключён принудительный `requireAdministrator`; запрос UAC (`ShellExecuteExW` с `"runas"`) выполняется только при реальной установке, очистке или изменении системных параметров.
-- **Заполненный `VERSIONINFO`**: корректные метаданные продукта, версии (`1.1.0.0`) и издателя (`Arvexer`) в [`resources/version.rc`](resources/version.rc).
+- **Заполненный `VERSIONINFO`**: корректные метаданные продукта, версии (`1.2.0.0`) и издателя (`Arvexer`) в [`resources/version.rc`](resources/version.rc).
 - **Проверка цифровых подписей**: все скачиваемые установщики и `.cab` пакеты проверяются через Windows **Authenticode (`WinVerifyTrust`)** перед запуском.
 - **Чистый нативный код**: предпочтение нативных Win32/COM API (`DiInstallDriverW`), строгое RAII-освобождение `HDEVINFO` / дескрипторов / COM-объектов, безопасное экранирование аргументов CLI, отсутствие упаковщиков исполняемых файлов (UPX и аналогов).
 
@@ -167,7 +167,7 @@
 ├── resources/
 │   ├── app.ico                        # Иконка приложения
 │   ├── app.manifest                   # Манифест (asInvoker, PerMonitorV2 DPI, Win10/11)
-│   └── version.rc                     # PE VERSIONINFO (DriverLoom v1.1.0.0, Arvexer)
+│   └── version.rc                     # PE VERSIONINFO (DriverLoom v1.2.0.0, Arvexer)
 └── src/
     ├── main.cpp                       # Точка входа WinMain, DX11 swapchain, текстура лого, WndProc
     ├── app/
@@ -186,6 +186,9 @@
     │   └── Localization.hpp           # Локализация RU / UA / EN (статика + динамические статусы/логи)
     └── core/
         ├── DeviceScanner.hpp/.cpp     # PnP SetupAPI/CfgMgr32, EDID мониторов, GDI режимы, DXGI VRAM
+        ├── HttpClient.hpp/.cpp        # HTTPS-клиент WinHTTP и реестр отмены запросов
+        ├── PackageSecurity.hpp/.cpp   # TOCTOU-блокировка Authenticode, безопасные temp-папки, парсер YAML
+        ├── OnlineCatalogClient.hpp/.cpp # MS Update Catalog, winget-pkgs, парсеры Vulkan и AMD
         ├── SystemComponentsScanner.*  # Аудит библиотек/периферии/GPU и установка из MS Update Catalog
         ├── WindowsUpdateManager.*     # Поиск, установка и скрытие обновлений через WUA COM API
         ├── LocalDriverInstaller.*     # DiInstallDriverW, анализ/бэкап/очистка DriverStore

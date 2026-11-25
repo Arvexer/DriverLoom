@@ -30,7 +30,7 @@
 
 namespace hdm {
 
-inline constexpr const char* kAppVersion = "1.1.1";
+inline constexpr const char* kAppVersion = "1.2.0";
 
 inline std::wstring Utf8ToWide(std::string_view utf8) {
     if (utf8.empty()) {
