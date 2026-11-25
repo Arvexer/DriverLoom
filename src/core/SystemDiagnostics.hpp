@@ -207,6 +207,7 @@ private:
     std::atomic<bool> exportingReport_{false};
     std::atomic<bool> cancelRequested_{false};
     std::atomic<bool> stopRequested_{false};
+    std::atomic<unsigned long> exportThreadId_{0};
     std::atomic<uint64_t> generation_{0};
 
     mutable std::mutex dataMutex_;

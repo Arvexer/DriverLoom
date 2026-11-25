@@ -247,7 +247,7 @@ void DriverLoomApp::RenderOverviewTab() {
                 ImGui::BeginDisabled(anyBusy);
                 if (RenderSecondaryButton(instAllLbl, ImVec2(0.0f, btnH))) {
                     componentsScanner_.DownloadAndInstallBatchAsync(
-                        std::move(batchTargets), devicesCache_, MakeLogger(), true);
+                        batchTargets, devicesCache_, MakeLogger(), true);
                 }
                 ImGui::EndDisabled();
                 ImGui::SameLine();
@@ -265,7 +265,7 @@ void DriverLoomApp::RenderOverviewTab() {
             ImGui::BeginDisabled(anyBusy);
             if (RenderPrimaryButton(instAllLbl, ImVec2(0.0f, btnH))) {
                 componentsScanner_.DownloadAndInstallBatchAsync(
-                    std::move(batchTargets), devicesCache_, MakeLogger(), true);
+                    batchTargets, devicesCache_, MakeLogger(), true);
             }
             ImGui::EndDisabled();
             ImGui::SameLine();

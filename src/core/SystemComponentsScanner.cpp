@@ -3,6 +3,7 @@
 #include "core/LocalDriverInstaller.hpp"
 #include "core/SystemRestore.hpp"
 
+#include <objbase.h>
 #include <oleauto.h>
 #include <setupapi.h>
 #include <shldisp.h>
@@ -15,6 +16,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cwchar>
 #include <filesystem>
 #include <fstream>
 #include <future>
@@ -22,11 +24,81 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <unordered_set>
 #include <utility>
 
 namespace hdm {
 
+struct HttpRequestRegistry {
+    std::mutex mtx;
+    bool aborted{false};
+    std::unordered_set<HINTERNET> handles;
+
+    bool Register(HINTERNET h) {
+        if (h == nullptr) {
+            return false;
+        }
+        std::lock_guard<std::mutex> lock(mtx);
+        if (aborted) {
+            return false;
+        }
+        handles.insert(h);
+        return true;
+    }
+
+    void CloseIfOwned(HINTERNET h) noexcept {
+        if (h == nullptr) {
+            return;
+        }
+        bool owned = false;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            owned = (handles.erase(h) > 0);
+        }
+        if (owned) {
+            WinHttpCloseHandle(h);
+        }
+    }
+
+    void AbortAll() noexcept {
+        std::unordered_set<HINTERNET> toClose;
+        {
+            std::lock_guard<std::mutex> lock(mtx);
+            aborted = true;
+            toClose = std::move(handles);
+            handles.clear();
+        }
+        for (HINTERNET h : toClose) {
+            if (h != nullptr) {
+                WinHttpCloseHandle(h);
+            }
+        }
+    }
+
+    void Reset() noexcept {
+        std::lock_guard<std::mutex> lock(mtx);
+        aborted = false;
+    }
+};
+
 namespace {
+
+thread_local HttpRequestRegistry* t_activeHttpRegistry = nullptr;
+
+class ScopedHttpRegistry {
+public:
+    explicit ScopedHttpRegistry(HttpRequestRegistry* reg) noexcept
+        : prev_(t_activeHttpRegistry) {
+        t_activeHttpRegistry = reg;
+    }
+    ~ScopedHttpRegistry() { t_activeHttpRegistry = prev_; }
+
+    ScopedHttpRegistry(const ScopedHttpRegistry&) = delete;
+    ScopedHttpRegistry& operator=(const ScopedHttpRegistry&) = delete;
+
+private:
+    HttpRequestRegistry* prev_{nullptr};
+};
 
 class WinHttpGuard {
 public:
@@ -47,6 +119,37 @@ public:
     [[nodiscard]] bool IsValid() const noexcept { return handle_ != nullptr; }
 
 private:
+    HINTERNET handle_{nullptr};
+};
+
+class TrackedWinHttpRequestGuard {
+public:
+    explicit TrackedWinHttpRequestGuard(HINTERNET h = nullptr) noexcept
+        : registry_(t_activeHttpRegistry), handle_(h) {
+        if (handle_ != nullptr && registry_ != nullptr && !registry_->Register(handle_)) {
+            WinHttpCloseHandle(handle_);
+            handle_ = nullptr;
+        }
+    }
+    ~TrackedWinHttpRequestGuard() {
+        if (handle_ != nullptr) {
+            if (registry_ != nullptr) {
+                registry_->CloseIfOwned(handle_);
+            } else {
+                WinHttpCloseHandle(handle_);
+            }
+            handle_ = nullptr;
+        }
+    }
+
+    TrackedWinHttpRequestGuard(const TrackedWinHttpRequestGuard&) = delete;
+    TrackedWinHttpRequestGuard& operator=(const TrackedWinHttpRequestGuard&) = delete;
+
+    [[nodiscard]] HINTERNET Get() const noexcept { return handle_; }
+    [[nodiscard]] bool IsValid() const noexcept { return handle_ != nullptr; }
+
+private:
+    HttpRequestRegistry* registry_{nullptr};
     HINTERNET handle_{nullptr};
 };
 
@@ -511,7 +614,8 @@ HttpResponse WinHttpRequest(
     urlComp.lpszUrlPath = pathBuf;
     urlComp.dwUrlPathLength = static_cast<DWORD>(std::size(pathBuf));
 
-    if (!WinHttpCrackUrl(url.c_str(), static_cast<DWORD>(url.size()), 0, &urlComp)) {
+    if (!WinHttpCrackUrl(url.c_str(), static_cast<DWORD>(url.size()), 0, &urlComp) ||
+        urlComp.nScheme != INTERNET_SCHEME_HTTPS) {
         return res;
     }
 
@@ -531,21 +635,20 @@ HttpResponse WinHttpRequest(
         return res;
     }
 
-    const DWORD flags = (urlComp.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
-    WinHttpGuard request(WinHttpOpenRequest(
+    TrackedWinHttpRequestGuard request(WinHttpOpenRequest(
         connect.Get(),
         method,
         pathBuf,
         nullptr,
         WINHTTP_NO_REFERER,
         WINHTTP_DEFAULT_ACCEPT_TYPES,
-        flags));
+        WINHTTP_FLAG_SECURE));
     if (!request.IsValid()) {
         return res;
     }
 
     DWORD redirPolicy = followRedirects
-                            ? WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS
+                            ? WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP
                             : WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
     WinHttpSetOption(request.Get(), WINHTTP_OPTION_REDIRECT_POLICY, &redirPolicy, sizeof(redirPolicy));
 
@@ -901,6 +1004,11 @@ CatalogDriverMatch ResolveMsCatalogDriverCab(const std::string& searchKey) {
 
     const std::string& html = searchResp.body;
     const bool hostIsWin11 = IsHostWindows11();
+    constexpr WORD kProcArchArm64 = 12; // PROCESSOR_ARCHITECTURE_ARM64
+    SYSTEM_INFO sysInfo{};
+    GetNativeSystemInfo(&sysInfo);
+    const bool hostIsArm64 = (sysInfo.wProcessorArchitecture == kProcArchArm64);
+    const bool hostIsX64 = (sysInfo.wProcessorArchitecture == PROCESSOR_ARCHITECTURE_AMD64);
     std::string bestGuid;
     std::string bestVer;
     int bestDateYmd = 0;
@@ -926,10 +1034,12 @@ CatalogDriverMatch ResolveMsCatalogDriverCab(const std::string& searchKey) {
             continue;
         }
 
-        const size_t winStart = (pos > 3000) ? (pos - 3000) : 0;
+        const size_t winStart = (pos > 32768) ? (pos - 32768) : 0;
         std::string_view rowChunk(html.data() + winStart, pos - winStart);
         if (const size_t trPos = rowChunk.rfind("<tr"); trPos != std::string_view::npos) {
             rowChunk = rowChunk.substr(trPos);
+        } else if (const size_t prevEndTr = rowChunk.rfind("</tr>"); prevEndTr != std::string_view::npos) {
+            rowChunk = rowChunk.substr(prevEndTr + 5);
         }
         if (rowChunk.find(" - Extension - ") != std::string_view::npos ||
             rowChunk.find(" - SoftwareComponent - ") != std::string_view::npos ||
@@ -938,8 +1048,34 @@ CatalogDriverMatch ResolveMsCatalogDriverCab(const std::string& searchKey) {
             continue;
         }
 
+        const std::string rowLower = ToLowerAscii(std::string(rowChunk));
+        const bool mentionsArm64 = (rowLower.find("arm64") != std::string::npos ||
+                                    rowLower.find("aarch64") != std::string::npos);
+        const bool mentionsX64 = (rowLower.find("amd64") != std::string::npos ||
+                                  rowLower.find("x64") != std::string::npos ||
+                                  rowLower.find("64-bit") != std::string::npos);
+        const bool mentionsX86 = (rowLower.find("x86") != std::string::npos ||
+                                  rowLower.find("32-bit") != std::string::npos ||
+                                  rowLower.find("i386") != std::string::npos);
+        if (hostIsX64 && ((mentionsArm64 && !mentionsX64) || (mentionsX86 && !mentionsX64))) {
+            pos = endTd + 5;
+            continue;
+        }
+        if (hostIsArm64 && ((mentionsX64 || mentionsX86) && !mentionsArm64)) {
+            pos = endTd + 5;
+            continue;
+        }
+        if (!hostIsX64 && !hostIsArm64 && ((mentionsX64 || mentionsArm64) && !mentionsX86)) {
+            pos = endTd + 5;
+            continue;
+        }
+
         const bool hasWin11 = (rowChunk.find("Windows 11") != std::string_view::npos);
         const bool hasWin10 = (rowChunk.find("Windows 10") != std::string_view::npos);
+        if (!hasWin11 && !hasWin10 && rowLower.find("windows") != std::string::npos) {
+            pos = endTd + 5;
+            continue;
+        }
         if (!hostIsWin11 && hasWin11 && !hasWin10) {
             pos = endTd + 5;
             continue;
@@ -1017,8 +1153,11 @@ CatalogDriverMatch ResolveMsCatalogDriverCab(const std::string& searchKey) {
                dlResp.body[urlStart - 1] != ' ' && dlResp.body[urlStart - 1] != '>') {
             --urlStart;
         }
-        const std::string cabUrl = dlResp.body.substr(urlStart, (cabPos + 4) - urlStart);
-        if (cabUrl.rfind("http://", 0) == 0 || cabUrl.rfind("https://", 0) == 0) {
+        std::string cabUrl = dlResp.body.substr(urlStart, (cabPos + 4) - urlStart);
+        if (cabUrl.rfind("http://", 0) == 0) {
+            cabUrl.replace(0, 7, "https://");
+        }
+        if (cabUrl.rfind("https://", 0) == 0) {
             return {bestVer, cabUrl, bestDateYmd};
         }
         cabPos += 4;
@@ -1139,6 +1278,125 @@ std::vector<std::string> ExtractGithubTreeNames(
     return names;
 }
 
+bool IsHttpsUrl(std::string_view url) {
+    return url.size() > 8 &&
+           ToLowerAscii(url.substr(0, 8)) == "https://";
+}
+
+bool IsSafeRelativeInstallerPath(std::string_view rawRel) {
+    const std::string trimmed = TrimCopy(rawRel);
+    if (trimmed.empty() || trimmed.size() > 260) {
+        return false;
+    }
+    for (unsigned char ch : trimmed) {
+        if (ch < 0x20 || ch == ':' || ch == '*' || ch == '?' || ch == '"' ||
+            ch == '<' || ch == '>' || ch == '|') {
+            return false;
+        }
+    }
+    std::wstring relW = Utf8ToWide(trimmed);
+    std::replace(relW.begin(), relW.end(), L'/', L'\\');
+    if (relW.empty() || relW.front() == L'\\') {
+        return false;
+    }
+    const std::filesystem::path rel = std::filesystem::path(relW).lexically_normal();
+    if (rel.empty() || rel == L"." || rel.is_absolute() ||
+        rel.has_root_name() || rel.has_root_directory()) {
+        return false;
+    }
+    for (const auto& part : rel) {
+        if (part.empty() || part == L"." || part == L"..") {
+            return false;
+        }
+    }
+    const std::string ext = ToLowerAscii(WideToUtf8(rel.extension().wstring()));
+    return ext == ".exe" || ext == ".msi";
+}
+
+std::filesystem::path ResolveContainedInstallerPath(
+    const std::filesystem::path& baseDir,
+    std::string_view rawRel) {
+    if (!IsSafeRelativeInstallerPath(rawRel)) {
+        return {};
+    }
+    std::wstring relW = Utf8ToWide(TrimCopy(rawRel));
+    std::replace(relW.begin(), relW.end(), L'/', L'\\');
+    const std::filesystem::path rel = std::filesystem::path(relW).lexically_normal();
+
+    std::error_code ec;
+    const std::filesystem::path baseCanon = std::filesystem::weakly_canonical(baseDir, ec);
+    if (ec || baseCanon.empty()) {
+        return {};
+    }
+    const std::filesystem::path candCanon = std::filesystem::weakly_canonical(baseCanon / rel, ec);
+    if (ec || candCanon.empty() || !std::filesystem::is_regular_file(candCanon, ec) || ec) {
+        return {};
+    }
+    const DWORD attrs = GetFileAttributesW(candCanon.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return {};
+    }
+
+    std::wstring baseW = baseCanon.wstring();
+    if (!baseW.empty() && baseW.back() != L'\\') {
+        baseW.push_back(L'\\');
+    }
+    const std::wstring candW = candCanon.wstring();
+    if (candW.size() <= baseW.size() ||
+        CompareStringOrdinal(
+            candW.c_str(), static_cast<int>(baseW.size()),
+            baseW.c_str(), static_cast<int>(baseW.size()), TRUE) != CSTR_EQUAL) {
+        return {};
+    }
+    return candCanon;
+}
+
+std::string SanitizeWingetSilentArgs(std::string_view rawArgs) {
+    const std::string trimmed = TrimCopy(rawArgs);
+    if (trimmed.empty() || trimmed.size() > 160) {
+        return {};
+    }
+    constexpr std::string_view kForbidden = "&|;<>%$\\:*?()\"'`{}[]";
+    for (unsigned char ch : trimmed) {
+        if (ch < 0x20 || ch >= 0x7F || kForbidden.find(static_cast<char>(ch)) != std::string_view::npos) {
+            return {};
+        }
+    }
+
+    std::istringstream iss(trimmed);
+    std::string tok;
+    std::string sanitized;
+    while (iss >> tok) {
+        if (tok.find("..") != std::string::npos || tok.find("//") != std::string::npos) {
+            return {};
+        }
+        bool validChars = true;
+        for (unsigned char ch : tok) {
+            const bool ok = std::isalnum(ch) || ch == '/' || ch == '-' ||
+                            ch == '.' || ch == '_' || ch == '=';
+            if (!ok) {
+                validChars = false;
+                break;
+            }
+        }
+        if (!validChars) {
+            return {};
+        }
+        const bool isSwitch = (tok.size() >= 2 && (tok[0] == '/' || tok[0] == '-'));
+        const size_t eqPos = tok.find('=');
+        const bool isKeyVal = (eqPos != std::string::npos && eqPos > 0 && eqPos + 1 < tok.size() &&
+                               std::isalnum(static_cast<unsigned char>(tok[0])));
+        if (!isSwitch && !isKeyVal) {
+            return {};
+        }
+        if (!sanitized.empty()) {
+            sanitized.push_back(' ');
+        }
+        sanitized += tok;
+    }
+    return sanitized;
+}
+
 WingetManifestInfo ParseWingetInstallerYaml(
     const std::string& yaml,
     const std::string& preferredArch) {
@@ -1251,7 +1509,7 @@ WingetManifestInfo ParseWingetInstallerYaml(
 
     auto isSupportedEntry = [&](const Entry& e) {
         const std::string t = e.installerType.empty() ? topType : e.installerType;
-        return t != "msix" && t != "appx";
+        return t != "msix" && t != "appx" && IsHttpsUrl(e.url);
     };
 
     const Entry* chosen = nullptr;
@@ -1289,13 +1547,16 @@ WingetManifestInfo ParseWingetInstallerYaml(
 
     info.ok = !info.version.empty() && !chosen->url.empty();
     info.url = chosen->url;
-    info.nestedRelativePath = !chosen->nestedPath.empty() ? chosen->nestedPath : topNestedPath;
+    const std::string& rawNested = !chosen->nestedPath.empty() ? chosen->nestedPath : topNestedPath;
+    if (IsSafeRelativeInstallerPath(rawNested)) {
+        info.nestedRelativePath = TrimCopy(rawNested);
+    }
     if (!chosen->silent.empty()) {
-        info.silentArgs = chosen->silent;
+        info.silentArgs = SanitizeWingetSilentArgs(chosen->silent);
     } else if (!topSilentProgress.empty()) {
-        info.silentArgs = topSilentProgress;
+        info.silentArgs = SanitizeWingetSilentArgs(topSilentProgress);
     } else {
-        info.silentArgs = topSilent;
+        info.silentArgs = SanitizeWingetSilentArgs(topSilent);
     }
     return info;
 }
@@ -1423,6 +1684,10 @@ bool DownloadFileViaWinHttp(
         if (outError) *outError = "Некорректный URL загрузки.";
         return false;
     }
+    if (urlComp.nScheme != INTERNET_SCHEME_HTTPS) {
+        if (outError) *outError = "Загрузка разрешена только по защищённому протоколу HTTPS.";
+        return false;
+    }
 
     WinHttpGuard session(WinHttpOpen(
         L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) DriverLoom/1.0",
@@ -1442,21 +1707,20 @@ bool DownloadFileViaWinHttp(
         return false;
     }
 
-    const DWORD flags = (urlComp.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
-    WinHttpGuard request(WinHttpOpenRequest(
+    TrackedWinHttpRequestGuard request(WinHttpOpenRequest(
         connect.Get(),
         L"GET",
         pathBuf,
         nullptr,
         WINHTTP_NO_REFERER,
         WINHTTP_DEFAULT_ACCEPT_TYPES,
-        flags));
+        WINHTTP_FLAG_SECURE));
     if (!request.IsValid()) {
         if (outError) *outError = "Ошибка WinHttpOpenRequest: " + FormatWin32Error(GetLastError());
         return false;
     }
 
-    DWORD redirPolicy = WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    DWORD redirPolicy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
     WinHttpSetOption(request.Get(), WINHTTP_OPTION_REDIRECT_POLICY, &redirPolicy, sizeof(redirPolicy));
 
     if (std::wstring_view(hostBuf).find(L"amd.com") != std::wstring_view::npos) {
@@ -1501,9 +1765,19 @@ bool DownloadFileViaWinHttp(
         totalSize = _wcstoui64(lenBuf, nullptr, 10);
     }
 
-    std::ofstream ofs(destPath, std::ios::binary | std::ios::trunc);
-    if (!ofs.is_open()) {
-        if (outError) *outError = "Не удалось создать временный файл для установки.";
+    HandleGuard outFile(CreateFileW(
+        destPath.c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+        nullptr));
+    if (!outFile.IsValid()) {
+        if (outError) {
+            *outError = "Не удалось создать временный файл для установки: " +
+                        FormatWin32Error(GetLastError());
+        }
         return false;
     }
 
@@ -1513,7 +1787,7 @@ bool DownloadFileViaWinHttp(
     DWORD avail = 0;
     for (;;) {
         if (cancelFlag != nullptr && cancelFlag->load()) {
-            ofs.close();
+            outFile.Reset();
             std::error_code rmEc;
             std::filesystem::remove(destPath, rmEc);
             if (outError) *outError = "Отменено пользователем.";
@@ -1538,9 +1812,19 @@ bool DownloadFileViaWinHttp(
         if (readBytes == 0) {
             break;
         }
-        if (!ofs.write(buf.data(), static_cast<std::streamsize>(readBytes))) {
-            ioError = true;
-            ioErrMsg = "Ошибка записи временного файла на диск.";
+        DWORD offset = 0;
+        while (offset < readBytes) {
+            DWORD written = 0;
+            if (!WriteFile(outFile.Get(), buf.data() + offset, readBytes - offset, &written, nullptr) ||
+                written == 0) {
+                ioError = true;
+                ioErrMsg = "Ошибка записи временного файла на диск: " +
+                           FormatWin32Error(GetLastError());
+                break;
+            }
+            offset += written;
+        }
+        if (ioError) {
             break;
         }
         downloaded += readBytes;
@@ -1550,12 +1834,12 @@ bool DownloadFileViaWinHttp(
             progress->store(std::clamp(baseProgress + localFrac * progressSpan, 0.0f, 0.99f));
         }
     }
-    ofs.flush();
-    if (!ofs.good() && !ioError) {
+    if (!ioError && !FlushFileBuffers(outFile.Get())) {
         ioError = true;
-        ioErrMsg = "Ошибка завершения записи временного файла.";
+        ioErrMsg = "Ошибка завершения записи временного файла: " +
+                   FormatWin32Error(GetLastError());
     }
-    ofs.close();
+    outFile.Reset();
 
     if (!ioError && downloaded == 0) {
         ioError = true;
@@ -1642,20 +1926,132 @@ bool ExtractZipViaShellCom(
     return SUCCEEDED(hr);
 }
 
-bool VerifyAuthenticodeSignature(const std::filesystem::path& filePath, std::string* outReason) {
+class TempWorkDirGuard {
+public:
+    TempWorkDirGuard() = default;
+    ~TempWorkDirGuard() { Reset(); }
+
+    TempWorkDirGuard(const TempWorkDirGuard&) = delete;
+    TempWorkDirGuard& operator=(const TempWorkDirGuard&) = delete;
+
+    void Set(std::filesystem::path dir) {
+        Reset();
+        dir_ = std::move(dir);
+    }
+
+    void Reset() noexcept {
+        if (!dir_.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(dir_, ec);
+            dir_.clear();
+        }
+    }
+
+    [[nodiscard]] const std::filesystem::path& Path() const noexcept { return dir_; }
+
+private:
+    std::filesystem::path dir_;
+};
+
+bool CreateUniqueTempWorkDir(std::filesystem::path& outDir, std::string* outError) {
+    outDir.clear();
+    std::error_code tempEc;
+    std::filesystem::path tempRoot;
+    wchar_t tempBuf[MAX_PATH]{};
+    const DWORD tempLen = GetTempPathW(MAX_PATH, tempBuf);
+    if (tempLen > 0 && tempLen < MAX_PATH) {
+        tempRoot = std::filesystem::path(tempBuf);
+    } else {
+        tempRoot = std::filesystem::temp_directory_path(tempEc);
+    }
+    if (tempRoot.empty()) {
+        if (outError) *outError = "Не удалось определить временную папку Windows.";
+        return false;
+    }
+
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        GUID guid{};
+        if (FAILED(CoCreateGuid(&guid))) {
+            continue;
+        }
+        wchar_t suffix[40]{};
+        std::swprintf(
+            suffix,
+            std::size(suffix),
+            L"DriverLoom_%08lx%04x%04x%02x%02x%02x%02x%02x%02x%02x%02x",
+            static_cast<unsigned long>(guid.Data1),
+            guid.Data2,
+            guid.Data3,
+            guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
+            guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
+        const std::filesystem::path candidate = tempRoot / suffix;
+        if (CreateDirectoryW(candidate.c_str(), nullptr)) {
+            const DWORD attrs = GetFileAttributesW(candidate.c_str());
+            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+                outDir = candidate;
+                return true;
+            }
+            RemoveDirectoryW(candidate.c_str());
+            if (outError) *outError = "Временный каталог является точкой повторного анализа.";
+            return false;
+        }
+    }
+
+    if (outError) {
+        *outError = "Не удалось создать уникальный временный каталог: " +
+                    FormatWin32Error(GetLastError());
+    }
+    return false;
+}
+
+bool VerifyAndLockAuthenticodeFile(
+    const std::filesystem::path& filePath,
+    HandleGuard* outReadLock,
+    std::string* outReason) {
+    if (outReadLock != nullptr) {
+        outReadLock->Reset();
+    }
+    const std::wstring wPath = filePath.wstring();
+    const DWORD attrs = GetFileAttributesW(wPath.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        if (outReason != nullptr) {
+            *outReason = (attrs == INVALID_FILE_ATTRIBUTES)
+                             ? FormatWin32Error(GetLastError())
+                             : "Файл является точкой повторного анализа (reparse point).";
+        }
+        return false;
+    }
+
+    // Hold FILE_SHARE_READ without FILE_SHARE_WRITE/FILE_SHARE_DELETE across WinVerifyTrust
+    // and installer launch to close the TOCTOU file-swap window.
+    HandleGuard fileLock(CreateFileW(
+        wPath.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr));
+    if (!fileLock.IsValid()) {
+        if (outReason != nullptr) {
+            *outReason = FormatWin32Error(GetLastError());
+        }
+        return false;
+    }
+
     WINTRUST_FILE_INFO fileInfo{};
     fileInfo.cbStruct = sizeof(fileInfo);
-    const std::wstring wPath = filePath.wstring();
     fileInfo.pcwszFilePath = wPath.c_str();
+    fileInfo.hFile = fileLock.Get();
 
     WINTRUST_DATA trustData{};
     trustData.cbStruct = sizeof(trustData);
     trustData.dwUIChoice = WTD_UI_NONE;
-    trustData.fdwRevocationChecks = WTD_REVOKE_NONE;
+    trustData.fdwRevocationChecks = WTD_REVOKE_WHOLECHAIN;
     trustData.dwUnionChoice = WTD_CHOICE_FILE;
     trustData.pFile = &fileInfo;
     trustData.dwStateAction = WTD_STATEACTION_VERIFY;
-    trustData.dwProvFlags = WTD_SAFER_FLAG | WTD_REVOCATION_CHECK_NONE;
+    trustData.dwProvFlags = WTD_SAFER_FLAG | WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT;
 
     GUID policyGuid = WINTRUST_ACTION_GENERIC_VERIFY_V2;
     struct WinTrustStateGuard {
@@ -1674,6 +2070,9 @@ bool VerifyAuthenticodeSignature(const std::filesystem::path& filePath, std::str
         static_cast<HWND>(INVALID_HANDLE_VALUE), &policyGuid, &trustData);
 
     if (status == ERROR_SUCCESS) {
+        if (outReadLock != nullptr) {
+            *outReadLock = std::move(fileLock);
+        }
         return true;
     }
     if (outReason != nullptr) {
@@ -1987,9 +2386,19 @@ MonitorBrandInfo GetMonitorBrandSupport(const std::string& pnpOrBrand, const std
 
 } // namespace
 
+SystemComponentsScanner::SystemComponentsScanner()
+    : onlineHttpRegistry_(std::make_shared<HttpRequestRegistry>()),
+      installHttpRegistry_(std::make_shared<HttpRequestRegistry>()) {}
+
 SystemComponentsScanner::~SystemComponentsScanner() {
     stopRequested_.store(true);
     cancelInstallRequested_.store(true);
+    if (onlineHttpRegistry_) {
+        onlineHttpRegistry_->AbortAll();
+    }
+    if (installHttpRegistry_) {
+        installHttpRegistry_->AbortAll();
+    }
     for (;;) {
         std::thread scanT;
         std::thread onlineT;
@@ -2006,6 +2415,13 @@ SystemComponentsScanner::~SystemComponentsScanner() {
         if (installT.joinable()) installT.join();
         if (onlineT.joinable()) onlineT.join();
         if (scanT.joinable()) scanT.join();
+    }
+}
+
+void SystemComponentsScanner::RequestCancelInstall() noexcept {
+    cancelInstallRequested_.store(true);
+    if (installHttpRegistry_) {
+        installHttpRegistry_->AbortAll();
     }
 }
 
@@ -2098,9 +2514,13 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
     if (onlineThread_.joinable()) {
         onlineThread_.join();
     }
+    if (onlineHttpRegistry_) {
+        onlineHttpRegistry_->Reset();
+    }
 
     SetPhaseMessage("Поиск актуальных версий...");
     onlineThread_ = std::thread([this, log = std::move(onLog)]() {
+        ScopedHttpRegistry onlineScope(onlineHttpRegistry_.get());
         auto updateItem = [&](const std::string& compId, auto&& fn) {
             std::lock_guard<std::mutex> lock(dataMutex_);
             for (auto& item : items_) {
@@ -2146,6 +2566,7 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
 
         // Group 1: .NET Desktop Runtime 8.0 & 9.0
         auto fDotnet = std::async(std::launch::async, [&]() {
+            ScopedHttpRegistry onlineScope(onlineHttpRegistry_.get());
             const auto checkDotnet = [&](const std::string& compId, const std::wstring& metaUrl) {
                 const HttpResponse resp = WinHttpRequest(metaUrl, L"GET", true);
                 if (!resp.ok || resp.body.empty()) {
@@ -2179,6 +2600,7 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
 
         // Group 2: Microsoft Edge WebView2 + LunarG Vulkan Runtime
         auto fRuntimes = std::async(std::launch::async, [&]() {
+            ScopedHttpRegistry onlineScope(onlineHttpRegistry_.get());
             {
                 const HttpResponse resp = WinHttpRequest(
                     L"https://edgeupdates.microsoft.com/api/products?view=enterprise",
@@ -2221,11 +2643,12 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
 
         // Group 3: SteelSeries CDN + Razer verification + NVIDIA/AMD GPU checks
         auto fVendors = std::async(std::launch::async, [&]() {
+            ScopedHttpRegistry onlineScope(onlineHttpRegistry_.get());
             if (hasItem("sw_steelseries")) {
                 const HttpResponse resp = WinHttpRequest(
                     L"https://steelseries.com/gg/downloads/gg/latest/windows", L"HEAD", false);
                 std::string ver;
-                std::string url = resp.locationHeader;
+                std::string url = IsHttpsUrl(resp.locationHeader) ? resp.locationHeader : std::string{};
                 if (!url.empty()) {
                     const size_t ggPos = url.find("SteelSeriesGG");
                     if (ggPos != std::string::npos) {
@@ -2346,6 +2769,7 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
             pool.reserve(kWorkers);
             for (size_t w = 0; w < kWorkers; ++w) {
                 pool.emplace_back([&]() {
+                    ScopedHttpRegistry onlineScope(onlineHttpRegistry_.get());
                     for (;;) {
                         if (stopRequested_.load()) break;
                         const size_t idx = nextIdx.fetch_add(1);
@@ -2406,6 +2830,7 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
             pool.reserve(kWorkers);
             for (size_t w = 0; w < kWorkers; ++w) {
                 pool.emplace_back([&]() {
+                    ScopedHttpRegistry onlineScope(onlineHttpRegistry_.get());
                     for (;;) {
                         if (stopRequested_.load()) break;
                         const size_t idx = nextIdx.fetch_add(1);
@@ -2491,22 +2916,19 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
 
     SetPhaseMessage("Скачивание: " + item.name);
 
-    std::error_code tempEc;
-    std::filesystem::path tempRoot;
-    wchar_t tempDir[MAX_PATH]{};
-    const DWORD tempLen = GetTempPathW(MAX_PATH, tempDir);
-    if (tempLen > 0 && tempLen < MAX_PATH) {
-        tempRoot = std::filesystem::path(tempDir);
-    } else {
-        tempRoot = std::filesystem::temp_directory_path(tempEc);
-    }
-    if (tempRoot.empty()) {
+    std::filesystem::path workRoot;
+    std::string tempDirErr;
+    if (!CreateUniqueTempWorkDir(workRoot, &tempDirErr)) {
         if (log) {
-            log(LogLevel::Error, "Не удалось определить временную папку Windows.");
+            log(LogLevel::Error, tempDirErr.empty()
+                                     ? "Не удалось создать временный каталог Windows."
+                                     : tempDirErr);
         }
         SetPhaseMessage("Ошибка временного каталога");
         return false;
     }
+    TempWorkDirGuard workDir;
+    workDir.Set(workRoot);
 
     const std::string cleanUrl = StripUrlQuery(item.directInstallerUrl);
     bool isZipPackage = EndsWithCaseInsensitive(cleanUrl, ".zip");
@@ -2514,7 +2936,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
     const bool isDirectMsi = EndsWithCaseInsensitive(cleanUrl, ".msi");
     const char* initialExt =
         isCabPackage ? ".cab" : (isZipPackage ? ".zip" : (isDirectMsi ? ".msi" : ".exe"));
-    std::filesystem::path destFile = tempRoot / ("DriverLoom_" + item.id + initialExt);
+    std::filesystem::path destFile = workDir.Path() / (std::string("package") + initialExt);
 
     if (log) {
         log(LogLevel::Info,
@@ -2540,10 +2962,9 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
 
     if (isCabPackage) {
         SetPhaseMessage("Проверка подписи CAB-пакета...");
+        HandleGuard cabLock;
         std::string sigErr;
-        if (!VerifyAuthenticodeSignature(destFile, &sigErr)) {
-            std::error_code ec;
-            std::filesystem::remove(destFile, ec);
+        if (!VerifyAndLockAuthenticodeFile(destFile, &cabLock, &sigErr)) {
             if (!stopRequested_.load() && log) {
                 log(LogLevel::Error,
                     "Цифровая подпись CAB-пакета не прошла проверку (" + sigErr + ").");
@@ -2553,14 +2974,12 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         }
 
         SetPhaseMessage("Распаковка драйвера (.cab)...");
-        std::filesystem::path cabExtractDir = tempRoot / ("DriverLoom_" + item.id + "_cab");
+        std::filesystem::path cabExtractDir = workDir.Path() / L"cab_extract";
         std::error_code ec;
-        std::filesystem::remove_all(cabExtractDir, ec);
         std::filesystem::create_directories(cabExtractDir, ec);
 
         if (!SetupIterateCabinetW(destFile.c_str(), 0, CabExtractCallback, &cabExtractDir)) {
-            std::filesystem::remove(destFile, ec);
-            std::filesystem::remove_all(cabExtractDir, ec);
+            cabLock.Reset();
             if (!stopRequested_.load() && log) {
                 log(LogLevel::Error,
                     "Ошибка распаковки CAB-архива " + item.name + ": " +
@@ -2569,6 +2988,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             SetPhaseMessage("Ошибка распаковки CAB");
             return false;
         }
+        cabLock.Reset();
         std::filesystem::remove(destFile, ec);
 
         SetPhaseMessage("Установка драйвера " + item.name + "...");
@@ -2691,12 +3111,9 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
 
     if (isZipPackage) {
         SetPhaseMessage("Распаковка архива...");
-        extractDir = tempRoot / ("DriverLoom_" + item.id + "_pkg");
+        extractDir = workDir.Path() / L"pkg_extract";
         std::error_code ec;
-        std::filesystem::remove_all(extractDir, ec);
         if (!ExtractZipViaShellCom(destFile, extractDir)) {
-            std::filesystem::remove(destFile, ec);
-            std::filesystem::remove_all(extractDir, ec);
             if (!stopRequested_.load() && log) {
                 log(LogLevel::Error, "Не удалось распаковать архив " + item.name + ".");
             }
@@ -2706,12 +3123,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
 
         targetExe.clear();
         if (!item.nestedInstallerHint.empty()) {
-            std::wstring relW = Utf8ToWide(item.nestedInstallerHint);
-            std::replace(relW.begin(), relW.end(), L'/', L'\\');
-            const std::filesystem::path hinted = extractDir / relW;
-            if (std::filesystem::is_regular_file(hinted, ec)) {
-                targetExe = hinted;
-            }
+            targetExe = ResolveContainedInstallerPath(extractDir, item.nestedInstallerHint);
         }
         if (targetExe.empty()) {
             std::filesystem::path firstMsi;
@@ -2725,6 +3137,10 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
                  it.increment(ec)) {
                 std::error_code entryEc;
                 if (!it->is_regular_file(entryEc)) {
+                    continue;
+                }
+                const DWORD attrs = GetFileAttributesW(it->path().c_str());
+                if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
                     continue;
                 }
                 const std::string ext = ToLowerAscii(WideToUtf8(it->path().extension().wstring()));
@@ -2745,8 +3161,6 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             else targetExe = firstExe;
         }
         if (targetExe.empty()) {
-            std::filesystem::remove(destFile, ec);
-            std::filesystem::remove_all(extractDir, ec);
             if (!stopRequested_.load() && log) {
                 log(LogLevel::Error, "В архиве не найден исполняемый файл установщика.");
             }
@@ -2756,19 +3170,14 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
     }
 
     if (cancelInstallRequested_.load()) {
-        std::error_code ec;
-        std::filesystem::remove(destFile, ec);
-        if (!extractDir.empty()) std::filesystem::remove_all(extractDir, ec);
         SetPhaseMessage("Установка отменена");
         return false;
     }
 
     SetPhaseMessage("Проверка цифровой подписи Authenticode...");
+    HandleGuard targetLock;
     std::string sigErr;
-    if (!VerifyAuthenticodeSignature(targetExe, &sigErr)) {
-        std::error_code ec;
-        std::filesystem::remove(destFile, ec);
-        if (!extractDir.empty()) std::filesystem::remove_all(extractDir, ec);
+    if (!VerifyAndLockAuthenticodeFile(targetExe, &targetLock, &sigErr)) {
         if (!stopRequested_.load() && log) {
             log(LogLevel::Error,
                 "Цифровая подпись установщика не прошла проверку (" + sigErr +
@@ -2795,18 +3204,19 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
     bool errorAlreadyLogged = false;
 
     if (item.id == "rt_dx_legacy") {
-        const std::filesystem::path dxExtractDir = tempRoot / L"DriverLoom_DX2010";
+        const std::filesystem::path dxExtractDir = workDir.Path() / L"dx_extract";
         std::error_code ec;
-        std::filesystem::remove_all(dxExtractDir, ec);
         std::filesystem::create_directories(dxExtractDir, ec);
         const std::wstring extractArgs = L"/Q /T:" + QuoteWin32Arg(dxExtractDir.wstring());
-        if (LaunchAndWaitProcess(
-                targetExe,
-                extractArgs,
-                &exitCode,
-                &launchErr,
-                &cancelInstallRequested_,
-                &stopRequested_)) {
+        const bool extracted = LaunchAndWaitProcess(
+            targetExe,
+            extractArgs,
+            &exitCode,
+            &launchErr,
+            &cancelInstallRequested_,
+            &stopRequested_);
+        targetLock.Reset();
+        if (extracted) {
             const std::filesystem::path dxSetup = dxExtractDir / L"DXSETUP.exe";
             if (exitCode != 0) {
                 if (!stopRequested_.load() && log) {
@@ -2815,14 +3225,27 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
                             std::to_string(exitCode) + ").");
                 }
                 errorAlreadyLogged = true;
-            } else if (std::filesystem::exists(dxSetup, ec)) {
-                launched = LaunchAndWaitProcess(
-                    dxSetup,
-                    L"/silent",
-                    &exitCode,
-                    &launchErr,
-                    &cancelInstallRequested_,
-                    &stopRequested_);
+            } else if (std::filesystem::is_regular_file(dxSetup, ec)) {
+                HandleGuard dxSetupLock;
+                std::string dxSigErr;
+                if (!VerifyAndLockAuthenticodeFile(dxSetup, &dxSetupLock, &dxSigErr)) {
+                    if (!stopRequested_.load() && log) {
+                        log(LogLevel::Error,
+                            "Цифровая подпись DXSETUP.exe не прошла проверку (" + dxSigErr +
+                                "). Запуск отменён в целях безопасности.");
+                    }
+                    launchErr = ERROR_INVALID_DATA;
+                    errorAlreadyLogged = true;
+                } else {
+                    launched = LaunchAndWaitProcess(
+                        dxSetup,
+                        L"/silent",
+                        &exitCode,
+                        &launchErr,
+                        &cancelInstallRequested_,
+                        &stopRequested_);
+                    dxSetupLock.Reset();
+                }
             } else {
                 if (!stopRequested_.load() && log) {
                     log(LogLevel::Error,
@@ -2832,7 +3255,6 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
                 errorAlreadyLogged = true;
             }
         }
-        std::filesystem::remove_all(dxExtractDir, ec);
     } else if (EndsWithCaseInsensitive(WideToUtf8(targetExe.extension().wstring()), ".msi")) {
         const std::filesystem::path sysDir = GetSystemDirPath(false);
         if (!sysDir.empty()) {
@@ -2849,6 +3271,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         } else {
             launchErr = ERROR_PATH_NOT_FOUND;
         }
+        targetLock.Reset();
     } else {
         launched = LaunchAndWaitProcess(
             targetExe,
@@ -2857,6 +3280,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             &launchErr,
             &cancelInstallRequested_,
             &stopRequested_);
+        targetLock.Reset();
     }
 
     bool succeeded = false;
@@ -2890,11 +3314,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         }
     }
 
-    std::error_code ec;
-    std::filesystem::remove(destFile, ec);
-    if (!extractDir.empty()) {
-        std::filesystem::remove_all(extractDir, ec);
-    }
+    workDir.Reset();
 
     if (stopRequested_.load()) {
         return false;
@@ -2960,11 +3380,12 @@ void SystemComponentsScanner::DownloadAndInstallAsync(
     const SystemComponentItem& item,
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog) {
-    std::lock_guard<std::mutex> lock(threadMutex_);
+    std::unique_lock<std::mutex> lock(threadMutex_);
     if (stopRequested_.load()) {
         return;
     }
     if (scanning_.load() || checkingOnline_.load() || installing_.exchange(true)) {
+        lock.unlock();
         if (onLog) {
             onLog(LogLevel::Warning, "Установка компонента уже выполняется.");
         }
@@ -2977,11 +3398,15 @@ void SystemComponentsScanner::DownloadAndInstallAsync(
     if (installThread_.joinable()) {
         installThread_.join();
     }
+    if (installHttpRegistry_) {
+        installHttpRegistry_->Reset();
+    }
 
     cancelInstallRequested_.store(false);
     progress_.store(0.0f);
 
     installThread_ = std::thread([this, item, devs = std::move(devicesSnapshot), log = std::move(onLog)]() mutable {
+        ScopedHttpRegistry installScope(installHttpRegistry_.get());
         bool rebootReq = false;
         const bool ok = InstallSingleComponentSync(item, 0.0f, 1.0f, devs, log, &rebootReq);
         progress_.store(1.0f);
@@ -3000,11 +3425,12 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog,
     bool createRestorePointBefore) {
-    std::lock_guard<std::mutex> lock(threadMutex_);
+    std::unique_lock<std::mutex> lock(threadMutex_);
     if (stopRequested_.load()) {
         return;
     }
     if (scanning_.load() || checkingOnline_.load() || installing_.exchange(true)) {
+        lock.unlock();
         if (onLog) {
             onLog(LogLevel::Warning, "Установка компонентов уже выполняется.");
         }
@@ -3017,6 +3443,9 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
     if (installThread_.joinable()) {
         installThread_.join();
     }
+    if (installHttpRegistry_) {
+        installHttpRegistry_->Reset();
+    }
 
     cancelInstallRequested_.store(false);
     progress_.store(0.0f);
@@ -3027,6 +3456,7 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
                                   devs = std::move(devicesSnapshot),
                                   log = std::move(onLog),
                                   createRestorePointBefore]() mutable {
+        ScopedHttpRegistry installScope(installHttpRegistry_.get());
         const size_t total = list.size();
         size_t okCount = 0;
 
@@ -3113,11 +3543,12 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog,
     CatalogInstallCallback onComplete) {
-    std::lock_guard<std::mutex> lock(threadMutex_);
+    std::unique_lock<std::mutex> lock(threadMutex_);
     if (stopRequested_.load()) {
         return;
     }
     if (scanning_.load() || checkingOnline_.load() || installing_.exchange(true)) {
+        lock.unlock();
         if (onLog) {
             onLog(LogLevel::Warning, "Модуль компонентов уже выполняет другую операцию.");
         }
@@ -3132,6 +3563,9 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
     if (installThread_.joinable()) {
         installThread_.join();
     }
+    if (installHttpRegistry_) {
+        installHttpRegistry_->Reset();
+    }
 
     installThread_ = std::thread([this,
                                   deviceName,
@@ -3141,6 +3575,7 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
                                   devs = std::move(devicesSnapshot),
                                   log = std::move(onLog),
                                   cb = std::move(onComplete)]() mutable {
+        ScopedHttpRegistry installScope(installHttpRegistry_.get());
         const std::string primaryKey =
             !searchHardwareKey.empty() ? searchHardwareKey : fullHardwareId;
         if (primaryKey.empty()) {

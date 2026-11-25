@@ -225,5 +225,8 @@ private:
     AppUpdateState appUpdateState_{AppUpdateState::Idle};
     std::string appLatestVersion_{hdm::kAppVersion};
     std::string appReleaseUrl_{"https://github.com/Arvexer/DriverLoom/releases"};
+    std::atomic<bool> stopAppUpdate_{false};
+    std::mutex appHttpMutex_;
+    void* activeAppUpdateRequest_{nullptr};
     std::thread appUpdateThread_;
 };

@@ -1209,6 +1209,22 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
     }
 
     CoInitGuard comInit(COINIT_MULTITHREADED);
+    if (comInit.Result() == RPC_E_CHANGED_MODE) {
+        WuInstallSummary mtaSummary;
+        std::thread mtaThread([&]() {
+            mtaSummary = DownloadAndInstallSync(
+                updateIds,
+                false,
+                onLog,
+                outProgress,
+                cancelFlag,
+                onPhase,
+                onItemUpdate,
+                driversOnly);
+        });
+        mtaThread.join();
+        return mtaSummary;
+    }
     if (!comInit.Succeeded()) {
         if (onLog) {
             onLog(LogLevel::Error,
@@ -1928,6 +1944,14 @@ bool WindowsUpdateManager::SetUpdatesHiddenSync(
     }
 
     CoInitGuard comInit(COINIT_MULTITHREADED);
+    if (comInit.Result() == RPC_E_CHANGED_MODE) {
+        bool mtaOk = false;
+        std::thread mtaThread([&]() {
+            mtaOk = SetUpdatesHiddenSync(updateIds, hide, onLog);
+        });
+        mtaThread.join();
+        return mtaOk;
+    }
     if (!comInit.Succeeded()) {
         if (onLog) {
             onLog(LogLevel::Error,

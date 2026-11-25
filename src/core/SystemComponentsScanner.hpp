@@ -5,12 +5,15 @@
 
 #include <atomic>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 namespace hdm {
+
+struct HttpRequestRegistry;
 
 enum class ComponentCategory {
     GamingRuntime,
@@ -49,7 +52,7 @@ class SystemComponentsScanner {
 public:
     using CatalogInstallCallback = std::function<void(bool ok, bool rebootRequired)>;
 
-    SystemComponentsScanner() = default;
+    SystemComponentsScanner();
     ~SystemComponentsScanner();
 
     SystemComponentsScanner(const SystemComponentsScanner&) = delete;
@@ -95,7 +98,7 @@ public:
         LogCallback onLog,
         CatalogInstallCallback onComplete = nullptr);
 
-    void RequestCancelInstall() noexcept { cancelInstallRequested_.store(true); }
+    void RequestCancelInstall() noexcept;
 
     [[nodiscard]] bool IsScanning() const noexcept { return scanning_.load(); }
     [[nodiscard]] bool IsCheckingOnline() const noexcept { return checkingOnline_.load(); }
@@ -139,6 +142,8 @@ private:
     std::thread scanThread_;
     std::thread onlineThread_;
     std::thread installThread_;
+    std::shared_ptr<HttpRequestRegistry> onlineHttpRegistry_;
+    std::shared_ptr<HttpRequestRegistry> installHttpRegistry_;
 };
 
 } // namespace hdm

@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -114,6 +115,19 @@ std::wstring GetWindowsInfDirectory() {
 
 LocalDriverInstaller::~LocalDriverInstaller() {
     shuttingDown_.store(true);
+    while (picking_.load()) {
+        const DWORD tid = static_cast<DWORD>(pickThreadId_.load());
+        if (tid != 0) {
+            EnumThreadWindows(
+                tid,
+                [](HWND hwnd, LPARAM) -> BOOL {
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    return TRUE;
+                },
+                0);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     for (;;) {
         std::thread next;
         {
@@ -169,6 +183,16 @@ void LocalDriverInstaller::PickFolderAsync(
     }
 
     pickThread_ = std::thread([this, log = std::move(onLog), picked = std::move(onPicked)]() {
+        struct PickThreadGuard {
+            std::atomic<bool>& flag;
+            std::atomic<unsigned long>& tid;
+            ~PickThreadGuard() {
+                tid.store(0);
+                flag.store(false);
+            }
+        } pickGuard{picking_, pickThreadId_};
+        pickThreadId_.store(GetCurrentThreadId());
+
         CoInitGuard comInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
         std::wstring chosenPath;
         bool ok = false;
@@ -179,7 +203,7 @@ void LocalDriverInstaller::PickFolderAsync(
                     "Не удалось инициализировать COM STA для диалога выбора папки: " +
                         FormatHResult(comInit.Result()));
             }
-        } else {
+        } else if (!shuttingDown_.load()) {
             ComPtr<IFileOpenDialog> dialog;
             HRESULT hr = CoCreateInstance(
                 CLSID_FileOpenDialog,
@@ -192,7 +216,7 @@ void LocalDriverInstaller::PickFolderAsync(
                     log(LogLevel::Error,
                         "Не удалось создать IFileOpenDialog: " + FormatHResult(hr));
                 }
-            } else {
+            } else if (!shuttingDown_.load()) {
                 DWORD options = 0;
                 dialog->GetOptions(&options);
                 dialog->SetOptions(
@@ -319,11 +343,12 @@ void LocalDriverInstaller::InstallFromFolderAsync(
     InstallCompleteCallback onComplete) {
     std::thread oldThread;
     {
-        std::lock_guard<std::mutex> lock(threadMutex_);
+        std::unique_lock<std::mutex> lock(threadMutex_);
         if (shuttingDown_.load()) {
             return;
         }
-        if (installing_.load() || exportingBackup_.load() || removingPackages_.load()) {
+        if (installing_.load() || scanningStore_.load() || exportingBackup_.load() || removingPackages_.load()) {
+            lock.unlock();
             if (onLog) {
                 onLog(LogLevel::Warning, "Установка локальных драйверов или операция DriverStore уже выполняется.");
             }
@@ -772,7 +797,7 @@ void LocalDriverInstaller::ScanDriverStoreAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog) {
     std::lock_guard<std::mutex> lock(threadMutex_);
-    if (shuttingDown_.load() || removingPackages_.load() || exportingBackup_.load()) {
+    if (shuttingDown_.load() || installing_.load() || removingPackages_.load() || exportingBackup_.load()) {
         return;
     }
     if (scanningStore_.exchange(true)) {
@@ -810,11 +835,13 @@ void LocalDriverInstaller::ExportDriverStoreBackupAsync(
     bool skipOldDuplicates,
     LogCallback onLog,
     BackupCompleteCallback onComplete) {
-    std::lock_guard<std::mutex> lock(threadMutex_);
+    std::unique_lock<std::mutex> lock(threadMutex_);
     if (shuttingDown_.load()) {
         return;
     }
-    if (scanningStore_.load() || removingPackages_.load() || exportingBackup_.exchange(true)) {
+    if (installing_.load() || scanningStore_.load() || removingPackages_.load() ||
+        exportingBackup_.exchange(true)) {
+        lock.unlock();
         if (onLog) {
             onLog(LogLevel::Warning, "Операция с хранилищем драйверов уже выполняется.");
         }
@@ -1070,11 +1097,13 @@ void LocalDriverInstaller::RemoveDriverStorePackagesAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog,
     RemoveStoreCompleteCallback onComplete) {
-    std::lock_guard<std::mutex> lock(threadMutex_);
+    std::unique_lock<std::mutex> lock(threadMutex_);
     if (shuttingDown_.load()) {
         return;
     }
-    if (scanningStore_.load() || exportingBackup_.load() || removingPackages_.exchange(true)) {
+    if (installing_.load() || scanningStore_.load() || exportingBackup_.load() ||
+        removingPackages_.exchange(true)) {
+        lock.unlock();
         if (onLog) {
             onLog(LogLevel::Warning, "Операция с хранилищем драйверов уже выполняется.");
         }

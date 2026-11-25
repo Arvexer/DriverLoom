@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -636,20 +637,6 @@ DeviceScanner::~DeviceScanner() {
         }
         props = std::move(propThreads_);
     }
-    for (const auto& entry : props) {
-        if (entry != nullptr && !entry->done.load()) {
-            const unsigned long tid = entry->tid.load();
-            if (tid != 0) {
-                EnumThreadWindows(
-                    static_cast<DWORD>(tid),
-                    [](HWND hwnd, LPARAM) -> BOOL {
-                        PostMessageW(hwnd, WM_CLOSE, 0, 0);
-                        return TRUE;
-                    },
-                    0);
-            }
-        }
-    }
     if (w.joinable()) {
         w.join();
     }
@@ -657,8 +644,23 @@ DeviceScanner::~DeviceScanner() {
         a.join();
     }
     for (auto& entry : props) {
-        if (entry != nullptr && entry->thread.joinable()) {
-            entry->thread.join();
+        if (entry != nullptr) {
+            while (!entry->done.load()) {
+                const unsigned long tid = entry->tid.load();
+                if (tid != 0) {
+                    EnumThreadWindows(
+                        static_cast<DWORD>(tid),
+                        [](HWND hwnd, LPARAM) -> BOOL {
+                            PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                            return TRUE;
+                        },
+                        0);
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            if (entry->thread.joinable()) {
+                entry->thread.join();
+            }
         }
     }
 }
@@ -1362,12 +1364,14 @@ void DeviceScanner::RunDeviceActionAsync(
                 }
             }
 
-            auto refreshed = ScanSynchronously(nullptr);
-            {
-                std::lock_guard<std::mutex> lock(dataMutex_);
-                devices_ = std::move(refreshed);
+            if (!stopRequested_.load()) {
+                auto refreshed = ScanSynchronously(nullptr);
+                {
+                    std::lock_guard<std::mutex> lock(dataMutex_);
+                    devices_ = std::move(refreshed);
+                }
+                generation_.fetch_add(1);
             }
-            generation_.fetch_add(1);
             runningAction_.store(false);
 
             if (cb && !stopRequested_.load()) {

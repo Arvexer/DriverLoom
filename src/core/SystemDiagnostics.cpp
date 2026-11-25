@@ -1078,6 +1078,19 @@ std::vector<PowerSchemeItem> QueryPowerSchemes(std::string& outActiveName) {
 SystemDiagnostics::~SystemDiagnostics() {
     stopRequested_.store(true);
     cancelRequested_.store(true);
+    while (exportingReport_.load()) {
+        const DWORD tid = static_cast<DWORD>(exportThreadId_.load());
+        if (tid != 0) {
+            EnumThreadWindows(
+                tid,
+                [](HWND hwnd, LPARAM) -> BOOL {
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    return TRUE;
+                },
+                0);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
     std::thread scanT;
     std::thread actionT;
     std::thread exportT;
@@ -2284,8 +2297,17 @@ void SystemDiagnostics::ExportReportInteractiveAsync(
          components = std::move(componentsSnapshot),
          log = std::move(onLog)]() {
             (void)ownerWindow;
+            struct ExportThreadGuard {
+                std::atomic<bool>& flag;
+                std::atomic<unsigned long>& tid;
+                ~ExportThreadGuard() {
+                    tid.store(0);
+                    flag.store(false);
+                }
+            } exportGuard{exportingReport_, exportThreadId_};
+            exportThreadId_.store(GetCurrentThreadId());
+
             if (stopRequested_.load()) {
-                exportingReport_.store(false);
                 return;
             }
             CoInitGuard comInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -2295,7 +2317,6 @@ void SystemDiagnostics::ExportReportInteractiveAsync(
                         "Не удалось инициализировать COM STA для сохранения отчёта: " +
                             FormatHResult(comInit.Result()));
                 }
-                exportingReport_.store(false);
                 return;
             }
 
@@ -2313,7 +2334,7 @@ void SystemDiagnostics::ExportReportInteractiveAsync(
                             "Не удалось создать диалог сохранения файла: " +
                                 FormatHResult(hr));
                     }
-                } else {
+                } else if (!stopRequested_.load()) {
                     const std::wstring mdFilter = Utf8ToWide(Tr("Отчёт Markdown (*.md)", "Звіт Markdown (*.md)", "Markdown Report (*.md)"));
                     const std::wstring txtFilter = Utf8ToWide(Tr("Текстовый отчёт (*.txt)", "Текстовий звіт (*.txt)", "Text Report (*.txt)"));
                     const std::wstring jsonFilter = Utf8ToWide(Tr("Отчёт JSON (*.json)", "Звіт JSON (*.json)", "JSON Report (*.json)"));
@@ -2369,8 +2390,6 @@ void SystemDiagnostics::ExportReportInteractiveAsync(
                     }
                 }
             }
-
-            exportingReport_.store(false);
         });
 }
 

@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <sstream>
+#include <utility>
 
 DriverLoomApp::DriverLoomApp(HWND mainHwnd, int initialTab)
     : hwnd_(mainHwnd),
@@ -35,6 +36,17 @@ DriverLoomApp::DriverLoomApp(HWND mainHwnd, int initialTab)
 }
 
 DriverLoomApp::~DriverLoomApp() {
+    stopAppUpdate_.store(true);
+    {
+        HINTERNET activeReq = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(appHttpMutex_);
+            activeReq = static_cast<HINTERNET>(std::exchange(activeAppUpdateRequest_, nullptr));
+        }
+        if (activeReq != nullptr) {
+            WinHttpCloseHandle(activeReq);
+        }
+    }
     componentsScanner_.RequestCancelInstall();
     diagnostics_.RequestCancel();
     wuManager_.RequestCancel();
@@ -1238,11 +1250,15 @@ void DriverLoomApp::RenderRebootBanner() {
 }
 
 void DriverLoomApp::StartAppUpdateCheckAsync(bool manual) {
-    if (checkingAppUpdate_.exchange(true)) {
+    if (stopAppUpdate_.load() || checkingAppUpdate_.exchange(true)) {
         return;
     }
     if (appUpdateThread_.joinable()) {
         appUpdateThread_.join();
+    }
+    if (stopAppUpdate_.load()) {
+        checkingAppUpdate_.store(false);
+        return;
     }
     {
         std::lock_guard<std::mutex> lock(appUpdateMutex_);
@@ -1258,6 +1274,47 @@ void DriverLoomApp::StartAppUpdateCheckAsync(bool manual) {
                 }
             }
         };
+        struct TrackedAppRequestGuard {
+            std::mutex& mtx;
+            void*& slot;
+            std::atomic<bool>& stopFlag;
+            HINTERNET h{nullptr};
+            TrackedAppRequestGuard(
+                std::mutex& m, void*& s, std::atomic<bool>& st, HINTERNET req) noexcept
+                : mtx(m), slot(s), stopFlag(st), h(req) {
+                if (h != nullptr) {
+                    bool cancelled = false;
+                    {
+                        std::lock_guard<std::mutex> lock(mtx);
+                        if (stopFlag.load()) {
+                            cancelled = true;
+                        } else {
+                            slot = h;
+                        }
+                    }
+                    if (cancelled) {
+                        WinHttpCloseHandle(h);
+                        h = nullptr;
+                    }
+                }
+            }
+            ~TrackedAppRequestGuard() {
+                if (h != nullptr) {
+                    bool owned = false;
+                    {
+                        std::lock_guard<std::mutex> lock(mtx);
+                        if (slot == h) {
+                            slot = nullptr;
+                            owned = true;
+                        }
+                    }
+                    if (owned) {
+                        WinHttpCloseHandle(h);
+                    }
+                    h = nullptr;
+                }
+            }
+        };
 
         AppUpdateState resultState = AppUpdateState::Error;
         std::string foundVer = hdm::kAppVersion;
@@ -1270,19 +1327,23 @@ void DriverLoomApp::StartAppUpdateCheckAsync(bool manual) {
             WINHTTP_NO_PROXY_NAME,
             WINHTTP_NO_PROXY_BYPASS,
             0)};
-        if (session.h != nullptr) {
+        if (session.h != nullptr && !stopAppUpdate_.load()) {
             WinHttpSetTimeouts(session.h, 3000, 3000, 3500, 5000);
             WinHttpHandleGuard connect{
                 WinHttpConnect(session.h, L"github.com", INTERNET_DEFAULT_HTTPS_PORT, 0)};
-            if (connect.h != nullptr) {
-                WinHttpHandleGuard request{WinHttpOpenRequest(
-                    connect.h,
-                    L"HEAD",
-                    L"/Arvexer/DriverLoom/releases/latest",
-                    nullptr,
-                    WINHTTP_NO_REFERER,
-                    WINHTTP_DEFAULT_ACCEPT_TYPES,
-                    WINHTTP_FLAG_SECURE)};
+            if (connect.h != nullptr && !stopAppUpdate_.load()) {
+                TrackedAppRequestGuard request{
+                    appHttpMutex_,
+                    activeAppUpdateRequest_,
+                    stopAppUpdate_,
+                    WinHttpOpenRequest(
+                        connect.h,
+                        L"HEAD",
+                        L"/Arvexer/DriverLoom/releases/latest",
+                        nullptr,
+                        WINHTTP_NO_REFERER,
+                        WINHTTP_DEFAULT_ACCEPT_TYPES,
+                        WINHTTP_FLAG_SECURE)};
                 if (request.h != nullptr) {
                     DWORD redirPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
                     WinHttpSetOption(
@@ -1338,14 +1399,10 @@ void DriverLoomApp::StartAppUpdateCheckAsync(bool manual) {
                             CompareVersionOrString(tagVer, hdm::kAppVersion) > 0) {
                             resultState = AppUpdateState::UpdateAvailable;
                             foundVer = tagVer;
-                            if (!locationUrl.empty()) {
-                                if (locationUrl.rfind("http", 0) == 0) {
-                                    foundUrl = locationUrl;
-                                } else if (locationUrl.front() == '/') {
-                                    foundUrl = "https://github.com" + locationUrl;
-                                } else {
-                                    foundUrl = "https://github.com/" + locationUrl;
-                                }
+                            if (locationUrl.rfind("https://github.com/Arvexer/DriverLoom/", 0) == 0) {
+                                foundUrl = locationUrl;
+                            } else if (locationUrl.rfind("/Arvexer/DriverLoom/", 0) == 0) {
+                                foundUrl = "https://github.com" + locationUrl;
                             }
                         } else if (statusCode == 404 || statusCode == 200 ||
                                    (statusCode >= 300 && statusCode < 400)) {
@@ -1356,6 +1413,10 @@ void DriverLoomApp::StartAppUpdateCheckAsync(bool manual) {
             }
         }
 
+        if (stopAppUpdate_.load()) {
+            checkingAppUpdate_.store(false);
+            return;
+        }
         {
             std::lock_guard<std::mutex> lock(appUpdateMutex_);
             appUpdateState_ = resultState;

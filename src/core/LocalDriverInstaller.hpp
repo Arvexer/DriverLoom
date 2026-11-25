@@ -132,6 +132,7 @@ private:
     std::atomic<bool> exportingBackup_{false};
     std::atomic<bool> removingPackages_{false};
     std::atomic<bool> shuttingDown_{false};
+    std::atomic<unsigned long> pickThreadId_{0};
     std::atomic<float> progress_{0.0f};
     std::atomic<uint64_t> storeGeneration_{0};
 
