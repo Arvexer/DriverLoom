@@ -233,6 +233,13 @@ int RunCliModeIfRequested() {
         RestoreInboxDriver
     };
     Mode mode = Mode::None;
+    bool duplicateMode = false;
+    auto setMode = [&](Mode nextMode) {
+        if (mode != Mode::None) {
+            duplicateMode = true;
+        }
+        mode = nextMode;
+    };
     std::wstring targetArg;
     std::wstring instanceArg;
     std::wstring logPath;
@@ -245,42 +252,42 @@ int RunCliModeIfRequested() {
     for (int i = 1; i < argc; ++i) {
         const std::wstring arg = argv[i];
         if (arg == L"--cli-restore-point" && i + 1 < argc) {
-            mode = Mode::RestorePoint;
+            setMode(Mode::RestorePoint);
             targetArg = argv[++i];
         } else if (arg == L"--cli-install-inf" && i + 1 < argc) {
-            mode = Mode::InstallInf;
+            setMode(Mode::InstallInf);
             targetArg = argv[++i];
         } else if (arg == L"--cli-remove-oem-infs" && i + 1 < argc) {
-            mode = Mode::RemoveOemInfs;
+            setMode(Mode::RemoveOemInfs);
             targetArg = argv[++i];
         } else if (arg == L"--cli-wu-install" && i + 1 < argc) {
-            mode = Mode::WuInstall;
+            setMode(Mode::WuInstall);
             targetArg = argv[++i];
         } else if (arg == L"--cli-wu-hide" && i + 1 < argc) {
-            mode = Mode::WuHide;
+            setMode(Mode::WuHide);
             targetArg = argv[++i];
         } else if (arg == L"--cli-wu-unhide" && i + 1 < argc) {
-            mode = Mode::WuUnhide;
+            setMode(Mode::WuUnhide);
             targetArg = argv[++i];
         } else if (arg == L"--cli-enable-service" && i + 1 < argc) {
-            mode = Mode::EnableService;
+            setMode(Mode::EnableService);
             targetArg = argv[++i];
         } else if (arg == L"--cli-device-action" && i + 1 < argc) {
-            mode = Mode::DeviceAction;
+            setMode(Mode::DeviceAction);
             targetArg = argv[++i];
         } else if (arg == L"--cli-restore-inbox" && i + 1 < argc) {
-            mode = Mode::RestoreInboxDriver;
+            setMode(Mode::RestoreInboxDriver);
             targetArg = argv[++i];
         } else if (arg == L"--instance" && i + 1 < argc) {
             instanceArg = argv[++i];
         } else if (arg == L"--cli-reset-wucache") {
-            mode = Mode::ResetWuCache;
+            setMode(Mode::ResetWuCache);
         } else if (arg == L"--cli-sfc") {
-            mode = Mode::SfcScan;
+            setMode(Mode::SfcScan);
         } else if (arg == L"--cli-dism-check") {
-            mode = Mode::DismCheck;
+            setMode(Mode::DismCheck);
         } else if (arg == L"--cli-dism-restore") {
-            mode = Mode::DismRestore;
+            setMode(Mode::DismRestore);
         } else if (arg == L"--log" && i + 1 < argc) {
             logPath = argv[++i];
         } else if (arg == L"--cancel-file" && i + 1 < argc) {
@@ -298,6 +305,9 @@ int RunCliModeIfRequested() {
 
     if (mode == Mode::None) {
         return -1;
+    }
+    if (duplicateMode) {
+        return 1;
     }
 
     std::mutex fileLogMutex;

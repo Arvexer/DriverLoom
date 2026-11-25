@@ -76,11 +76,13 @@ std::wstring GetDeviceRegistryPropertyString(
     HDEVINFO devInfoSet,
     PSP_DEVINFO_DATA devInfoData,
     DWORD property) {
+    constexpr DWORD kMaxRegPropBytes = 1048576u;
     DWORD regType = 0;
     DWORD requiredSize = 0;
     SetupDiGetDeviceRegistryPropertyW(
         devInfoSet, devInfoData, property, &regType, nullptr, 0, &requiredSize);
-    if (requiredSize == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+    if (requiredSize == 0 || requiredSize > kMaxRegPropBytes ||
+        GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
         return {};
     }
 
@@ -103,11 +105,13 @@ std::vector<std::wstring> GetDeviceRegistryPropertyMultiString(
     PSP_DEVINFO_DATA devInfoData,
     DWORD property) {
     std::vector<std::wstring> values;
+    constexpr DWORD kMaxRegPropBytes = 1048576u;
     DWORD regType = 0;
     DWORD requiredSize = 0;
     SetupDiGetDeviceRegistryPropertyW(
         devInfoSet, devInfoData, property, &regType, nullptr, 0, &requiredSize);
-    if (requiredSize == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+    if (requiredSize == 0 || requiredSize > kMaxRegPropBytes ||
+        GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
         return values;
     }
 
@@ -143,9 +147,10 @@ std::vector<std::wstring> GetDeviceRegistryPropertyMultiString(
 }
 
 std::wstring GetDeviceInstanceIdString(HDEVINFO devInfoSet, PSP_DEVINFO_DATA devInfoData) {
+    constexpr DWORD kMaxInstChars = 32768u;
     DWORD requiredChars = 0;
     SetupDiGetDeviceInstanceIdW(devInfoSet, devInfoData, nullptr, 0, &requiredChars);
-    if (requiredChars == 0) {
+    if (requiredChars == 0 || requiredChars > kMaxInstChars) {
         return {};
     }
     std::wstring buf(requiredChars + 1, L'\0');
@@ -156,10 +161,11 @@ std::wstring GetDeviceInstanceIdString(HDEVINFO devInfoSet, PSP_DEVINFO_DATA dev
 }
 
 std::wstring ReadRegString(HKEY hKey, const wchar_t* valueName) {
+    constexpr DWORD kMaxRegStrBytes = 1048576u;
     DWORD type = 0;
     DWORD bytes = 0;
     if (RegQueryValueExW(hKey, valueName, nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS ||
-        bytes == 0 || (type != REG_SZ && type != REG_EXPAND_SZ)) {
+        bytes == 0 || bytes > kMaxRegStrBytes || (type != REG_SZ && type != REG_EXPAND_SZ)) {
         return {};
     }
     std::wstring buf(bytes / sizeof(wchar_t) + 2, L'\0');
@@ -223,10 +229,11 @@ void ReadMonitorEdid(const std::wstring& instanceId, DeviceInfo& out) {
         return;
     }
 
+    constexpr DWORD kMaxEdidBytes = 4096u;
     DWORD type = 0;
     DWORD bytes = 0;
     if (RegQueryValueExW(key.Get(), L"EDID", nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS ||
-        bytes < 128 || type != REG_BINARY) {
+        bytes < 128 || bytes > kMaxEdidBytes || type != REG_BINARY) {
         return;
     }
 

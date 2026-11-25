@@ -17,6 +17,10 @@ extern bool g_pinLogPanel;
 extern float g_dpiScale;
 extern int g_uiScalePercent;
 extern bool g_pendingScaleReload;
+extern bool g_cliOverrideAdvancedMode;
+extern bool g_cliOverrideLightTheme;
+extern bool g_cliOverrideUiScale;
+extern bool g_cliOverrideLanguage;
 float EffectiveUiScale() noexcept;
 
 extern ImFont* g_fontSmall;

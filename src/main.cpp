@@ -588,31 +588,39 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                     const std::wstring langArg = argv[++i];
                     if (langArg == L"uk" || langArg == L"ua" || langArg == L"UK" || langArg == L"UA") {
                         hdm::SetLang(hdm::Lang::Uk);
+                        g_cliOverrideLanguage = true;
                     } else if (langArg == L"en" || langArg == L"EN" || langArg == L"eng" || langArg == L"ENG") {
                         hdm::SetLang(hdm::Lang::En);
+                        g_cliOverrideLanguage = true;
                     } else if (langArg == L"ru" || langArg == L"RU") {
                         hdm::SetLang(hdm::Lang::Ru);
+                        g_cliOverrideLanguage = true;
                     }
                 } else if (arg == L"--mode" && i + 1 < argc) {
                     const std::wstring modeArg = argv[++i];
                     if (modeArg == L"advanced" || modeArg == L"adv" || modeArg == L"1") {
                         g_isAdvancedMode = true;
+                        g_cliOverrideAdvancedMode = true;
                         hasModeArg = true;
                     } else if (modeArg == L"standard" || modeArg == L"safe" || modeArg == L"0") {
                         g_isAdvancedMode = false;
+                        g_cliOverrideAdvancedMode = true;
                         hasModeArg = true;
                     }
                 } else if (arg == L"--theme" && i + 1 < argc) {
                     const std::wstring themeArg = argv[++i];
                     if (themeArg == L"light" || themeArg == L"LIGHT") {
                         g_isLightTheme = true;
+                        g_cliOverrideLightTheme = true;
                     } else if (themeArg == L"dark" || themeArg == L"DARK") {
                         g_isLightTheme = false;
+                        g_cliOverrideLightTheme = true;
                     }
                 } else if (arg == L"--scale" && i + 1 < argc) {
                     const int scalePct = _wtoi(argv[++i]);
                     if (scalePct >= 80 && scalePct <= 175) {
                         g_uiScalePercent = scalePct;
+                        g_cliOverrideUiScale = true;
                     }
                 }
             }
@@ -621,12 +629,15 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     }
     if ((initialTab == 5 || hasLocalSectionArg) && !hasModeArg) {
         g_isAdvancedMode = true;
+        g_cliOverrideAdvancedMode = true;
     }
     if (!captureSuiteDir.empty()) {
         std::error_code ec;
         std::filesystem::create_directories(captureSuiteDir, ec);
         g_isAdvancedMode = true;
         g_isLightTheme = false;
+        g_cliOverrideAdvancedMode = true;
+        g_cliOverrideLightTheme = true;
     }
 
     ImGui_ImplWin32_EnableDpiAwareness();

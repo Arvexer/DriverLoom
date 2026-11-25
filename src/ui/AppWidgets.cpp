@@ -19,6 +19,10 @@ bool g_pinLogPanel = false;
 float g_dpiScale = 1.0f;
 int g_uiScalePercent = 100;
 bool g_pendingScaleReload = false;
+bool g_cliOverrideAdvancedMode = false;
+bool g_cliOverrideLightTheme = false;
+bool g_cliOverrideUiScale = false;
+bool g_cliOverrideLanguage = false;
 
 float EffectiveUiScale() noexcept {
     const float dpi = (g_dpiScale > 0.5f ? g_dpiScale : 1.0f);
@@ -118,13 +122,12 @@ void OpenUrlInBrowser(const std::string& url) {
         return;
     }
     for (unsigned char ch : clean) {
-        if (ch < 0x20 || ch == 0x7F) {
+        if (ch <= 0x20 || ch == 0x7F || ch == '"' || ch == '\'') {
             return;
         }
     }
-    const std::string lower = hdm::ToLowerAscii(clean.substr(0, 10));
+    const std::string lower = hdm::ToLowerAscii(clean.substr(0, 8));
     const bool allowed = (lower.rfind("https://", 0) == 0) ||
-                         (lower.rfind("http://", 0) == 0) ||
                          (lower.rfind("mailto:", 0) == 0);
     if (!allowed) {
         return;
@@ -451,13 +454,21 @@ void SaveUserPreferences() noexcept {
             sizeof(val));
     };
 
-    writeDword(L"AdvancedMode", g_isAdvancedMode ? 1u : 0u);
-    writeDword(L"LightTheme", g_isLightTheme ? 1u : 0u);
+    if (!g_cliOverrideAdvancedMode) {
+        writeDword(L"AdvancedMode", g_isAdvancedMode ? 1u : 0u);
+    }
+    if (!g_cliOverrideLightTheme) {
+        writeDword(L"LightTheme", g_isLightTheme ? 1u : 0u);
+    }
     writeDword(L"AutoCheckUpdates", g_autoCheckAppUpdates ? 1u : 0u);
     writeDword(L"AutoCheckOnlineUpdates", g_autoCheckOnlineUpdates ? 1u : 0u);
     writeDword(L"PinLogPanel", g_pinLogPanel ? 1u : 0u);
-    writeDword(L"UiScalePercent", static_cast<DWORD>(std::clamp(g_uiScalePercent, 80, 175)));
-    writeDword(L"Language", static_cast<DWORD>(hdm::GetLang()));
+    if (!g_cliOverrideUiScale) {
+        writeDword(L"UiScalePercent", static_cast<DWORD>(std::clamp(g_uiScalePercent, 80, 175)));
+    }
+    if (!g_cliOverrideLanguage) {
+        writeDword(L"Language", static_cast<DWORD>(hdm::GetLang()));
+    }
 }
 
 constexpr wchar_t kSnapshotRegSubKey[] = L"Software\\DriverLoom\\BaselineSnapshot";
@@ -648,8 +659,11 @@ bool LoadBaselineSnapshotFromRegistry(
 }
 
 std::string EllipsizeUtf8(const std::string& text, float maxWidth) {
-    if (text.empty() || maxWidth <= 8.0f) {
+    if (text.empty()) {
         return text;
+    }
+    if (maxWidth <= 0.0f) {
+        return {};
     }
     if (ImGui::CalcTextSize(text.c_str()).x <= maxWidth) {
         return text;
@@ -1142,19 +1156,28 @@ void SetTaskbarOverlayBadge(HWND hwnd, TaskbarOverlayState state) {
 
     g_taskbarCache.lastHwnd = hwnd;
     HICON icon = nullptr;
+    std::wstring descBuf;
     const wchar_t* desc = nullptr;
     if (state == TaskbarOverlayState::Critical) {
         if (g_taskbarCache.criticalIcon == nullptr) {
             g_taskbarCache.criticalIcon = CreateTaskbarBadgeIcon(true);
         }
         icon = g_taskbarCache.criticalIcon;
-        desc = L"Critical driver or service issue";
+        descBuf = hdm::Utf8ToWide(hdm::Tr(
+            "Критическая проблема драйвера или службы",
+            "Критична проблема драйвера або служби",
+            "Critical driver or service issue"));
+        desc = descBuf.c_str();
     } else if (state == TaskbarOverlayState::Attention) {
         if (g_taskbarCache.attentionIcon == nullptr) {
             g_taskbarCache.attentionIcon = CreateTaskbarBadgeIcon(false);
         }
         icon = g_taskbarCache.attentionIcon;
-        desc = L"Updates available";
+        descBuf = hdm::Utf8ToWide(hdm::Tr(
+            "Доступны обновления или есть замечания",
+            "Доступні оновлення або є зауваження",
+            "Updates available or attention needed"));
+        desc = descBuf.c_str();
     }
     g_taskbarCache.taskbar->SetOverlayIcon(hwnd, icon, desc);
 }

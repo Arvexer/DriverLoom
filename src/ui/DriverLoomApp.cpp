@@ -122,6 +122,7 @@ bool DriverLoomApp::IsUserRelevantDeviceIssue(const hdm::DeviceInfo& d) {
 
 void DriverLoomApp::RenderFrame() {
     if (pendingThemeChange_ >= 0) {
+        g_cliOverrideLightTheme = false;
         ApplyAppTheme(hwnd_, EffectiveUiScale(), pendingThemeChange_ != 0);
         SaveUserPreferences();
         pendingThemeChange_ = -1;
@@ -474,6 +475,7 @@ void DriverLoomApp::RenderSidebar() {
             : hdm::Tr("Обычный###SbMode", "Звичайний###SbMode", "Simple###SbMode");
     if (RenderPillButton(modeLbl, g_isAdvancedMode, ImVec2(modeBtnW, quickRowH))) {
         g_isAdvancedMode = !g_isAdvancedMode;
+        g_cliOverrideAdvancedMode = false;
         if (!g_isAdvancedMode) {
             if (activeTabIndex_ == PageLocalInstaller) {
                 activeTabIndex_ = PageOverview;
@@ -670,6 +672,7 @@ void DriverLoomApp::RenderSettingsTab() {
                 !g_isAdvancedMode)) {
             if (g_isAdvancedMode) {
                 g_isAdvancedMode = false;
+                g_cliOverrideAdvancedMode = false;
                 wuShowHidden_ = false;
                 wuRestoreBefore_ = true;
                 compRestoreBefore_ = true;
@@ -688,6 +691,7 @@ void DriverLoomApp::RenderSettingsTab() {
                 g_isAdvancedMode)) {
             if (!g_isAdvancedMode) {
                 g_isAdvancedMode = true;
+                g_cliOverrideAdvancedMode = false;
                 SaveUserPreferences();
             }
         }
@@ -739,16 +743,19 @@ void DriverLoomApp::RenderSettingsTab() {
         const hdm::Lang curLang = hdm::GetLang();
         if (RenderPillButton("Русский###SetRu", curLang == hdm::Lang::Ru)) {
             hdm::SetLang(hdm::Lang::Ru);
+            g_cliOverrideLanguage = false;
             SaveUserPreferences();
         }
         ImGui::SameLine();
         if (RenderPillButton("Українська###SetUk", curLang == hdm::Lang::Uk)) {
             hdm::SetLang(hdm::Lang::Uk);
+            g_cliOverrideLanguage = false;
             SaveUserPreferences();
         }
         ImGui::SameLine();
         if (RenderPillButton("English###SetEn", curLang == hdm::Lang::En)) {
             hdm::SetLang(hdm::Lang::En);
+            g_cliOverrideLanguage = false;
             SaveUserPreferences();
         }
 
@@ -767,6 +774,7 @@ void DriverLoomApp::RenderSettingsTab() {
             if (RenderPillButton(scaleBtnLbl, g_uiScalePercent == preset)) {
                 if (g_uiScalePercent != preset) {
                     g_uiScalePercent = preset;
+                    g_cliOverrideUiScale = false;
                     g_pendingScaleReload = true;
                     SaveUserPreferences();
                 }
@@ -1415,6 +1423,18 @@ void DriverLoomApp::StartAppUpdateCheckAsync(bool manual) {
             WINHTTP_NO_PROXY_BYPASS,
             0)};
         if (session.h != nullptr && !stopAppUpdate_.load()) {
+#ifndef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
+            constexpr DWORD kTls13Flag = 0x00002000;
+#else
+            constexpr DWORD kTls13Flag = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+#endif
+            DWORD tlsProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | kTls13Flag;
+            if (!WinHttpSetOption(
+                    session.h, WINHTTP_OPTION_SECURE_PROTOCOLS, &tlsProtocols, sizeof(tlsProtocols))) {
+                tlsProtocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+                WinHttpSetOption(
+                    session.h, WINHTTP_OPTION_SECURE_PROTOCOLS, &tlsProtocols, sizeof(tlsProtocols));
+            }
             WinHttpSetTimeouts(session.h, 3000, 3000, 3500, 5000);
             WinHttpHandleGuard connect{
                 WinHttpConnect(session.h, L"github.com", INTERNET_DEFAULT_HTTPS_PORT, 0)};
@@ -1469,28 +1489,45 @@ void DriverLoomApp::StartAppUpdateCheckAsync(bool manual) {
                             }
                         }
 
+                        std::string rawTag;
                         std::string tagVer;
                         const size_t tagPos = locationUrl.find("/releases/tag/");
                         if (tagPos != std::string::npos) {
-                            tagVer = locationUrl.substr(tagPos + 14);
-                            const size_t endPos = tagVer.find_first_of("/?#\r\n ");
+                            rawTag = locationUrl.substr(tagPos + 14);
+                            const size_t endPos = rawTag.find_first_of("/?#\r\n ");
                             if (endPos != std::string::npos) {
-                                tagVer.resize(endPos);
+                                rawTag.resize(endPos);
                             }
-                            if (!tagVer.empty() && (tagVer[0] == 'v' || tagVer[0] == 'V')) {
-                                tagVer.erase(0, 1);
+                            bool tagCharsOk = !rawTag.empty();
+                            for (unsigned char ch : rawTag) {
+                                const bool ok = (ch >= '0' && ch <= '9') ||
+                                                (ch >= 'A' && ch <= 'Z') ||
+                                                (ch >= 'a' && ch <= 'z') ||
+                                                ch == '.' || ch == '_' || ch == '-';
+                                if (!ok) {
+                                    tagCharsOk = false;
+                                    break;
+                                }
+                            }
+                            if (tagCharsOk) {
+                                tagVer = rawTag;
+                                if (!tagVer.empty() && (tagVer[0] == 'v' || tagVer[0] == 'V')) {
+                                    tagVer.erase(0, 1);
+                                }
+                                if (tagVer.empty() || !std::isdigit(static_cast<unsigned char>(tagVer[0]))) {
+                                    tagVer.clear();
+                                    rawTag.clear();
+                                }
+                            } else {
+                                rawTag.clear();
                             }
                         }
 
-                        if (!tagVer.empty() &&
+                        if (!tagVer.empty() && !rawTag.empty() &&
                             CompareVersionOrString(tagVer, hdm::kAppVersion) > 0) {
                             resultState = AppUpdateState::UpdateAvailable;
                             foundVer = tagVer;
-                            if (locationUrl.rfind("https://github.com/Arvexer/DriverLoom/", 0) == 0) {
-                                foundUrl = locationUrl;
-                            } else if (locationUrl.rfind("/Arvexer/DriverLoom/", 0) == 0) {
-                                foundUrl = "https://github.com" + locationUrl;
-                            }
+                            foundUrl = "https://github.com/Arvexer/DriverLoom/releases/tag/" + rawTag;
                         } else if (statusCode == 404 || statusCode == 200 ||
                                    (statusCode >= 300 && statusCode < 400)) {
                             resultState = AppUpdateState::UpToDate;

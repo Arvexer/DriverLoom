@@ -29,15 +29,34 @@ std::wstring ReadCatalogRegStr(HKEY key, const wchar_t* name) {
 }
 
 std::string EncodeWingetPath(std::string_view path) {
+    if (path.empty() || path.front() == '/' || path.back() == '/') {
+        return {};
+    }
     std::string encoded;
     encoded.reserve(path.size() + 8);
-    for (char ch : path) {
-        if (ch == '+') {
-            encoded += "%2B";
-        } else if (ch == ' ') {
-            encoded += "%20";
-        } else {
-            encoded.push_back(ch);
+    size_t segStart = 0;
+    for (size_t i = 0; i <= path.size(); ++i) {
+        if (i == path.size() || path[i] == '/') {
+            const std::string_view seg = path.substr(segStart, i - segStart);
+            if (seg.empty() || seg == "." || seg == "..") {
+                return {};
+            }
+            if (!encoded.empty()) {
+                encoded.push_back('/');
+            }
+            for (unsigned char ch : seg) {
+                if (ch < 0x20 || ch >= 0x7F || ch == '\\' || ch == '?' || ch == '#' || ch == '%') {
+                    return {};
+                }
+                if (ch == '+') {
+                    encoded += "%2B";
+                } else if (ch == ' ') {
+                    encoded += "%20";
+                } else {
+                    encoded.push_back(static_cast<char>(ch));
+                }
+            }
+            segStart = i + 1;
         }
     }
     return encoded;
@@ -323,9 +342,20 @@ bool TryExtractTrailingVersionDate(const std::vector<uint64_t>& parts, int& outY
         return false;
     }
     const uint64_t mmdd = parts[2];
+    if (mmdd < 101 || mmdd > 1231) {
+        return false;
+    }
+    // Reject Intel-style 4-part builds like 32.0.101.2024 where parts[2]==101 is not a MMDD date.
+    if (parts[0] >= 25 && mmdd < 200) {
+        return false;
+    }
     const uint64_t m = mmdd / 100;
     const uint64_t d = mmdd % 100;
-    if (m < 1 || m > 12 || d < 1 || d > 31) {
+    if (m < 1 || m > 12 || d < 1) {
+        return false;
+    }
+    static constexpr uint64_t kDaysInMonth[13] = {0, 31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+    if (d > kDaysInMonth[m]) {
         return false;
     }
     outYmd = static_cast<int>(parts[3] * 10000 + m * 100 + d);
@@ -491,7 +521,24 @@ std::pair<std::string, std::string> ParseLatestVulkanRuntimeFromJson(const std::
             continue;
         }
         const std::string ver = fileName.substr(verStart + 1, instPos - verStart - 1);
-        if (ver.empty() || !std::isdigit(static_cast<unsigned char>(ver[0]))) {
+        bool validVer = !ver.empty() && std::isdigit(static_cast<unsigned char>(ver.front())) != 0 &&
+                        std::isdigit(static_cast<unsigned char>(ver.back())) != 0 &&
+                        ver.find("..") == std::string::npos;
+        for (char ch : ver) {
+            if (!std::isdigit(static_cast<unsigned char>(ch)) && ch != '.') {
+                validVer = false;
+                break;
+            }
+        }
+        bool validFile = fileName.find("..") == std::string::npos;
+        for (unsigned char ch : fileName) {
+            const bool ok = std::isalnum(ch) || ch == '.' || ch == '_' || ch == '-';
+            if (!ok) {
+                validFile = false;
+                break;
+            }
+        }
+        if (!validVer || !validFile) {
             continue;
         }
         if (bestVer.empty() || IsVersionNewer(ver, bestVer)) {
@@ -513,11 +560,13 @@ std::pair<std::string, std::string> ParseAmdAdrenalinFromHtml(const std::string&
     while ((pos = html.find("https://drivers.amd.com/drivers/installer/", pos)) != std::string::npos) {
         size_t end = pos;
         while (end < html.size() && html[end] != '"' && html[end] != '\'' &&
-               html[end] != '<' && html[end] != '>' && html[end] != ' ') {
+               html[end] != '<' && html[end] != '>' && html[end] != ' ' &&
+               html[end] != '\r' && html[end] != '\n' && html[end] != '\t' &&
+               html[end] != ')' && html[end] != ']') {
             ++end;
         }
         const std::string url = html.substr(pos, end - pos);
-        if (url.find(".exe") != std::string::npos) {
+        if (EndsWithCaseInsensitive(StripUrlQuery(url), ".exe")) {
             std::string ver;
             const std::string marker = "adrenalin-edition-";
             const size_t vPos = url.find(marker);
@@ -721,8 +770,9 @@ CatalogDriverMatch ResolveMsCatalogDriverCab(const std::string& searchKey) {
         return {bestVer, "", bestDateYmd};
     }
 
+    const std::string dlBodyLower = ToLowerAscii(dlResp.body);
     size_t cabPos = 0;
-    while ((cabPos = dlResp.body.find(".cab", cabPos)) != std::string::npos) {
+    while ((cabPos = dlBodyLower.find(".cab", cabPos)) != std::string::npos) {
         size_t urlStart = cabPos;
         while (urlStart > 0 && dlResp.body[urlStart - 1] != '\'' && dlResp.body[urlStart - 1] != '"' &&
                dlResp.body[urlStart - 1] != ' ' && dlResp.body[urlStart - 1] != '>') {
@@ -964,6 +1014,9 @@ WingetManifestInfo ResolveWingetPkgManifest(
         return result;
     }
     const std::string encPath = EncodeWingetPath(repoPath);
+    if (encPath.empty()) {
+        return result;
+    }
     const std::wstring treeUrl = Utf8ToWide(
         "https://github.com/microsoft/winget-pkgs/tree/master/manifests/" + encPath);
     const HttpResponse treeResp = WinHttpRequest(
@@ -992,9 +1045,13 @@ WingetManifestInfo ResolveWingetPkgManifest(
         return result;
     }
 
+    const std::string encVer = EncodeWingetPath(bestVer);
+    if (encVer.empty()) {
+        return result;
+    }
     const std::wstring verTreeUrl = Utf8ToWide(
         "https://github.com/microsoft/winget-pkgs/tree/master/manifests/" +
-        encPath + "/" + EncodeWingetPath(bestVer));
+        encPath + "/" + encVer);
     const HttpResponse verResp = WinHttpRequest(
         verTreeUrl, L"GET", true, 128 * 1024, L"Accept: application/json\r\n");
     if (!verResp.ok || verResp.truncated || verResp.body.empty()) {
@@ -1013,9 +1070,13 @@ WingetManifestInfo ResolveWingetPkgManifest(
         return result;
     }
 
+    const std::string encYaml = EncodeWingetPath(installerYaml);
+    if (encYaml.empty()) {
+        return result;
+    }
     const std::wstring rawUrl = Utf8ToWide(
         "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/" +
-        encPath + "/" + EncodeWingetPath(bestVer) + "/" + EncodeWingetPath(installerYaml));
+        encPath + "/" + encVer + "/" + encYaml);
     const HttpResponse yamlResp = WinHttpRequest(rawUrl, L"GET", true, 128 * 1024);
     if (!yamlResp.ok || yamlResp.truncated || yamlResp.body.empty()) {
         return result;

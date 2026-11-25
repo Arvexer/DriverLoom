@@ -283,7 +283,10 @@ void ApplyResolvedVersionToItem(
         !std::isdigit(static_cast<unsigned char>(latestVer[0]))) {
         return;
     }
-    if (IsVersionNewer(latestVer, item.installedVersion)) {
+    const bool newer = (item.category == ComponentCategory::MonitorAndGpu)
+                           ? IsDriverVersionNewer(latestVer, item.installedVersion)
+                           : IsVersionNewer(latestVer, item.installedVersion);
+    if (newer) {
         item.updateAvailable = true;
         item.statusText = "Доступно обновление (" + latestVer + ")";
     } else {
@@ -334,8 +337,10 @@ void MergeOnlineMetadataIntoRefreshed(
                 const bool catalogIsOlderByDate =
                     (newItem.latestDateYmd > 0 && newItem.installedDateYmd > 0 &&
                      newItem.latestDateYmd < newItem.installedDateYmd);
-                if (!catalogIsOlderByDate &&
-                    IsVersionNewer(newItem.latestVersion, newItem.installedVersion)) {
+                const bool newer = (newItem.category == ComponentCategory::MonitorAndGpu)
+                                       ? IsDriverVersionNewer(newItem.latestVersion, newItem.installedVersion)
+                                       : IsVersionNewer(newItem.latestVersion, newItem.installedVersion);
+                if (!catalogIsOlderByDate && newer) {
                     newItem.updateAvailable = true;
                     newItem.statusText = "Доступно обновление (" + newItem.latestVersion + ")";
                 } else {
@@ -784,7 +789,19 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                     return;
                 }
                 const std::string latest = ExtractJsonStringField(resp.body, "latest-runtime");
-                if (latest.empty()) {
+                bool validDotnetVer = !latest.empty() &&
+                                      std::isdigit(static_cast<unsigned char>(latest.front())) != 0 &&
+                                      std::isdigit(static_cast<unsigned char>(latest.back())) != 0 &&
+                                      latest.find('.') != std::string::npos &&
+                                      latest.find("..") == std::string::npos;
+                for (unsigned char ch : latest) {
+                    const bool ok = std::isdigit(ch) || ch == '.';
+                    if (!ok) {
+                        validDotnetVer = false;
+                        break;
+                    }
+                }
+                if (!validDotnetVer) {
                     return;
                 }
                 const std::string dlUrl =

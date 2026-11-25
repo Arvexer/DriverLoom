@@ -179,6 +179,26 @@ std::string SanitizeWingetSilentArgs(std::string_view rawArgs) {
         }
     }
 
+    auto isAllowedSilentToken = [](std::string_view token) -> bool {
+        const std::string lower = ToLowerAscii(token);
+        if (lower.find("http") != std::string::npos) {
+            return false;
+        }
+        static constexpr std::string_view kAllowedFlags[] = {
+            "/s", "/silent", "/verysilent", "/q", "/qn", "/qb", "/quiet",
+            "/passive", "/norestart", "/noreboot", "/install",
+            "/suppressmsgboxes", "/sp-", "/forcerestart", "/exenoui",
+            "--silent", "--quiet", "-s", "-q",
+            "reboot=reallysuppress", "agree=yes"
+        };
+        for (std::string_view allowed : kAllowedFlags) {
+            if (lower == allowed) {
+                return true;
+            }
+        }
+        return false;
+    };
+
     std::istringstream iss(trimmed);
     std::string tok;
     std::string sanitized;
@@ -195,14 +215,7 @@ std::string SanitizeWingetSilentArgs(std::string_view rawArgs) {
                 break;
             }
         }
-        if (!validChars) {
-            return {};
-        }
-        const bool isSwitch = (tok.size() >= 2 && (tok[0] == '/' || tok[0] == '-'));
-        const size_t eqPos = tok.find('=');
-        const bool isKeyVal = (eqPos != std::string::npos && eqPos > 0 && eqPos + 1 < tok.size() &&
-                               std::isalnum(static_cast<unsigned char>(tok[0])));
-        if (!isSwitch && !isKeyVal) {
+        if (!validChars || !isAllowedSilentToken(tok)) {
             return {};
         }
         if (!sanitized.empty()) {

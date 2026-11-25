@@ -226,7 +226,7 @@ public:
     CoInitGuard& operator=(const CoInitGuard&) = delete;
 
     [[nodiscard]] bool Succeeded() const noexcept {
-        return SUCCEEDED(hr_) || hr_ == RPC_E_CHANGED_MODE;
+        return SUCCEEDED(hr_);
     }
     [[nodiscard]] HRESULT Result() const noexcept { return hr_; }
 
@@ -591,7 +591,8 @@ inline ElevatedRunResult ExecuteElevatedSelf(
     const LogCallback& onLog = nullptr,
     const std::function<void(const std::string&)>& onControlLine = nullptr,
     const std::atomic<bool>* cancelFlag = nullptr,
-    const std::filesystem::path* cancelMarkerPath = nullptr) {
+    const std::filesystem::path* cancelMarkerPath = nullptr,
+    HWND ownerHwnd = nullptr) {
     ElevatedRunResult result;
     const std::wstring exePath = GetCurrentExePath();
     if (exePath.empty()) {
@@ -604,6 +605,7 @@ inline ElevatedRunResult ExecuteElevatedSelf(
     SHELLEXECUTEINFOW sei{};
     sei.cbSize = sizeof(sei);
     sei.fMask = waitForCompletion ? SEE_MASK_NOCLOSEPROCESS : 0;
+    sei.hwnd = (ownerHwnd != nullptr) ? ownerHwnd : GetActiveWindow();
     sei.lpVerb = L"runas";
     const std::wstring exeDir = std::filesystem::path(exePath).parent_path().wstring();
     sei.lpFile = exePath.c_str();

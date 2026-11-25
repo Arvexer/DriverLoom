@@ -817,7 +817,8 @@ std::vector<RestorePointItem> QueryRecentRestorePoints() {
         DWORD off = 0;
         while (bytesRead - off >= sizeof(EVENTLOGRECORD) && items.size() < kMaxPoints) {
             const auto* rec = reinterpret_cast<const EVENTLOGRECORD*>(buf.data() + off);
-            if (rec->Length < sizeof(EVENTLOGRECORD) || rec->Length > bytesRead - off) {
+            if (rec->Length < sizeof(EVENTLOGRECORD) || (rec->Length % 4) != 0 ||
+                rec->Length > bytesRead - off) {
                 break;
             }
             const DWORD evId = rec->EventID & 0xFFFFu;
@@ -1374,15 +1375,15 @@ bool SystemDiagnostics::EnableServiceSync(
     if (serviceName.empty()) {
         return false;
     }
-    bool allowedService = false;
+    const MonitoredServiceDef* matchedDef = nullptr;
     const std::string reqLower = ToLowerAscii(serviceName);
     for (const auto& def : kMonitoredServices) {
         if (reqLower == ToLowerAscii(def.nameUtf8)) {
-            allowedService = true;
+            matchedDef = &def;
             break;
         }
     }
-    if (!allowedService) {
+    if (matchedDef == nullptr) {
         if (onLog) {
             onLog(LogLevel::Error,
                   "Служба «" + serviceName + "» не входит в список разрешённых системных служб.");
@@ -1397,7 +1398,7 @@ bool SystemDiagnostics::EnableServiceSync(
         }
         return false;
     }
-    const std::wstring wName = Utf8ToWide(serviceName);
+    const std::wstring wName = Utf8ToWide(matchedDef->nameUtf8);
     ScHandleGuard svc(OpenServiceW(
         scm.Get(), wName.c_str(), SERVICE_CHANGE_CONFIG | SERVICE_START | SERVICE_QUERY_STATUS));
     if (!svc.IsValid()) {
@@ -1506,11 +1507,14 @@ bool SystemDiagnostics::ResetWuDownloadCacheSync(const LogCallback& onLog) {
     }
 
     size_t removedCount = 0;
+    size_t failedCount = 0;
     for (const auto& entryPath : entriesToRemove) {
         std::error_code rmEc;
         std::filesystem::remove_all(entryPath, rmEc);
         if (!rmEc) {
             ++removedCount;
+        } else {
+            ++failedCount;
         }
     }
 
@@ -1527,6 +1531,14 @@ bool SystemDiagnostics::ResetWuDownloadCacheSync(const LogCallback& onLog) {
         }
     }
 
+    if (!entriesToRemove.empty() && removedCount == 0 && failedCount > 0) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Не удалось удалить ни одного объекта из кэша загрузок Windows Update (" +
+                      std::to_string(failedCount) + " ошибок).");
+        }
+        return false;
+    }
     if (onLog) {
         onLog(LogLevel::Success,
               "Кэш загрузок Windows Update очищен (удалено объектов: " +
@@ -1541,6 +1553,14 @@ bool SystemDiagnostics::RunSystemToolSync(
     const std::string& title,
     const LogCallback& onLog,
     const std::atomic<bool>* cancelFlag) {
+    if (_wcsicmp(exeName.c_str(), L"sfc.exe") != 0 &&
+        _wcsicmp(exeName.c_str(), L"Dism.exe") != 0) {
+        if (onLog) {
+            onLog(LogLevel::Error, "Запрещённый системный инструмент.");
+        }
+        return false;
+    }
+
     wchar_t sysDir[MAX_PATH]{};
     const UINT sysLen = GetSystemDirectoryW(sysDir, MAX_PATH);
     if (sysLen == 0 || sysLen >= MAX_PATH) {
@@ -1566,12 +1586,56 @@ bool SystemDiagnostics::RunSystemToolSync(
     HandleGuard pipeWrite(rawWrite);
     SetHandleInformation(pipeRead.Get(), HANDLE_FLAG_INHERIT, 0);
 
-    STARTUPINFOW si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    si.hStdOutput = pipeWrite.Get();
-    si.hStdError = pipeWrite.Get();
+    HandleGuard nulIn(CreateFileW(
+        L"NUL",
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE,
+        &sa,
+        OPEN_EXISTING,
+        0,
+        nullptr));
+
+    STARTUPINFOEXW siEx{};
+    siEx.StartupInfo.cb = sizeof(STARTUPINFOW);
+    siEx.StartupInfo.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
+    siEx.StartupInfo.wShowWindow = SW_HIDE;
+    siEx.StartupInfo.hStdInput = nulIn.IsValid() ? nulIn.Get() : nullptr;
+    siEx.StartupInfo.hStdOutput = pipeWrite.Get();
+    siEx.StartupInfo.hStdError = pipeWrite.Get();
+
+    struct AttrListGuard {
+        LPPROC_THREAD_ATTRIBUTE_LIST list{nullptr};
+        ~AttrListGuard() {
+            if (list != nullptr) {
+                DeleteProcThreadAttributeList(list);
+            }
+        }
+    } attrGuard;
+    std::vector<BYTE> attrBuf;
+    HANDLE inheritHandles[2]{pipeWrite.Get(), nulIn.Get()};
+    const DWORD inheritCount = nulIn.IsValid() ? 2u : 1u;
+    DWORD creationFlags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
+    SIZE_T attrSize = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &attrSize);
+    if (attrSize > 0) {
+        attrBuf.resize(attrSize);
+        auto* rawAttr = reinterpret_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(attrBuf.data());
+        if (InitializeProcThreadAttributeList(rawAttr, 1, 0, &attrSize)) {
+            attrGuard.list = rawAttr;
+            if (UpdateProcThreadAttribute(
+                    rawAttr,
+                    0,
+                    PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                    inheritHandles,
+                    inheritCount * sizeof(HANDLE),
+                    nullptr,
+                    nullptr)) {
+                siEx.StartupInfo.cb = sizeof(STARTUPINFOEXW);
+                siEx.lpAttributeList = rawAttr;
+                creationFlags |= EXTENDED_STARTUPINFO_PRESENT;
+            }
+        }
+    }
 
     std::wstring cmdLine = L"\"" + toolPath.wstring() + L"\" " + arguments;
     PROCESS_INFORMATION pi{};
@@ -1581,10 +1645,10 @@ bool SystemDiagnostics::RunSystemToolSync(
             nullptr,
             nullptr,
             TRUE,
-            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+            creationFlags,
             nullptr,
             nullptr,
-            &si,
+            &siEx.StartupInfo,
             &pi)) {
         if (onLog) {
             onLog(LogLevel::Error,
@@ -1689,7 +1753,7 @@ bool SystemDiagnostics::SetActivePowerSchemeSync(
         return false;
     }
     GUID schemeGuid{};
-    const HRESULT hrParse = CLSIDFromString(Utf8ToWide(schemeGuidStr).c_str(), &schemeGuid);
+    const HRESULT hrParse = IIDFromString(Utf8ToWide(schemeGuidStr).c_str(), &schemeGuid);
     if (FAILED(hrParse)) {
         if (onLog) {
             onLog(LogLevel::Error,

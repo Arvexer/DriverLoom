@@ -617,7 +617,16 @@ void DriverLoomApp::RenderOverviewTab() {
     // =========================================================================
     // 3. QUICK RECOMMENDATIONS LIST (Top actionable items right on Home!)
     // =========================================================================
-    if (totalRecommendations > 0 && (!batchTargets.empty() || attnCtrls > 0)) {
+    size_t actionableCtrlCount = 0;
+    if (diagCache_.valid) {
+        for (const auto& ctrl : diagCache_.controllers) {
+            if (ctrl.health != hdm::ControllerHealth::Ok &&
+                (!ctrl.searchKey.empty() || !ctrl.hardwareId.empty())) {
+                ++actionableCtrlCount;
+            }
+        }
+    }
+    if (totalRecommendations > 0 && (!batchTargets.empty() || actionableCtrlCount > 0)) {
         const float cardPad = std::round(15.0f * uiScale);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(cardPad, std::round(13.0f * uiScale)));
         ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());

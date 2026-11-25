@@ -274,15 +274,40 @@ std::string ExtractJsonStringField(const std::string& json, const std::string& k
     if (colon == std::string::npos) {
         return {};
     }
-    const size_t q1 = json.find('"', colon + 1);
-    if (q1 == std::string::npos) {
+    size_t q1 = colon + 1;
+    while (q1 < json.size() &&
+           (json[q1] == ' ' || json[q1] == '\t' || json[q1] == '\r' || json[q1] == '\n')) {
+        ++q1;
+    }
+    if (q1 >= json.size() || json[q1] != '"') {
         return {};
     }
-    const size_t q2 = json.find('"', q1 + 1);
-    if (q2 == std::string::npos || q2 <= q1 + 1) {
-        return {};
+    std::string out;
+    bool escaped = false;
+    for (size_t i = q1 + 1; i < json.size(); ++i) {
+        const char ch = json[i];
+        if (escaped) {
+            if (ch == '"' || ch == '\\' || ch == '/') {
+                out.push_back(ch);
+            } else if (ch == 't') {
+                out.push_back('\t');
+            } else {
+                out.push_back('\\');
+                out.push_back(ch);
+            }
+            escaped = false;
+            continue;
+        }
+        if (ch == '\\') {
+            escaped = true;
+            continue;
+        }
+        if (ch == '"') {
+            return out;
+        }
+        out.push_back(ch);
     }
-    return json.substr(q1 + 1, q2 - q1 - 1);
+    return {};
 }
 
 HttpResponse WinHttpRequest(
@@ -493,7 +518,8 @@ bool DownloadFileViaWinHttp(
         DWORD redirPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
         WinHttpSetOption(request.Get(), WINHTTP_OPTION_REDIRECT_POLICY, &redirPolicy, sizeof(redirPolicy));
 
-        if (host.find(L"amd.com") != std::wstring::npos) {
+        const std::string hostLowerForHeader = ToLowerAscii(WideToUtf8(host));
+        if (MatchesAllowedHostSuffix(hostLowerForHeader, {"amd.com"})) {
             WinHttpAddRequestHeaders(
                 request.Get(),
                 L"Referer: https://www.amd.com/\r\n",
@@ -586,6 +612,7 @@ bool DownloadFileViaWinHttp(
     std::string ioErrMsg;
     ULONGLONG downloaded = 0;
     DWORD avail = 0;
+    std::vector<char> buf(65536);
     for (;;) {
         if (cancelFlag != nullptr && cancelFlag->load()) {
             outFile.Reset();
@@ -603,9 +630,9 @@ bool DownloadFileViaWinHttp(
         if (avail == 0) {
             break;
         }
-        std::vector<char> buf(std::min<DWORD>(avail, 65536));
+        const DWORD chunkCap = std::min<DWORD>(avail, static_cast<DWORD>(buf.size()));
         DWORD readBytes = 0;
-        if (!WinHttpReadData(request.Get(), buf.data(), static_cast<DWORD>(buf.size()), &readBytes)) {
+        if (!WinHttpReadData(request.Get(), buf.data(), chunkCap, &readBytes)) {
             ioError = true;
             ioErrMsg = "Ошибка загрузки данных: " + FormatWin32Error(GetLastError());
             break;
