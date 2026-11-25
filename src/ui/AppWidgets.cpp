@@ -14,6 +14,7 @@ std::atomic<bool> g_windowRegainedFocus{false};
 bool g_isLightTheme = false;
 bool g_isAdvancedMode = false;
 bool g_autoCheckAppUpdates = true;
+bool g_autoCheckOnlineUpdates = true;
 bool g_pinLogPanel = false;
 float g_dpiScale = 1.0f;
 
@@ -386,6 +387,9 @@ void LoadUserPreferences() noexcept {
     if (readDword(L"AutoCheckUpdates", dw)) {
         g_autoCheckAppUpdates = (dw != 0);
     }
+    if (readDword(L"AutoCheckOnlineUpdates", dw)) {
+        g_autoCheckOnlineUpdates = (dw != 0);
+    }
     if (readDword(L"PinLogPanel", dw)) {
         g_pinLogPanel = (dw != 0);
     }
@@ -428,6 +432,7 @@ void SaveUserPreferences() noexcept {
     writeDword(L"AdvancedMode", g_isAdvancedMode ? 1u : 0u);
     writeDword(L"LightTheme", g_isLightTheme ? 1u : 0u);
     writeDword(L"AutoCheckUpdates", g_autoCheckAppUpdates ? 1u : 0u);
+    writeDword(L"AutoCheckOnlineUpdates", g_autoCheckOnlineUpdates ? 1u : 0u);
     writeDword(L"PinLogPanel", g_pinLogPanel ? 1u : 0u);
     writeDword(L"Language", static_cast<DWORD>(hdm::GetLang()));
 }

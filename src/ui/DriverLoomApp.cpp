@@ -736,12 +736,30 @@ void DriverLoomApp::RenderSettingsTab() {
         }
         if (ImGui::Checkbox(
                 hdm::Tr(
+                    "Автоматически проверять обновления драйверов и компонентов при запуске (WinHTTP)###SetAutoOnline",
+                    "Автоматично перевіряти оновлення драйверів і компонентів при запуску (WinHTTP)###SetAutoOnline",
+                    "Automatically check for driver & component updates on startup (WinHTTP)###SetAutoOnline"),
+                &g_autoCheckOnlineUpdates)) {
+            SaveUserPreferences();
+        }
+        if (ImGui::Checkbox(
+                hdm::Tr(
                     "Автоматически проверять обновления DriverLoom при запуске###SetAutoUpd",
                     "Автоматично перевіряти оновлення DriverLoom при запуску###SetAutoUpd",
                     "Automatically check for DriverLoom updates on startup###SetAutoUpd"),
                 &g_autoCheckAppUpdates)) {
             SaveUserPreferences();
         }
+        PushFontSafe(g_fontSmall);
+        ImGui::PushStyleColor(ImGuiCol_Text, MutedTextColor());
+        ImGui::TextWrapped(
+            "%s",
+            hdm::Tr(
+                "Только прямые HTTPS-запросы через Windows WinHTTP при запуске или по кнопке «Проверить» — без фоновых запросов, служб и телеметрии.",
+                "Лише прямі HTTPS-запити через Windows WinHTTP під час запуску або за кнопкою «Перевірити» — без фонових запитів, служб і телеметрії.",
+                "Direct Windows WinHTTP HTTPS requests only on startup or when you click Check — no background polling, services, or telemetry."));
+        ImGui::PopStyleColor();
+        PopFontSafe(g_fontSmall);
     }
     ImGui::EndChild();
     ImGui::PopStyleVar();
@@ -1158,7 +1176,8 @@ void DriverLoomApp::SyncScannerSnapshots() {
             if (wasSilentRescan && !componentsCache_.empty()) {
                 componentsScanner_.RefreshLocalPreserveOnlineAsync(devicesCache_);
             } else {
-                componentsScanner_.StartLocalScanAsync(devicesCache_, MakeLogger());
+                componentsScanner_.StartLocalScanAsync(
+                    devicesCache_, MakeLogger(), g_autoCheckOnlineUpdates);
             }
         }
         if (!diagnostics_.IsBusy()) {

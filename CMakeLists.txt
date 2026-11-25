@@ -64,6 +64,9 @@ add_executable(DriverLoom WIN32
     src/core/WindowsUpdateManager.cpp
     src/core/LocalDriverInstaller.cpp
     src/core/SystemRestore.cpp
+    src/core/HttpClient.cpp
+    src/core/PackageSecurity.cpp
+    src/core/OnlineCatalogClient.cpp
     src/core/SystemComponentsScanner.cpp
     src/core/SystemDiagnostics.cpp
     resources/version.rc

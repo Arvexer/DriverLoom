@@ -1,0 +1,60 @@
+#pragma once
+
+#include "common/AppCommon.hpp"
+
+#include <atomic>
+#include <filesystem>
+#include <string>
+#include <string_view>
+
+namespace hdm {
+
+/// RAII wrapper that deletes an isolated temporary working directory upon destruction.
+class TempWorkDirGuard {
+public:
+    TempWorkDirGuard() = default;
+    ~TempWorkDirGuard() { Reset(); }
+
+    TempWorkDirGuard(const TempWorkDirGuard&) = delete;
+    TempWorkDirGuard& operator=(const TempWorkDirGuard&) = delete;
+
+    void Set(std::filesystem::path dir);
+    void Reset() noexcept;
+    [[nodiscard]] const std::filesystem::path& Path() const noexcept { return dir_; }
+
+private:
+    std::filesystem::path dir_;
+};
+
+/// Creates a unique UUID-named directory inside %TEMP% and rejects reparse points.
+bool CreateUniqueTempWorkDir(std::filesystem::path& outDir, std::string* outError);
+
+[[nodiscard]] bool IsSafeRelativeInstallerPath(std::string_view rawRel);
+[[nodiscard]] std::filesystem::path ResolveContainedInstallerPath(
+    const std::filesystem::path& baseDir,
+    std::string_view rawRel);
+[[nodiscard]] std::string SanitizeWingetSilentArgs(std::string_view rawArgs);
+
+[[nodiscard]] bool HasZipMagicHeader(const std::filesystem::path& filePath);
+[[nodiscard]] bool HasMsiMagicHeader(const std::filesystem::path& filePath);
+bool ExtractZipViaShellCom(
+    const std::filesystem::path& zipPath,
+    const std::filesystem::path& destDir);
+UINT CALLBACK CabExtractCallback(PVOID ctx, UINT notification, UINT_PTR param1, UINT_PTR param2);
+
+/// Verifies Authenticode chain with revocation checking while holding a FILE_SHARE_READ handle.
+bool VerifyAndLockAuthenticodeFile(
+    const std::filesystem::path& filePath,
+    HandleGuard* outReadLock,
+    std::string* outReason);
+
+/// Launches a verified installer via ShellExecuteExW and waits with cancellation support.
+bool LaunchAndWaitProcess(
+    const std::filesystem::path& exePath,
+    const std::wstring& args,
+    DWORD* outExitCode,
+    DWORD* outLaunchErr,
+    const std::atomic<bool>* cancelFlag = nullptr,
+    const std::atomic<bool>* stopFlag = nullptr);
+
+} // namespace hdm

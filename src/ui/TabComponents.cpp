@@ -166,7 +166,7 @@ void DriverLoomApp::RenderComponentsTab() {
                 std::move(selectedTargets), devicesCache_, MakeLogger(), compRestoreBefore_);
         } else {
             componentsScanner_.DownloadAndInstallBatchAsync(
-                std::move(batchTargets), devicesCache_, MakeLogger(), compRestoreBefore_);
+                batchTargets, devicesCache_, MakeLogger(), compRestoreBefore_);
         }
     }
     ImGui::EndDisabled();

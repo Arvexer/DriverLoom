@@ -166,6 +166,7 @@ inline void ReplaceAllInPlace(std::string& s, std::string_view from, std::string
         {"Официальный помощник Intel", "Офіційний помічник Intel", "Official Intel Assistant"},
         {"Официальный портал AMD", "Офіційний портал AMD", "Official AMD Portal"},
         {"Поиск...", "Пошук...", "Checking..."},
+        {"По запросу", "За запитом", "On demand"},
         {"Портал поддержки", "Портал підтримки", "Support Portal"},
         {"Портал AMD", "Портал AMD", "AMD Portal"},
         {"Онлайн-установщик", "Онлайн-інсталятор", "Web Installer"},

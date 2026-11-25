@@ -12,6 +12,7 @@ extern std::atomic<bool> g_windowRegainedFocus;
 extern bool g_isLightTheme;
 extern bool g_isAdvancedMode;
 extern bool g_autoCheckAppUpdates;
+extern bool g_autoCheckOnlineUpdates;
 extern bool g_pinLogPanel;
 extern float g_dpiScale;
 
