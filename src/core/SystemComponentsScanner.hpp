@@ -27,6 +27,8 @@ struct SystemComponentItem {
     std::string detectedHardware;
     std::string installedVersion;
     std::string latestVersion;
+    int installedDateYmd{0};
+    int latestDateYmd{0};
     std::string officialPageUrl;
     std::string directInstallerUrl;
     std::string installerArgs;

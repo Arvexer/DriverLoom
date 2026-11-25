@@ -185,6 +185,94 @@ std::vector<uint64_t> ParseVersionParts(const std::string& ver) {
     return parts;
 }
 
+int ParseDriverDateYmd(std::string_view text) {
+    uint64_t parts[3]{};
+    size_t count = 0;
+    uint64_t cur = 0;
+    bool inNum = false;
+    for (char ch : text) {
+        if (ch >= '0' && ch <= '9') {
+            cur = cur * 10 + static_cast<uint64_t>(ch - '0');
+            if (cur > 99999) {
+                return 0;
+            }
+            inNum = true;
+        } else if ((ch == '/' || ch == '-' || ch == '.') && inNum) {
+            if (count >= 3) {
+                return 0;
+            }
+            parts[count++] = cur;
+            cur = 0;
+            inNum = false;
+        } else if (ch != ' ' && ch != '\t') {
+            return 0;
+        }
+    }
+    if (inNum) {
+        if (count >= 3) {
+            return 0;
+        }
+        parts[count++] = cur;
+    }
+    if (count != 3) {
+        return 0;
+    }
+    uint64_t y = 0;
+    uint64_t m = 0;
+    uint64_t d = 0;
+    if (parts[0] >= 1990 && parts[0] <= 2099) {
+        y = parts[0];
+        m = parts[1];
+        d = parts[2];
+    } else if (parts[2] >= 1990 && parts[2] <= 2099) {
+        m = parts[0];
+        d = parts[1];
+        y = parts[2];
+    } else {
+        return 0;
+    }
+    if (m < 1 || m > 12 || d < 1 || d > 31) {
+        return 0;
+    }
+    return static_cast<int>(y * 10000 + m * 100 + d);
+}
+
+// Extracts YYYYMMDD from Realtek-style 4-part date-encoded versions (e.g., 10.79.1003.2025 or 1168.20.729.2024).
+bool TryExtractTrailingVersionDate(const std::vector<uint64_t>& parts, int& outYmd) {
+    if (parts.size() != 4 || parts[3] < 2015 || parts[3] > 2035) {
+        return false;
+    }
+    const uint64_t mmdd = parts[2];
+    const uint64_t m = mmdd / 100;
+    const uint64_t d = mmdd % 100;
+    if (m < 1 || m > 12 || d < 1 || d > 31) {
+        return false;
+    }
+    outYmd = static_cast<int>(parts[3] * 10000 + m * 100 + d);
+    return true;
+}
+
+bool IsHostWindows11() {
+    static const bool sIsWin11 = []() {
+        RegKeyGuard key;
+        if (RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion",
+                0,
+                KEY_READ,
+                key.Put()) != ERROR_SUCCESS) {
+            return true;
+        }
+        const std::wstring buildStr = ReadRegStr(key.Get(), L"CurrentBuildNumber");
+        if (buildStr.empty()) {
+            return true;
+        }
+        const unsigned long build = wcstoul(buildStr.c_str(), nullptr, 10);
+        return build >= 22000;
+    }();
+    return sIsWin11;
+}
+
 bool IsVersionNewer(const std::string& latest, const std::string& current) {
     if (latest.empty() || current.empty()) {
         return false;
@@ -193,6 +281,13 @@ bool IsVersionNewer(const std::string& latest, const std::string& current) {
     const auto b = ParseVersionParts(current);
     if (a.empty() || b.empty()) {
         return false;
+    }
+    int dateA = 0;
+    int dateB = 0;
+    if (TryExtractTrailingVersionDate(a, dateA) &&
+        TryExtractTrailingVersionDate(b, dateB) &&
+        dateA != dateB) {
+        return dateA > dateB;
     }
     const size_t n = std::max(a.size(), b.size());
     for (size_t i = 0; i < n; ++i) {
@@ -767,9 +862,32 @@ std::string ExtractVenDevSubsysKey(std::string_view hwId) {
     return "VEN_" + ven + "&DEV_" + dev + "&SUBSYS_" + subsys;
 }
 
+struct CatalogDriverMatch {
+    std::string version;
+    std::string cabUrl;
+    int dateYmd{0};
+};
+
+int ExtractCatalogDateFromRowChunk(std::string_view rowChunk) {
+    const size_t c4 = rowChunk.rfind("_C4_R");
+    if (c4 == std::string_view::npos) {
+        return 0;
+    }
+    const size_t gt = rowChunk.find('>', c4 + 5);
+    if (gt == std::string_view::npos) {
+        return 0;
+    }
+    const size_t endTd = rowChunk.find("</td>", gt + 1);
+    if (endTd == std::string_view::npos || endTd - gt > 64) {
+        return 0;
+    }
+    return ParseDriverDateYmd(TrimCopy(rowChunk.substr(gt + 1, endTd - gt - 1)));
+}
+
 // Queries Microsoft Update Catalog for a Hardware ID fragment (e.g. VEN_10EC&DEV_8125),
-// selects the highest WHQL version (preferring Windows 11 targets on ties), and fetches its .cab URL.
-std::pair<std::string, std::string> ResolveMsCatalogDriverCab(const std::string& searchKey) {
+// selects the newest WHQL release (preferring OS-compatible targets and newer dates across branches),
+// and fetches its .cab URL.
+CatalogDriverMatch ResolveMsCatalogDriverCab(const std::string& searchKey) {
     if (searchKey.empty()) {
         return {};
     }
@@ -782,9 +900,12 @@ std::pair<std::string, std::string> ResolveMsCatalogDriverCab(const std::string&
     }
 
     const std::string& html = searchResp.body;
+    const bool hostIsWin11 = IsHostWindows11();
     std::string bestGuid;
     std::string bestVer;
+    int bestDateYmd = 0;
     bool bestHasWin11 = false;
+    bool bestHasWin10 = false;
 
     size_t pos = 0;
     while ((pos = html.find("_C5_R", pos)) != std::string::npos) {
@@ -799,17 +920,27 @@ std::pair<std::string, std::string> ResolveMsCatalogDriverCab(const std::string&
         }
 
         const size_t tdClose = html.find('>', pos + 5);
-        const size_t endTd = (tdClose != std::string::npos) ? html.find("</td>", tdClose + 1) : std::string::npos;
+        const size_t endTd = (tdClose != std::string::npos) ? html.find("</td>", tdClose + 1) : std::string_view::npos;
         if (tdClose == std::string::npos || endTd == std::string::npos || endTd - tdClose > 80) {
             pos += 5;
             continue;
         }
 
-        const size_t winStart = (pos > 2000) ? (pos - 2000) : 0;
-        const std::string_view rowChunk(html.data() + winStart, pos - winStart);
+        const size_t winStart = (pos > 3000) ? (pos - 3000) : 0;
+        std::string_view rowChunk(html.data() + winStart, pos - winStart);
+        if (const size_t trPos = rowChunk.rfind("<tr"); trPos != std::string_view::npos) {
+            rowChunk = rowChunk.substr(trPos);
+        }
         if (rowChunk.find(" - Extension - ") != std::string_view::npos ||
             rowChunk.find(" - SoftwareComponent - ") != std::string_view::npos ||
             rowChunk.find(" - Firmware - ") != std::string_view::npos) {
+            pos = endTd + 5;
+            continue;
+        }
+
+        const bool hasWin11 = (rowChunk.find("Windows 11") != std::string_view::npos);
+        const bool hasWin10 = (rowChunk.find("Windows 10") != std::string_view::npos);
+        if (!hostIsWin11 && hasWin11 && !hasWin10) {
             pos = endTd + 5;
             continue;
         }
@@ -820,14 +951,41 @@ std::pair<std::string, std::string> ResolveMsCatalogDriverCab(const std::string&
         }
 
         if (IsValidCatalogVersion(ver)) {
-            const bool hasWin11 = (rowChunk.find("Windows 11") != std::string_view::npos);
-            const bool strictlyNewer = bestVer.empty() || IsVersionNewer(ver, bestVer);
-            const bool sameVerBetterOs = (!bestVer.empty() && !IsVersionNewer(ver, bestVer) &&
-                                          !IsVersionNewer(bestVer, ver) && !bestHasWin11 && hasWin11);
-            if (strictlyNewer || sameVerBetterOs) {
+            int dateYmd = ExtractCatalogDateFromRowChunk(rowChunk);
+            const auto candParts = ParseVersionParts(ver);
+            if (dateYmd == 0) {
+                TryExtractTrailingVersionDate(candParts, dateYmd);
+            }
+            const auto bestParts = ParseVersionParts(bestVer);
+
+            bool isBetter = false;
+            if (bestVer.empty()) {
+                isBetter = true;
+            } else if (!candParts.empty() && !bestParts.empty() &&
+                       candParts[0] != bestParts[0] &&
+                       dateYmd > 0 && bestDateYmd > 0) {
+                if (dateYmd != bestDateYmd) {
+                    isBetter = (dateYmd > bestDateYmd);
+                } else if (hostIsWin11 ? (hasWin11 != bestHasWin11) : (hasWin10 != bestHasWin10)) {
+                    isBetter = hostIsWin11 ? hasWin11 : hasWin10;
+                } else {
+                    isBetter = IsVersionNewer(ver, bestVer);
+                }
+            } else {
+                const bool strictlyNewer = IsVersionNewer(ver, bestVer);
+                const bool sameVer = (!strictlyNewer && !IsVersionNewer(bestVer, ver));
+                const bool osBetter = hostIsWin11
+                    ? (!bestHasWin11 && hasWin11)
+                    : (!bestHasWin10 && hasWin10);
+                isBetter = strictlyNewer || (sameVer && osBetter);
+            }
+
+            if (isBetter) {
                 bestVer = std::move(ver);
                 bestGuid.assign(guidCandidate);
+                bestDateYmd = dateYmd;
                 bestHasWin11 = hasWin11;
+                bestHasWin10 = hasWin10;
             }
         }
         pos = endTd + 5;
@@ -849,7 +1007,7 @@ std::pair<std::string, std::string> ResolveMsCatalogDriverCab(const std::string&
         L"Content-Type: application/x-www-form-urlencoded\r\n",
         postBody);
     if (!dlResp.ok || dlResp.body.empty()) {
-        return {bestVer, ""};
+        return {bestVer, "", bestDateYmd};
     }
 
     size_t cabPos = 0;
@@ -861,12 +1019,12 @@ std::pair<std::string, std::string> ResolveMsCatalogDriverCab(const std::string&
         }
         const std::string cabUrl = dlResp.body.substr(urlStart, (cabPos + 4) - urlStart);
         if (cabUrl.rfind("http://", 0) == 0 || cabUrl.rfind("https://", 0) == 0) {
-            return {bestVer, cabUrl};
+            return {bestVer, cabUrl, bestDateYmd};
         }
         cabPos += 4;
     }
 
-    return {bestVer, ""};
+    return {bestVer, "", bestDateYmd};
 }
 
 UINT CALLBACK CabExtractCallback(PVOID ctx, UINT notification, UINT_PTR param1, UINT_PTR param2) {
@@ -1581,6 +1739,9 @@ void MergeOnlineMetadataIntoRefreshed(
                 if (!oldItem.latestVersion.empty()) {
                     newItem.latestVersion = oldItem.latestVersion;
                 }
+                if (oldItem.latestDateYmd > 0) {
+                    newItem.latestDateYmd = oldItem.latestDateYmd;
+                }
                 if (!oldItem.directInstallerUrl.empty()) {
                     newItem.directInstallerUrl = oldItem.directInstallerUrl;
                 }
@@ -1601,7 +1762,11 @@ void MergeOnlineMetadataIntoRefreshed(
                        !newItem.latestVersion.empty() &&
                        std::isdigit(static_cast<unsigned char>(newItem.latestVersion[0])) &&
                        !newItem.installedVersion.empty()) {
-                if (IsVersionNewer(newItem.latestVersion, newItem.installedVersion)) {
+                const bool catalogIsOlderByDate =
+                    (newItem.latestDateYmd > 0 && newItem.installedDateYmd > 0 &&
+                     newItem.latestDateYmd < newItem.installedDateYmd);
+                if (!catalogIsOlderByDate &&
+                    IsVersionNewer(newItem.latestVersion, newItem.installedVersion)) {
                     newItem.updateAvailable = true;
                     newItem.statusText = "Доступно обновление (" + newItem.latestVersion + ")";
                 } else {
@@ -2234,7 +2399,7 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
         auto fCatalog = std::async(std::launch::async, [&]() {
             const size_t n = catalogTargets.size();
             if (n == 0 || stopRequested_.load()) return;
-            std::vector<std::pair<std::string, std::string>> resolved(n);
+            std::vector<CatalogDriverMatch> resolved(n);
             const size_t kWorkers = std::min<size_t>(4, n);
             std::atomic<size_t> nextIdx{0};
             std::vector<std::thread> pool;
@@ -2246,7 +2411,7 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                         const size_t idx = nextIdx.fetch_add(1);
                         if (idx >= n) break;
                         auto res = ResolveMsCatalogDriverCab(catalogTargets[idx].first);
-                        if (res.second.empty() && !catalogTargets[idx].second.empty() &&
+                        if (res.cabUrl.empty() && !catalogTargets[idx].second.empty() &&
                             !stopRequested_.load()) {
                             res = ResolveMsCatalogDriverCab(catalogTargets[idx].second);
                         }
@@ -2265,14 +2430,20 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                         catalogTargets[idx].second != item.catalogFallbackKey) {
                         continue;
                     }
-                    const auto& [catVer, cabUrl] = resolved[idx];
+                    const auto& match = resolved[idx];
+                    const std::string& catVer = match.version;
+                    const std::string& cabUrl = match.cabUrl;
                     item.onlineChecked = true;
+                    item.latestDateYmd = match.dateYmd;
                     if (!cabUrl.empty()) {
                         item.directInstallerUrl = cabUrl;
                     }
                     if (!catVer.empty()) {
+                        const bool catalogIsOlderByDate =
+                            (match.dateYmd > 0 && item.installedDateYmd > 0 &&
+                             match.dateYmd < item.installedDateYmd);
                         if (item.installed && !item.installedVersion.empty() &&
-                            IsVersionNewer(item.installedVersion, catVer)) {
+                            (catalogIsOlderByDate || IsVersionNewer(item.installedVersion, catVer))) {
                             item.latestVersion = catVer + " (WHQL)";
                             item.updateAvailable = false;
                             item.statusText = "Актуален (" + item.installedVersion + ")";
@@ -2999,14 +3170,20 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
                                 ContainsCaseInsensitive(fullHardwareId, "INTELAUDIO\\");
         const bool strictSubsysOnly = isHdaAudio && !subsysKey.empty();
         if (!subsysKey.empty() && !stopRequested_.load()) {
-            std::tie(catVer, cabUrl) = ResolveMsCatalogDriverCab(subsysKey);
+            const CatalogDriverMatch match = ResolveMsCatalogDriverCab(subsysKey);
+            catVer = match.version;
+            cabUrl = match.cabUrl;
         }
         if (!strictSubsysOnly && cabUrl.empty() && !cancelInstallRequested_.load() && !stopRequested_.load()) {
-            std::tie(catVer, cabUrl) = ResolveMsCatalogDriverCab(primaryKey);
+            const CatalogDriverMatch match = ResolveMsCatalogDriverCab(primaryKey);
+            catVer = match.version;
+            cabUrl = match.cabUrl;
         }
         if (!strictSubsysOnly && cabUrl.empty() && !fullHardwareId.empty() && fullHardwareId != primaryKey &&
             fullHardwareId != subsysKey && !cancelInstallRequested_.load() && !stopRequested_.load()) {
-            std::tie(catVer, cabUrl) = ResolveMsCatalogDriverCab(fullHardwareId);
+            const CatalogDriverMatch match = ResolveMsCatalogDriverCab(fullHardwareId);
+            catVer = match.version;
+            cabUrl = match.cabUrl;
         }
 
         if (cancelInstallRequested_.load() || stopRequested_.load()) {
@@ -3853,6 +4030,10 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
             drv.hardwareConnected = true;
             drv.installed = d.hasDriver && !d.driverVersion.empty();
             drv.installedVersion = d.driverVersion;
+            drv.installedDateYmd = ParseDriverDateYmd(d.driverDate);
+            if (drv.installedDateYmd == 0) {
+                TryExtractTrailingVersionDate(ParseVersionParts(d.driverVersion), drv.installedDateYmd);
+            }
             drv.updateAvailable = !drv.installed;
             drv.statusText = drv.installed
                 ? ("Установлен (" + drv.installedVersion + ")")
