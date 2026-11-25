@@ -144,7 +144,7 @@ void DriverLoomApp::RenderDiagnosticsTab() {
     const float cardPadX = std::round(13.0f * uiScale);
     const float cardPadY = std::round(9.0f * uiScale);
     const float cardSpacingY = std::round(4.0f * uiScale);
-    const float cardH = std::round(108.0f * uiScale);
+    const float cardH = std::round(118.0f * uiScale);
     const float cardGap = std::round(10.0f * uiScale);
     const float cardW = std::max(240.0f, (ImGui::GetContentRegionAvail().x - cardGap) * 0.5f);
 
@@ -339,7 +339,7 @@ void DriverLoomApp::RenderDiagnosticsTab() {
         const float catW = g_isAdvancedMode ? (CalcButtonWidth(hdm::Tr("Каталог", "Каталог", "Catalog")) + 10.0f * uiScale) : 0.0f;
         const float actionColW =
             instW + (g_isAdvancedMode ? (style.ItemSpacing.x + catW) : 0.0f) +
-            style.CellPadding.x * 2.0f + style.ScrollbarSize + 10.0f * uiScale;
+            style.CellPadding.x * 2.0f + std::round(8.0f * uiScale);
 
         if (ImGui::BeginTable(
                 g_isAdvancedMode ? "##DiagControllersTableAdv" : "##DiagControllersTableStd",
@@ -347,10 +347,10 @@ void DriverLoomApp::RenderDiagnosticsTab() {
                 kDiagTableFlags,
                 ImVec2(0.0f, tableH))) {
             ImGui::TableSetupScrollFreeze(0, 1);
-            ImGui::TableSetupColumn(hdm::Tr("Состояние", "Стан", "Status"), ImGuiTableColumnFlags_WidthStretch, 1.48f);
-            ImGui::TableSetupColumn(hdm::Tr("Назначение", "Призначення", "Role"), ImGuiTableColumnFlags_WidthStretch, 0.72f);
-            ImGui::TableSetupColumn(hdm::Tr("Устройство", "Пристрій", "Device"), ImGuiTableColumnFlags_WidthStretch, 1.24f);
-            ImGui::TableSetupColumn(hdm::Tr("Драйвер / Дата", "Драйвер / Дата", "Driver / Date"), ImGuiTableColumnFlags_WidthStretch, 0.94f);
+            ImGui::TableSetupColumn(hdm::Tr("Состояние", "Стан", "Status"), ImGuiTableColumnFlags_WidthStretch, 1.14f);
+            ImGui::TableSetupColumn(hdm::Tr("Назначение", "Призначення", "Role"), ImGuiTableColumnFlags_WidthStretch, 0.90f);
+            ImGui::TableSetupColumn(hdm::Tr("Устройство", "Пристрій", "Device"), ImGuiTableColumnFlags_WidthStretch, 1.32f);
+            ImGui::TableSetupColumn(hdm::Tr("Драйвер / Дата", "Драйвер / Дата", "Driver / Date"), ImGuiTableColumnFlags_WidthStretch, 1.16f);
             ImGui::TableSetupColumn(hdm::Tr("Действие", "Дія", "Action"), ImGuiTableColumnFlags_WidthFixed, actionColW);
             RenderTableHeadersRow();
 
@@ -415,13 +415,13 @@ void DriverLoomApp::RenderDiagnosticsTab() {
     } else if (diagSectionIndex_ == 1) {
         const char* enSvcTxt = hdm::Tr("Включить", "Увімкнути", "Enable");
         const float svcBtnW = CalcButtonWidth(enSvcTxt) + 12.0f * uiScale;
-        const float svcActionW = svcBtnW + style.CellPadding.x * 2.0f + style.ScrollbarSize + 8.0f * uiScale;
+        const float svcActionW = svcBtnW + style.CellPadding.x * 2.0f + std::round(8.0f * uiScale);
         if (ImGui::BeginTable("##DiagServicesTable", 5, kDiagTableFlags, ImVec2(0.0f, tableH))) {
             ImGui::TableSetupScrollFreeze(0, 1);
-            ImGui::TableSetupColumn(hdm::Tr("Статус", "Статус", "Status"), ImGuiTableColumnFlags_WidthStretch, 1.15f);
-            ImGui::TableSetupColumn(hdm::Tr("Служба", "Служба", "Service"), ImGuiTableColumnFlags_WidthStretch, 1.12f);
-            ImGui::TableSetupColumn(hdm::Tr("Назначение", "Призначення", "Purpose"), ImGuiTableColumnFlags_WidthStretch, 1.20f);
-            ImGui::TableSetupColumn(hdm::Tr("Запуск", "Запуск", "Startup"), ImGuiTableColumnFlags_WidthStretch, 0.60f);
+            ImGui::TableSetupColumn(hdm::Tr("Статус", "Статус", "Status"), ImGuiTableColumnFlags_WidthStretch, 1.55f);
+            ImGui::TableSetupColumn(hdm::Tr("Служба", "Служба", "Service"), ImGuiTableColumnFlags_WidthStretch, 1.32f);
+            ImGui::TableSetupColumn(hdm::Tr("Назначение", "Призначення", "Purpose"), ImGuiTableColumnFlags_WidthStretch, 1.30f);
+            ImGui::TableSetupColumn(hdm::Tr("Запуск", "Запуск", "Startup"), ImGuiTableColumnFlags_WidthStretch, 0.58f);
             ImGui::TableSetupColumn(hdm::Tr("Действие", "Дія", "Action"), ImGuiTableColumnFlags_WidthFixed, svcActionW);
             RenderTableHeadersRow();
 
@@ -454,8 +454,14 @@ void DriverLoomApp::RenderDiagnosticsTab() {
                     }
                     ImGui::EndDisabled();
                 } else {
+                    const char* okTxt = hdm::Tr("ОК", "ОК", "OK");
+                    const float okW = ImGui::CalcTextSize(okTxt).x;
+                    const float availCell = ImGui::GetContentRegionAvail().x;
+                    if (availCell > okW) {
+                        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (availCell - okW) * 0.5f);
+                    }
                     ImGui::AlignTextToFramePadding();
-                    ImGui::TextDisabled("%s", hdm::Tr("ОК", "ОК", "OK"));
+                    ImGui::TextDisabled("%s", okTxt);
                 }
 
                 ImGui::PopID();
@@ -497,14 +503,14 @@ void DriverLoomApp::RenderDiagnosticsTab() {
         }
     } else if (diagSectionIndex_ == 3) {
         const float instW = CalcButtonWidth(hdm::Tr("Установить", "Встановити", "Install")) + 10.0f * uiScale;
-        const float actionColW = instW + style.CellPadding.x * 2.0f + style.ScrollbarSize + 8.0f * uiScale;
+        const float actionColW = instW + style.CellPadding.x * 2.0f + std::round(8.0f * uiScale);
 
         if (ImGui::BeginTable("##DiagStorageTable", 5, kDiagTableFlags, ImVec2(0.0f, tableH))) {
             ImGui::TableSetupScrollFreeze(0, 1);
-            ImGui::TableSetupColumn(hdm::Tr("Состояние", "Стан", "Status"), ImGuiTableColumnFlags_WidthStretch, 1.24f);
-            ImGui::TableSetupColumn(hdm::Tr("Тип", "Тип", "Type"), ImGuiTableColumnFlags_WidthStretch, 0.82f);
-            ImGui::TableSetupColumn(hdm::Tr("Накопитель / Контроллер", "Накопичувач / Контролер", "Drive / Controller"), ImGuiTableColumnFlags_WidthStretch, 1.35f);
-            ImGui::TableSetupColumn(hdm::Tr("Драйвер", "Драйвер", "Driver"), ImGuiTableColumnFlags_WidthStretch, 0.90f);
+            ImGui::TableSetupColumn(hdm::Tr("Состояние", "Стан", "Status"), ImGuiTableColumnFlags_WidthStretch, 1.78f);
+            ImGui::TableSetupColumn(hdm::Tr("Тип", "Тип", "Type"), ImGuiTableColumnFlags_WidthStretch, 0.86f);
+            ImGui::TableSetupColumn(hdm::Tr("Накопитель / Контроллер", "Накопичувач / Контролер", "Drive / Controller"), ImGuiTableColumnFlags_WidthStretch, 1.44f);
+            ImGui::TableSetupColumn(hdm::Tr("Драйвер", "Драйвер", "Driver"), ImGuiTableColumnFlags_WidthStretch, 0.86f);
             ImGui::TableSetupColumn(hdm::Tr("Действие", "Дія", "Action"), ImGuiTableColumnFlags_WidthFixed, actionColW);
             RenderTableHeadersRow();
 

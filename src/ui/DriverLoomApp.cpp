@@ -167,7 +167,7 @@ void DriverLoomApp::RenderFrame() {
     ImGui::PopStyleColor();
     ImGui::PopStyleVar(2);
 
-    const float sidebarW = std::round(234.0f * uiScale);
+    const float sidebarW = std::round(244.0f * uiScale);
     const float totalH = ImGui::GetContentRegionAvail().y;
 
     // Left Navigation Sidebar
@@ -555,8 +555,8 @@ void DriverLoomApp::RenderSettingsTab() {
 
         const float halfW = std::max(220.0f, (fullW - gap) * 0.5f);
         const float modeCardH = std::max(
-            std::round(124.0f * uiScale),
-            ImGui::GetTextLineHeightWithSpacing() * 5.0f + std::round(26.0f * uiScale));
+            std::round(112.0f * uiScale),
+            ImGui::GetTextLineHeightWithSpacing() * 4.2f + std::round(24.0f * uiScale));
 
         auto renderModeCard = [&](const char* id,
                                   const char* title,
@@ -585,9 +585,13 @@ void DriverLoomApp::RenderSettingsTab() {
             const float inX = pMin.x + cardPad;
             float curY = pMin.y + std::round(14.0f * uiScale);
 
-            // Selection radio circle
+            PushFontSafe(g_fontSecondaryHeader);
+            const float titleH = ImGui::GetTextLineHeight();
+            PopFontSafe(g_fontSecondaryHeader);
+
+            // Selection radio circle aligned to title midline
             const float rad = std::round(7.0f * uiScale);
-            const ImVec2 radioC(inX + rad, curY + ImGui::GetTextLineHeight() * 0.5f);
+            const ImVec2 radioC(inX + rad, curY + titleH * 0.5f);
             dl->AddCircle(
                 radioC,
                 rad,
@@ -602,20 +606,16 @@ void DriverLoomApp::RenderSettingsTab() {
                     16);
             }
 
-            PushFontSafe(g_fontSecondaryHeader);
-            dl->AddText(
-                ImVec2(inX + rad * 2.0f + std::round(10.0f * uiScale), curY),
-                ImGui::ColorConvertFloat4ToU32(CardHeaderTextColor()),
-                title);
-            PopFontSafe(g_fontSecondaryHeader);
-
+            float badgeReserve = 0.0f;
             if (badge != nullptr && badge[0] != '\0') {
                 PushFontSafe(g_fontSmall);
                 const ImVec2 bs = ImGui::CalcTextSize(badge);
                 const float bpX = std::round(8.0f * uiScale);
                 const float bH = bs.y + std::round(4.0f * uiScale);
-                const ImVec2 bMin(pMax.x - cardPad - bs.x - bpX * 2.0f, curY);
-                const ImVec2 bMax(pMax.x - cardPad, curY + bH);
+                const float bW = bs.x + bpX * 2.0f;
+                const float bY = curY + (titleH - bH) * 0.5f;
+                const ImVec2 bMin(pMax.x - cardPad - bW, bY);
+                const ImVec2 bMax(pMax.x - cardPad, bY + bH);
                 const ImVec4 ac = selected ? HealthyColor() : MutedTextColor();
                 dl->AddRectFilled(bMin, bMax, ImGui::ColorConvertFloat4ToU32(ImVec4(ac.x, ac.y, ac.z, 0.16f)), bH * 0.5f);
                 dl->AddText(
@@ -623,9 +623,20 @@ void DriverLoomApp::RenderSettingsTab() {
                     ImGui::ColorConvertFloat4ToU32(g_isLightTheme ? ImVec4(ac.x * 0.5f, ac.y * 0.5f, ac.z * 0.5f, 1.0f) : ac),
                     badge);
                 PopFontSafe(g_fontSmall);
+                badgeReserve = bW + std::round(10.0f * uiScale);
             }
 
-            curY += ImGui::GetTextLineHeight() + std::round(10.0f * uiScale);
+            PushFontSafe(g_fontSecondaryHeader);
+            const float titleOffset = rad * 2.0f + std::round(10.0f * uiScale);
+            const float maxTitleW = std::max(60.0f, halfW - cardPad * 2.0f - titleOffset - badgeReserve);
+            const std::string shownTitle = EllipsizeUtf8(title != nullptr ? title : "", maxTitleW);
+            dl->AddText(
+                ImVec2(inX + titleOffset, curY),
+                ImGui::ColorConvertFloat4ToU32(CardHeaderTextColor()),
+                shownTitle.c_str());
+            PopFontSafe(g_fontSecondaryHeader);
+
+            curY += titleH + std::round(8.0f * uiScale);
             PushFontSafe(g_fontSmall);
             const float wrapW = halfW - cardPad * 2.0f;
             dl->AddText(
@@ -689,9 +700,15 @@ void DriverLoomApp::RenderSettingsTab() {
         RenderSecondaryCardHeader(hdm::Tr("Оформление и язык", "Оформлення та мова", "Appearance & Language"));
         ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
 
+        const char* themeLbl = hdm::Tr("Тема оформления:", "Тема оформлення:", "Color Theme:");
+        const char* langLbl = hdm::Tr("Язык интерфейса:", "Мова інтерфейсу:", "Language:");
+        const float labelColW =
+            std::max(ImGui::CalcTextSize(themeLbl).x, ImGui::CalcTextSize(langLbl).x) +
+            std::round(14.0f * uiScale);
+
         ImGui::AlignTextToFramePadding();
-        ImGui::TextDisabled("%s", hdm::Tr("Тема оформления:", "Тема оформлення:", "Color Theme:"));
-        ImGui::SameLine(0.0f, 12.0f * uiScale);
+        ImGui::TextDisabled("%s", themeLbl);
+        ImGui::SameLine(cardPad + labelColW);
         if (RenderPillButton(hdm::Tr("Тёмная###SetDark", "Темна###SetDark", "Dark###SetDark"), !g_isLightTheme)) {
             if (g_isLightTheme) {
                 pendingThemeChange_ = 0;
@@ -706,8 +723,8 @@ void DriverLoomApp::RenderSettingsTab() {
 
         ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
         ImGui::AlignTextToFramePadding();
-        ImGui::TextDisabled("%s", hdm::Tr("Язык интерфейса:", "Мова інтерфейсу:", "Language:"));
-        ImGui::SameLine(0.0f, 12.0f * uiScale);
+        ImGui::TextDisabled("%s", langLbl);
+        ImGui::SameLine(cardPad + labelColW);
         const hdm::Lang curLang = hdm::GetLang();
         if (RenderPillButton("Русский###SetRu", curLang == hdm::Lang::Ru)) {
             hdm::SetLang(hdm::Lang::Ru);
@@ -1502,7 +1519,7 @@ void DriverLoomApp::RenderAboutModal() {
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
     const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
-    const float modalW = std::min(580.0f * uiScale, vp->WorkSize.x * 0.92f);
+    const float modalW = std::min(620.0f * uiScale, vp->WorkSize.x * 0.92f);
     const float maxModalH = std::max(260.0f * uiScale, vp->WorkSize.y * 0.90f);
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     ImGui::SetNextWindowSizeConstraints(ImVec2(modalW, 0.0f), ImVec2(modalW, maxModalH));
@@ -1557,15 +1574,18 @@ void DriverLoomApp::RenderAboutModal() {
         ImGui::TextDisabled("GitHub:");
         ImGui::SameLine();
         ImGui::TextUnformatted("https://github.com/Arvexer/DriverLoom");
-        if (RenderPrimaryButton(hdm::Tr("Открыть GitHub###AboutGh", "Відкрити GitHub###AboutGh", "Open GitHub###AboutGh"))) {
+        const char* ghLbl = hdm::Tr("Открыть GitHub###AboutGh", "Відкрити GitHub###AboutGh", "Open GitHub###AboutGh");
+        const char* relLbl = hdm::Tr("Релизы###AboutRel", "Релізи###AboutRel", "Releases###AboutRel");
+        const char* issLbl = hdm::Tr("Сообщить о проблеме###AboutIss", "Повідомити про проблему###AboutIss", "Report Issue###AboutIss");
+        if (RenderPrimaryButton(ghLbl)) {
             OpenUrlInBrowser("https://github.com/Arvexer/DriverLoom");
         }
-        ImGui::SameLine();
-        if (RenderSecondaryButton(hdm::Tr("Релизы###AboutRel", "Релізи###AboutRel", "Releases###AboutRel"))) {
+        SameLineWrapIfNeeded(CalcButtonWidth(relLbl));
+        if (RenderSecondaryButton(relLbl)) {
             OpenUrlInBrowser("https://github.com/Arvexer/DriverLoom/releases");
         }
-        ImGui::SameLine();
-        if (RenderSecondaryButton(hdm::Tr("Сообщить о проблеме###AboutIss", "Повідомити про проблему###AboutIss", "Report Issue###AboutIss"))) {
+        SameLineWrapIfNeeded(CalcButtonWidth(issLbl));
+        if (RenderSecondaryButton(issLbl)) {
             OpenUrlInBrowser("https://github.com/Arvexer/DriverLoom/issues");
         }
 
@@ -1573,11 +1593,14 @@ void DriverLoomApp::RenderAboutModal() {
         ImGui::TextDisabled("E-mail:");
         ImGui::SameLine();
         ImGui::TextUnformatted("arvexer.dev@proton.me");
-        if (RenderSecondaryButton(hdm::Tr("Написать письмо###AboutMail", "Написати листа###AboutMail", "Send E-mail###AboutMail"))) {
+        const char* mailLbl = hdm::Tr("Написать письмо###AboutMail", "Написати листа###AboutMail", "Send E-mail###AboutMail");
+        const char* cpMailLbl = hdm::Tr("Копировать e-mail###AboutCopyMail", "Копіювати e-mail###AboutCopyMail", "Copy E-mail###AboutCopyMail");
+        const char* kofiLbl = hdm::Tr("Поддержать (Ko-fi)###AboutKofi", "Підтримати (Ko-fi)###AboutKofi", "Support (Ko-fi)###AboutKofi");
+        if (RenderSecondaryButton(mailLbl)) {
             OpenUrlInBrowser("mailto:arvexer.dev@proton.me?subject=DriverLoom%20Feedback");
         }
-        ImGui::SameLine();
-        if (RenderSecondaryButton(hdm::Tr("Копировать e-mail###AboutCopyMail", "Копіювати e-mail###AboutCopyMail", "Copy E-mail###AboutCopyMail"))) {
+        SameLineWrapIfNeeded(CalcButtonWidth(cpMailLbl));
+        if (RenderSecondaryButton(cpMailLbl)) {
             ImGui::SetClipboardText("arvexer.dev@proton.me");
             logBuffer_.Push(
                 hdm::LogLevel::Info,
@@ -1586,9 +1609,9 @@ void DriverLoomApp::RenderAboutModal() {
                     "Скопійовано e-mail розробника: arvexer.dev@proton.me",
                     "Developer e-mail copied: arvexer.dev@proton.me"));
         }
-        ImGui::SameLine();
+        SameLineWrapIfNeeded(CalcButtonWidth(kofiLbl) + std::round(22.0f * uiScale));
         if (RenderSecondaryButtonWithIcon(
-                hdm::Tr("Поддержать (Ko-fi)###AboutKofi", "Підтримати (Ko-fi)###AboutKofi", "Support (Ko-fi)###AboutKofi"),
+                kofiLbl,
                 AppIcon::Heart,
                 ImVec4(0.95f, 0.36f, 0.45f, 1.00f))) {
             OpenUrlInBrowser("https://ko-fi.com/arvexer");
@@ -1658,7 +1681,9 @@ void DriverLoomApp::RenderAboutModal() {
 
     ImGui::Spacing();
     PushFontSafe(g_fontSmall);
-    ImGui::TextDisabled("C++20 • Win32 SetupAPI / WUA COM • DirectX 11 • Dear ImGui • MIT License © 2026 Arvexer");
+    ImGui::PushStyleColor(ImGuiCol_Text, MutedTextColor());
+    ImGui::TextWrapped("C++20 • Win32 SetupAPI / WUA COM • DirectX 11 • Dear ImGui • MIT License © 2026 Arvexer");
+    ImGui::PopStyleColor();
     PopFontSafe(g_fontSmall);
     ImGui::Separator();
 

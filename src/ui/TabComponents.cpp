@@ -148,8 +148,6 @@ void DriverLoomApp::RenderComponentsTab() {
 
     if (winRight - rightClusterW > lastEnd + 12.0f * uiScale) {
         ImGui::SameLine(winRight - rightClusterW);
-    } else {
-        ImGui::Dummy(ImVec2(0.0f, std::round(2.0f * uiScale)));
     }
 
     ImGui::BeginDisabled(busy);
@@ -246,12 +244,20 @@ void DriverLoomApp::RenderComponentsTab() {
 
     const float rowPadX = std::round(14.0f * uiScale);
     const float rowPadY = std::round(11.0f * uiScale);
-    const float primaryW = CalcButtonWidth(hdm::Tr("Установить", "Встановити", "Install")) + 14.0f * uiScale;
-    const float siteW = CalcButtonWidth(hdm::Tr("Сайт", "Сайт", "Site")) + 8.0f * uiScale;
+    const float primaryW = CalcButtonWidth(hdm::Tr("Установить", "Встановити", "Install")) + 6.0f * uiScale;
+    const float siteW = CalcButtonWidth(hdm::Tr("Сайт", "Сайт", "Site")) + 2.0f * uiScale;
     const float openSiteW = primaryW + style.ItemSpacing.x + siteW;
     const float checkBoxReserve = g_isAdvancedMode ? (ImGui::GetFrameHeight() + style.ItemSpacing.x) : 0.0f;
     const float actionsBlockW = openSiteW + checkBoxReserve;
-    const float cardH = std::round(68.0f * uiScale);
+    const float line1EstH =
+        (g_fontSecondaryHeader != nullptr ? g_fontSecondaryHeader->LegacySize : ImGui::GetTextLineHeight()) +
+        std::round(8.0f * uiScale);
+    const float line2EstH =
+        (g_fontSmall != nullptr ? g_fontSmall->LegacySize : ImGui::GetTextLineHeight()) +
+        std::round(4.0f * uiScale);
+    const float cardH = std::max(
+        std::round(76.0f * uiScale),
+        rowPadY * 2.0f + line1EstH + line2EstH + std::round(6.0f * uiScale));
 
     for (size_t viewIdx = 0; viewIdx < visibleComponentIndices_.size(); ++viewIdx) {
         const size_t origIdx = visibleComponentIndices_[viewIdx];
@@ -296,42 +302,58 @@ void DriverLoomApp::RenderComponentsTab() {
         }
 
         const float innerW = ImGui::GetContentRegionAvail().x;
-        const float versionBlockW = std::round(150.0f * uiScale);
-        const float leftTextMaxW = std::max(140.0f, innerW - actionsBlockW - versionBlockW - std::round(24.0f * uiScale));
+        const float versionBlockW = std::round(146.0f * uiScale);
+        const float leftTextMaxW = std::max(140.0f, innerW - actionsBlockW - versionBlockW - std::round(16.0f * uiScale));
 
-        // Left: Title + Status Pill (Line 1) and Plain Description (Line 2)
+        // Left: Title + Status Pill (Line 1) and Plain Description (Line 2), vertically centered
+        const std::string nameShown = hdm::TrDyn(item.name);
+        const char* shortBadge = hdm::Tr("Установлен", "Встановлено", "Installed");
+        ImVec4 badgeCol = HealthyColor();
+        if (optionalInstall) {
+            shortBadge = hdm::Tr("По желанию", "За бажанням", "Optional");
+            badgeCol = MutedTextColor();
+        } else if (optionalUpdate) {
+            shortBadge = hdm::Tr("Есть обновление", "Є оновлення", "Update available");
+            badgeCol = InfoAccentColor();
+        } else if (!item.installed) {
+            shortBadge = hdm::Tr("Не установлен", "Не встановлено", "Not installed");
+            badgeCol = WarningColor();
+        } else if (item.updateAvailable) {
+            shortBadge = hdm::Tr("Есть обновление", "Є оновлення", "Update available");
+            badgeCol = WarningColor();
+        }
+
+        PushFontSafe(g_fontSmall);
+        const float smallTextH = ImGui::GetTextLineHeight();
+        const float badgeH = smallTextH + std::round(6.0f * uiScale);
+        const float badgeEstW = ImGui::CalcTextSize(shortBadge).x + std::round(30.0f * uiScale);
+        PopFontSafe(g_fontSmall);
+
+        PushFontSafe(g_fontSecondaryHeader);
+        const float titleH = ImGui::GetTextLineHeight();
+        PopFontSafe(g_fontSecondaryHeader);
+
+        const float line1H = std::max(titleH, badgeH);
+        const float lineGapY = std::round(5.0f * uiScale);
+        const float leftBlockH = line1H + lineGapY + smallTextH;
+        const float line1TopY = std::max(rowPadY, std::round((cardH - leftBlockH) * 0.5f));
+
+        ImGui::SetCursorPosY(line1TopY);
         ImGui::BeginGroup();
         {
-            const std::string nameShown = hdm::TrDyn(item.name);
-            const char* shortBadge = hdm::Tr("Установлен", "Встановлено", "Installed");
-            ImVec4 badgeCol = HealthyColor();
-            if (optionalInstall) {
-                shortBadge = hdm::Tr("По желанию", "За бажанням", "Optional");
-                badgeCol = MutedTextColor();
-            } else if (optionalUpdate) {
-                shortBadge = hdm::Tr("Есть обновление", "Є оновлення", "Update available");
-                badgeCol = InfoAccentColor();
-            } else if (!item.installed) {
-                shortBadge = hdm::Tr("Не установлен", "Не встановлено", "Not installed");
-                badgeCol = WarningColor();
-            } else if (item.updateAvailable) {
-                shortBadge = hdm::Tr("Есть обновление", "Є оновлення", "Update available");
-                badgeCol = WarningColor();
-            }
-
-            PushFontSafe(g_fontSmall);
-            const float badgeEstW = ImGui::CalcTextSize(shortBadge).x + std::round(28.0f * uiScale);
-            PopFontSafe(g_fontSmall);
-
             PushFontSafe(g_fontSecondaryHeader);
+            ImGui::SetCursorPosY(line1TopY + std::max(0.0f, (line1H - titleH) * 0.5f));
             const std::string shownTitle = EllipsizeUtf8(nameShown, std::max(80.0f, leftTextMaxW - badgeEstW - 10.0f));
             ImGui::TextColored(CardHeaderTextColor(), "%s", shownTitle.c_str());
             PopFontSafe(g_fontSecondaryHeader);
 
             ImGui::SameLine(0.0f, std::round(10.0f * uiScale));
             PushFontSafe(g_fontSmall);
+            ImGui::SetCursorPosY(line1TopY + std::max(0.0f, (line1H - badgeH) * 0.5f));
             RenderStatusBadge(badgeCol, shortBadge, false);
             PopFontSafe(g_fontSmall);
+
+            ImGui::SetCursorPosY(line1TopY + line1H + lineGapY);
 
             // Second line: human-readable purpose or hardware target
             std::string descLine;
@@ -369,13 +391,14 @@ void DriverLoomApp::RenderComponentsTab() {
             ImGui::EndTooltip();
         }
 
-        // Middle-Right: Clean Version Info
+        // Middle-Right: Clean Version Info (vertically centered inside card)
         const float rightStartX = ImGui::GetWindowContentRegionMax().x - actionsBlockW;
         const float verStartX = rightStartX - versionBlockW - std::round(12.0f * uiScale);
         ImGui::SameLine(verStartX);
-        ImGui::SetCursorPosY(rowPadY + std::round(3.0f * uiScale));
-        ImGui::BeginGroup();
         PushFontSafe(g_fontSmall);
+        const float verBlockH = ImGui::GetTextLineHeight() * 2.0f + style.ItemSpacing.y;
+        ImGui::SetCursorPosY(std::max(rowPadY, std::round((cardH - verBlockH) * 0.5f)));
+        ImGui::BeginGroup();
         const std::string instVer = hdm::TrDyn(item.installedVersion);
         const std::string latVer = hdm::TrDyn(item.latestVersion);
         if (item.installed && item.updateAvailable && !latVer.empty()) {
@@ -388,11 +411,11 @@ void DriverLoomApp::RenderComponentsTab() {
             ImGui::TextColored(MutedTextColor(), "%s", hdm::Tr("Установлено:", "Встановлено:", "Installed:"));
             ImGui::TextUnformatted(EllipsizeUtf8(instVer.empty() ? "—" : instVer, versionBlockW).c_str());
         }
-        PopFontSafe(g_fontSmall);
         ImGui::EndGroup();
+        PopFontSafe(g_fontSmall);
 
         // Far-Right: Clean Action Buttons (vertically centered together inside a group)
-        const float btnOffsetY = (cardH - ImGui::GetFrameHeight()) * 0.5f;
+        const float btnOffsetY = std::round((cardH - ImGui::GetFrameHeight()) * 0.5f);
         ImGui::SetCursorPos(ImVec2(rightStartX, btnOffsetY));
         ImGui::BeginGroup();
 

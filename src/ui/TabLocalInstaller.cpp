@@ -71,7 +71,7 @@ void DriverLoomApp::RebuildDriverStoreViewCache(ImGuiTableSortSpecs* sortSpecs) 
 }
 
 void DriverLoomApp::RenderDriverStoreSection() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.5f);
+    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
     const ImGuiStyle& style = ImGui::GetStyle();
     const bool isAppForeground = (GetForegroundWindow() == hwnd_);
     const bool busy = localInstaller_.IsPickingFolder() ||
@@ -80,6 +80,7 @@ void DriverLoomApp::RenderDriverStoreSection() {
                       localInstaller_.IsRemovingStorePackages() ||
                       localInstaller_.IsInstalling();
 
+    ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(std::round(8.5f * uiScale), style.FramePadding.y));
     ImGui::BeginDisabled(busy);
     if (RenderPrimaryButton(hdm::Tr(
             "Экспорт бэкапа в папку...###DsExp",
@@ -214,34 +215,7 @@ void DriverLoomApp::RenderDriverStoreSection() {
     }
     ImGui::EndDisabled();
 
-    if (driverStoreCache_.valid) {
-        const std::string totalSizeStr = hdm::FormatBytes(driverStoreCache_.totalStoreBytes);
-        char actStr[32], dupStr[32];
-        std::snprintf(actStr, sizeof(actStr), "%zu", driverStoreCache_.activeCount);
-        std::snprintf(dupStr, sizeof(dupStr), "%zu", driverStoreCache_.duplicateCount);
-
-        const ImVec4 dupAccent =
-            (driverStoreCache_.duplicateCount > 0)
-                ? ImVec4(0.98f, 0.72f, 0.16f, 1.00f)
-                : ImVec4(0.20f, 0.83f, 0.60f, 1.00f);
-        const SummaryBadgeSegment segments[3] = {
-            {hdm::Tr("Всего:", "Усього:", "Total:"), totalSizeStr.c_str(), ImVec4(0.46f, 0.74f, 0.98f, 1.00f), false},
-            {hdm::Tr("Активных:", "Активних:", "Active:"), actStr, ImVec4(0.20f, 0.83f, 0.60f, 1.00f), false},
-            {hdm::Tr("Дубликатов:", "Дублікатів:", "Duplicates:"), dupStr, dupAccent, driverStoreCache_.duplicateCount > 0},
-        };
-
-        const float sumW = CalcSummaryInfoBadgeWidth(segments, 3);
-        const float winRight = ImGui::GetWindowContentRegionMax().x;
-        const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
-        if (winRight - sumW > lastEnd + 10.0f * uiScale) {
-            ImGui::SameLine(winRight - sumW);
-        } else {
-            ImGui::SetCursorPosX(std::max(ImGui::GetCursorPosX(), winRight - sumW));
-        }
-        RenderSummaryInfoBadge(segments, 3);
-    }
-
-    // Row 2: Filter pills + checkboxes
+    // Row 2: Filter pills + right-aligned SummaryInfoBadge
     char allLbl[64], dupFiltLbl[64], actLbl[64];
     std::snprintf(
         allLbl,
@@ -283,7 +257,33 @@ void DriverLoomApp::RenderDriverStoreSection() {
         storeViewDirty_ = true;
     }
 
-    SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Без дубликатов", "Без дублікатів", "Skip duplicates")) + 36.0f * uiScale);
+    if (driverStoreCache_.valid) {
+        const std::string totalSizeStr = hdm::FormatBytes(driverStoreCache_.totalStoreBytes);
+        char actStr[32], dupStr[32];
+        std::snprintf(actStr, sizeof(actStr), "%zu", driverStoreCache_.activeCount);
+        std::snprintf(dupStr, sizeof(dupStr), "%zu", driverStoreCache_.duplicateCount);
+
+        const ImVec4 dupAccent =
+            (driverStoreCache_.duplicateCount > 0)
+                ? ImVec4(0.98f, 0.72f, 0.16f, 1.00f)
+                : ImVec4(0.20f, 0.83f, 0.60f, 1.00f);
+        const SummaryBadgeSegment segments[3] = {
+            {hdm::Tr("Всего:", "Усього:", "Total:"), totalSizeStr.c_str(), ImVec4(0.46f, 0.74f, 0.98f, 1.00f), false},
+            {hdm::Tr("Активных:", "Активних:", "Active:"), actStr, ImVec4(0.20f, 0.83f, 0.60f, 1.00f), false},
+            {hdm::Tr("Дубликатов:", "Дублікатів:", "Duplicates:"), dupStr, dupAccent, driverStoreCache_.duplicateCount > 0},
+        };
+
+        const float sumW = CalcSummaryInfoBadgeWidth(segments, 3);
+        const float winRight = ImGui::GetWindowContentRegionMax().x;
+        const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
+        if (winRight - sumW > lastEnd + 10.0f * uiScale) {
+            ImGui::SameLine(winRight - sumW);
+        }
+        RenderSummaryInfoBadge(segments, 3);
+    }
+    ImGui::PopStyleVar();
+
+    // Row 3: Checkboxes kept together cleanly
     ImGui::Checkbox(hdm::Tr("Без дубликатов###DsSkipDup", "Без дублікатів###DsSkipDup", "Skip duplicates###DsSkipDup"), &backupSkipDuplicates_);
     if (isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
         ImGui::SetTooltip(
@@ -352,18 +352,18 @@ void DriverLoomApp::RenderDriverStoreSection() {
 
     const char* rmTxt = hdm::Tr("Удалить", "Видалити", "Remove");
     const float rmBtnW = CalcButtonWidth(rmTxt) + 8.0f * uiScale;
-    const float actionColW = rmBtnW + style.CellPadding.x * 2.0f + style.ScrollbarSize + 8.0f * uiScale;
+    const float actionColW = rmBtnW + style.CellPadding.x * 2.0f + std::round(6.0f * uiScale);
 
     if (ImGui::BeginTable("##DriverStoreTable", 9, kTableFlags, ImGui::GetContentRegionAvail())) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn(hdm::Tr("Выбор", "Вибір", "Select"), ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 54.0f * uiScale, 8);
-        ImGui::TableSetupColumn(hdm::Tr("Статус", "Статус", "Status"), ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 1.44f, 0);
-        ImGui::TableSetupColumn(hdm::Tr("Пакет", "Пакет", "Package"), ImGuiTableColumnFlags_WidthStretch, 0.66f, 1);
-        ImGui::TableSetupColumn(hdm::Tr("INF / Активное устройство", "INF / Активний пристрій", "INF / Active Device"), ImGuiTableColumnFlags_WidthStretch, 1.28f, 2);
-        ImGui::TableSetupColumn(hdm::Tr("Поставщик", "Виробник", "Provider"), ImGuiTableColumnFlags_WidthStretch, 0.76f, 3);
-        ImGui::TableSetupColumn(hdm::Tr("Класс", "Клас", "Class"), ImGuiTableColumnFlags_WidthStretch, 0.52f, 4);
-        ImGui::TableSetupColumn(hdm::Tr("Версия / Дата", "Версія / Дата", "Version / Date"), ImGuiTableColumnFlags_WidthStretch, 1.14f, 5);
-        ImGui::TableSetupColumn(hdm::Tr("Размер", "Розмір", "Size"), ImGuiTableColumnFlags_WidthStretch, 0.60f, 6);
+        ImGui::TableSetupColumn(hdm::Tr("Выбор", "Вибір", "Select"), ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 62.0f * uiScale, 8);
+        ImGui::TableSetupColumn(hdm::Tr("Статус", "Статус", "Status"), ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 1.88f, 0);
+        ImGui::TableSetupColumn(hdm::Tr("Пакет", "Пакет", "Package"), ImGuiTableColumnFlags_WidthStretch, 0.98f, 1);
+        ImGui::TableSetupColumn(hdm::Tr("INF / Активное устройство", "INF / Активний пристрій", "INF / Active Device"), ImGuiTableColumnFlags_WidthStretch, 1.58f, 2);
+        ImGui::TableSetupColumn(hdm::Tr("Поставщик", "Виробник", "Provider"), ImGuiTableColumnFlags_WidthStretch, 0.92f, 3);
+        ImGui::TableSetupColumn(hdm::Tr("Класс", "Клас", "Class"), ImGuiTableColumnFlags_WidthStretch, 0.62f, 4);
+        ImGui::TableSetupColumn(hdm::Tr("Версия / Дата", "Версія / Дата", "Version / Date"), ImGuiTableColumnFlags_WidthStretch, 1.20f, 5);
+        ImGui::TableSetupColumn(hdm::Tr("Размер", "Розмір", "Size"), ImGuiTableColumnFlags_WidthStretch, 0.78f, 6);
         ImGui::TableSetupColumn(hdm::Tr("Действие", "Дія", "Action"), ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, actionColW, 7);
         RenderTableHeadersRow();
 

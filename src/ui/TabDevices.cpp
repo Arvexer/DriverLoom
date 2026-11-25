@@ -165,8 +165,6 @@ void DriverLoomApp::RenderDevicesTab() {
     const float winRightX = ImGui::GetWindowContentRegionMax().x;
     if (winRightX - rightTotalW > lastItemEndLocalX + 10.0f * uiScale) {
         ImGui::SameLine(winRightX - rightTotalW);
-    } else {
-        ImGui::Dummy(ImVec2(0.0f, std::round(2.0f * uiScale)));
     }
 
     RenderSummaryInfoBadge(segments, 3);
@@ -266,8 +264,31 @@ void DriverLoomApp::RenderDevicesTab() {
     const ImGuiStyle& devStyle = ImGui::GetStyle();
     const float cardPadY = std::round(10.0f * uiScale);
     const float availW = ImGui::GetContentRegionAvail().x;
-    const float extraButtonsRow =
-        (g_isAdvancedMode && availW < 1120.0f * uiScale) ? ImGui::GetFrameHeightWithSpacing() : 0.0f;
+    float estBtnRowW = 0.0f;
+    if (selectedDevBefore != nullptr) {
+        const float sp = devStyle.ItemSpacing.x;
+        const char* catTxt = g_isAdvancedMode
+            ? hdm::Tr("Установить из Catalog (WHQL)", "Встановити з Catalog (WHQL)", "Install from Catalog (WHQL)")
+            : hdm::Tr("Установить официальный драйвер", "Встановити офіційний драйвер", "Install Official Driver");
+        estBtnRowW += CalcButtonWidth(catTxt);
+        if (!g_isAdvancedMode && selectedDevBefore->problemCode == CM_PROB_DISABLED) {
+            estBtnRowW += sp + CalcButtonWidth(hdm::Tr("Включить устройство", "Увімкнути пристрій", "Enable Device"));
+        }
+        if (g_isAdvancedMode) {
+            estBtnRowW += sp + CalcButtonWidth(hdm::Tr("Перезапустить", "Перезапустити", "Restart"));
+            estBtnRowW += sp + CalcButtonWidth(hdm::Tr("Откатить", "Відкотити", "Roll Back"));
+            estBtnRowW += sp + CalcButtonWidth(hdm::Tr("HWID", "HWID", "Copy HWID"));
+            estBtnRowW += sp + CalcButtonWidth(hdm::Tr("Свойства", "Властивості", "Properties"));
+            if (IsOemInfName(selectedDevBefore->infName)) {
+                estBtnRowW += sp + CalcButtonWidth(hdm::Tr("В DriverStore", "У DriverStore", "DriverStore"));
+            }
+        } else {
+            estBtnRowW += sp + CalcButtonWidth(hdm::Tr("Найти в интернете", "Знайти в інтернеті", "Search Online"));
+        }
+        estBtnRowW += sp + CalcButtonWidth(hdm::Tr("Закрыть", "Закрити", "Close")) + 4.0f * uiScale;
+    }
+    const float innerCardW = std::max(120.0f, availW - std::round(28.0f * uiScale));
+    const float extraButtonsRow = (estBtnRowW > innerCardW) ? ImGui::GetFrameHeightWithSpacing() : 0.0f;
     const float detailsH =
         (selectedDevBefore != nullptr)
             ? (ImGui::GetTextLineHeightWithSpacing() * 2.0f + ImGui::GetFrameHeight() +
@@ -289,16 +310,16 @@ void DriverLoomApp::RenderDevicesTab() {
             kTableFlags,
             ImVec2(0.0f, tableH))) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn(hdm::Tr("Статус", "Статус", "Status"), ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 1.15f, 0);
-        ImGui::TableSetupColumn(hdm::Tr("Устройство / Модель", "Пристрій / Модель", "Device / Model"), ImGuiTableColumnFlags_WidthStretch, 1.65f, 1);
-        ImGui::TableSetupColumn(hdm::Tr("Производитель", "Виробник", "Manufacturer"), ImGuiTableColumnFlags_WidthStretch, 0.90f, 2);
+        ImGui::TableSetupColumn(hdm::Tr("Статус", "Статус", "Status"), ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 1.52f, 0);
+        ImGui::TableSetupColumn(hdm::Tr("Устройство / Модель", "Пристрій / Модель", "Device / Model"), ImGuiTableColumnFlags_WidthStretch, 1.62f, 1);
+        ImGui::TableSetupColumn(hdm::Tr("Производитель", "Виробник", "Manufacturer"), ImGuiTableColumnFlags_WidthStretch, 1.18f, 2);
         if (g_isAdvancedMode) {
-            ImGui::TableSetupColumn(hdm::Tr("Класс", "Клас", "Class"), ImGuiTableColumnFlags_WidthStretch, 0.58f, 3);
+            ImGui::TableSetupColumn(hdm::Tr("Класс", "Клас", "Class"), ImGuiTableColumnFlags_WidthStretch, 0.62f, 3);
         }
-        ImGui::TableSetupColumn(hdm::Tr("Версия", "Версія", "Version"), ImGuiTableColumnFlags_WidthStretch, 0.72f, 4);
-        ImGui::TableSetupColumn(hdm::Tr("Дата", "Дата", "Date"), ImGuiTableColumnFlags_WidthStretch, 0.56f, 5);
+        ImGui::TableSetupColumn(hdm::Tr("Версия", "Версія", "Version"), ImGuiTableColumnFlags_WidthStretch, 0.80f, 4);
+        ImGui::TableSetupColumn(hdm::Tr("Дата", "Дата", "Date"), ImGuiTableColumnFlags_WidthStretch, 0.72f, 5);
         if (g_isAdvancedMode) {
-            ImGui::TableSetupColumn("Hardware ID", ImGuiTableColumnFlags_WidthStretch, 1.25f, 6);
+            ImGui::TableSetupColumn("Hardware ID", ImGuiTableColumnFlags_WidthStretch, 1.04f, 6);
         }
         RenderTableHeadersRow();
 
@@ -458,8 +479,11 @@ void DriverLoomApp::RenderDevicesTab() {
                 }
                 RenderStatusBadge(statusColor, devStatusShown.c_str(), false);
 
+                const float rowTextOffsetY = std::round(3.0f * uiScale);
+
                 // Col 1: Device Name
                 ImGui::TableSetColumnIndex(1);
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + rowTextOffsetY);
                 const std::string devNameShown = hdm::TrDyn(dev.name);
                 std::string devTitleCell = devNameShown;
                 if (!dev.displayModeText.empty()) {
@@ -491,6 +515,7 @@ void DriverLoomApp::RenderDevicesTab() {
 
                 // Col 2: Manufacturer
                 ImGui::TableSetColumnIndex(2);
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + rowTextOffsetY);
                 if (RenderCellText(dev.manufacturer) && isAppForeground &&
                     ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                     ImGui::SetTooltip("%s", dev.manufacturer.c_str());
@@ -499,17 +524,21 @@ void DriverLoomApp::RenderDevicesTab() {
                 int colIdx = 3;
                 if (g_isAdvancedMode) {
                     ImGui::TableSetColumnIndex(colIdx++);
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + rowTextOffsetY);
                     RenderCellText(dev.deviceClass);
                 }
 
                 ImGui::TableSetColumnIndex(colIdx++);
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + rowTextOffsetY);
                 RenderCellText(dev.driverVersion, dev.driverVersion.empty());
 
                 ImGui::TableSetColumnIndex(colIdx++);
+                ImGui::SetCursorPosY(ImGui::GetCursorPosY() + rowTextOffsetY);
                 RenderCellText(dev.driverDate, true);
 
                 if (g_isAdvancedMode) {
                     ImGui::TableSetColumnIndex(colIdx++);
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + rowTextOffsetY);
                     if (RenderCellText(dev.hardwareId, dev.hardwareId.empty()) &&
                         isAppForeground && ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort)) {
                         ImGui::SetTooltip("%s", dev.hardwareId.c_str());
@@ -533,12 +562,15 @@ void DriverLoomApp::RenderDevicesTab() {
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::PopStyleColor();
 
-        {
-            PushFontSafe(g_fontSecondaryHeader);
-            ImGui::TextColored(CardHeaderTextColor(), "%s", EllipsizeUtf8(hdm::TrDyn(selectedDev->name), 420.0f * uiScale).c_str());
-            PopFontSafe(g_fontSecondaryHeader);
-        }
-        ImGui::SameLine(0.0f, 12.0f);
+        const float titleStartY = ImGui::GetCursorPosY();
+        PushFontSafe(g_fontSecondaryHeader);
+        const float hdrH = ImGui::GetTextLineHeight();
+        ImGui::TextColored(CardHeaderTextColor(), "%s", EllipsizeUtf8(hdm::TrDyn(selectedDev->name), 420.0f * uiScale).c_str());
+        PopFontSafe(g_fontSecondaryHeader);
+
+        const float regH = ImGui::GetTextLineHeight();
+        ImGui::SameLine(0.0f, 12.0f * uiScale);
+        ImGui::SetCursorPosY(titleStartY + std::max(0.0f, (hdrH - regH) * 0.5f));
         std::string metaLine =
             g_isAdvancedMode
                 ? (std::string(hdm::Tr("Статус: ", "Статус: ", "Status: ")) + hdm::TrDyn(selectedDev->statusText) +

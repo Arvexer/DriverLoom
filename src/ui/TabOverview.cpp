@@ -44,7 +44,7 @@ void DriverLoomApp::RenderOverviewTab() {
 
     const float scrollGap = (ImGui::GetScrollMaxY() > 0.0f) ? std::round(12.0f * uiScale) : 0.0f;
     const float fullW = std::max(320.0f, ImGui::GetContentRegionAvail().x - scrollGap);
-    const float gap = std::round(12.0f * uiScale);
+    const float gap = std::round(10.0f * uiScale);
 
     // =========================================================================
     // 1. HERO HEALTH CARD
@@ -161,7 +161,7 @@ void DriverLoomApp::RenderOverviewTab() {
         }
 
         const float heroPadX = std::round(20.0f * uiScale);
-        const float heroPadY = std::round(16.0f * uiScale);
+        const float heroPadY = std::round(13.0f * uiScale);
         const ImVec4 heroBg =
             g_isLightTheme
                 ? ImVec4(
@@ -338,10 +338,10 @@ void DriverLoomApp::RenderOverviewTab() {
     const float tileW = std::max(220.0f, (fullW - gap) * 0.5f);
     const float extraTileLine = (tileW < 430.0f * uiScale) ? ImGui::GetTextLineHeightWithSpacing() : 0.0f;
     const float tileH = std::max(
-        std::round(138.0f * uiScale),
-        ImGui::GetTextLineHeightWithSpacing() * 4.5f + ImGui::GetFrameHeight() +
-            std::round(32.0f * uiScale) + extraTileLine);
-    const float tilePad = std::round(15.0f * uiScale);
+        std::round(112.0f * uiScale),
+        ImGui::GetTextLineHeightWithSpacing() * 2.8f + ImGui::GetFrameHeight() +
+            std::round(22.0f * uiScale) + extraTileLine);
+    const float tilePad = std::round(14.0f * uiScale);
 
     auto renderSummaryTile = [&](const char* id,
                                  AppIcon icon,
@@ -351,7 +351,7 @@ void DriverLoomApp::RenderOverviewTab() {
                                  const char* desc,
                                  const char* actionLabel,
                                  auto&& onAction) {
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(tilePad, std::round(13.0f * uiScale)));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(tilePad, std::round(11.0f * uiScale)));
         ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
         ImGui::BeginChild(
             id,
@@ -360,31 +360,51 @@ void DriverLoomApp::RenderOverviewTab() {
             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
         ImGui::PopStyleColor();
 
-        // Top Row: Icon + Title on left, Status pill on right
+        // Top Row: Icon + Title on left, Status pill on right (vertically aligned to title midline)
         const ImVec2 p0 = ImGui::GetCursorScreenPos();
         const float iconSz = std::round(18.0f * uiScale);
+        const float availTileW = ImGui::GetContentRegionAvail().x;
+
+        PushFontSafe(g_fontSecondaryHeader);
+        const float titleH = ImGui::GetTextLineHeight();
+        PopFontSafe(g_fontSecondaryHeader);
+
+        float pillReserve = 0.0f;
+        float pillW = 0.0f;
+        float pillH = 0.0f;
+        float pillPadX = std::round(8.0f * uiScale);
+        ImVec2 statusSize(0.0f, 0.0f);
+        if (statusText != nullptr && statusText[0] != '\0') {
+            PushFontSafe(g_fontSmall);
+            statusSize = ImGui::CalcTextSize(statusText);
+            pillW = statusSize.x + pillPadX * 2.0f;
+            pillH = statusSize.y + std::round(4.0f * uiScale);
+            pillReserve = pillW + std::round(10.0f * uiScale);
+            PopFontSafe(g_fontSmall);
+        }
+
         DrawAppIcon(
             ImGui::GetWindowDrawList(),
-            ImVec2(p0.x + iconSz * 0.5f, p0.y + ImGui::GetTextLineHeight() * 0.55f),
+            ImVec2(p0.x + iconSz * 0.5f, p0.y + titleH * 0.5f),
             iconSz,
             icon,
             ImGui::ColorConvertFloat4ToU32(AccentBarColor()));
 
-        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + iconSz + std::round(9.0f * uiScale));
+        const float titleOffset = iconSz + std::round(9.0f * uiScale);
+        ImGui::SetCursorPosX(ImGui::GetCursorPosX() + titleOffset);
         PushFontSafe(g_fontSecondaryHeader);
-        ImGui::TextColored(CardHeaderTextColor(), "%s", title);
+        const float maxTitleW = std::max(40.0f, availTileW - titleOffset - pillReserve);
+        const std::string shownTitle = EllipsizeUtf8(title != nullptr ? title : "", maxTitleW);
+        ImGui::TextColored(CardHeaderTextColor(), "%s", shownTitle.c_str());
         PopFontSafe(g_fontSecondaryHeader);
 
         // Status text aligned on right of title row
         if (statusText != nullptr && statusText[0] != '\0') {
             PushFontSafe(g_fontSmall);
-            const ImVec2 ss = ImGui::CalcTextSize(statusText);
-            const float pillPadX = std::round(8.0f * uiScale);
-            const float pillW = ss.x + pillPadX * 2.0f;
-            const float pillH = ss.y + std::round(4.0f * uiScale);
             const float rightEdge = ImGui::GetWindowPos().x + ImGui::GetWindowContentRegionMax().x;
-            const ImVec2 bMin(rightEdge - pillW, p0.y);
-            const ImVec2 bMax(rightEdge, p0.y + pillH);
+            const float pillY = p0.y + (titleH - pillH) * 0.5f;
+            const ImVec2 bMin(rightEdge - pillW, pillY);
+            const ImVec2 bMax(rightEdge, pillY + pillH);
             const ImVec4 bg(statusColor.x, statusColor.y, statusColor.z, g_isLightTheme ? 0.14f : 0.16f);
             const ImVec4 fg =
                 g_isLightTheme
@@ -392,7 +412,7 @@ void DriverLoomApp::RenderOverviewTab() {
                     : statusColor;
             ImGui::GetWindowDrawList()->AddRectFilled(bMin, bMax, ImGui::ColorConvertFloat4ToU32(bg), pillH * 0.5f);
             ImGui::GetWindowDrawList()->AddText(
-                ImVec2(bMin.x + pillPadX, bMin.y + (pillH - ss.y) * 0.5f),
+                ImVec2(bMin.x + pillPadX, bMin.y + (pillH - statusSize.y) * 0.5f),
                 ImGui::ColorConvertFloat4ToU32(fg),
                 statusText);
             PopFontSafe(g_fontSmall);
@@ -406,7 +426,7 @@ void DriverLoomApp::RenderOverviewTab() {
         PopFontSafe(g_fontSmall);
 
         // Anchor action button to bottom of card
-        const float btnY = tileH - std::round(13.0f * uiScale) - ImGui::GetFrameHeight();
+        const float btnY = tileH - std::round(11.0f * uiScale) - ImGui::GetFrameHeight();
         if (ImGui::GetCursorPosY() < btnY) {
             ImGui::SetCursorPosY(btnY);
         }

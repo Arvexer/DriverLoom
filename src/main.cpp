@@ -53,34 +53,34 @@ void LoadAppFonts(float dpiScale) {
             path, sizePx, &cfg, io.Fonts->GetGlyphRangesCyrillic());
     };
 
-    g_fontRegular = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeui.ttf", 15.5f * fontScale);
+    g_fontRegular = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeui.ttf", 16.5f * fontScale);
     if (g_fontRegular == nullptr) {
         g_fontRegular = io.Fonts->AddFontDefault();
     }
     io.FontDefault = g_fontRegular;
 
-    g_fontSmall = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeui.ttf", 13.5f * fontScale);
+    g_fontSmall = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeui.ttf", 15.0f * fontScale);
     if (g_fontSmall == nullptr) {
         g_fontSmall = g_fontRegular;
     }
 
     g_fontSecondaryHeader =
-        tryLoadCyrillicFont("C:\\Windows\\Fonts\\seguisb.ttf", 16.0f * fontScale);
+        tryLoadCyrillicFont("C:\\Windows\\Fonts\\seguisb.ttf", 17.5f * fontScale);
     if (g_fontSecondaryHeader == nullptr) {
         g_fontSecondaryHeader =
-            tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 16.0f * fontScale);
+            tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 17.5f * fontScale);
     }
     if (g_fontSecondaryHeader == nullptr) {
         g_fontSecondaryHeader = g_fontRegular;
     }
 
-    g_fontMainTab = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 19.0f * fontScale);
+    g_fontMainTab = tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 20.5f * fontScale);
     if (g_fontMainTab == nullptr) {
         g_fontMainTab = g_fontSecondaryHeader;
     }
 
     g_fontPrimaryHeader =
-        tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 22.0f * fontScale);
+        tryLoadCyrillicFont("C:\\Windows\\Fonts\\segoeuib.ttf", 23.5f * fontScale);
     if (g_fontPrimaryHeader == nullptr) {
         g_fontPrimaryHeader = g_fontMainTab;
     }

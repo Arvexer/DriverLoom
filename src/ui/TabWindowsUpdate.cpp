@@ -68,7 +68,7 @@ void DriverLoomApp::RenderWindowsUpdateTab() {
     // Welcoming Empty State when no updates are listed
     if (visibleCount == 0) {
         const ImVec2 avail = ImGui::GetContentRegionAvail();
-        const float cardW = std::min(avail.x, std::round(560.0f * uiScale));
+        const float cardW = std::min(avail.x, std::round(610.0f * uiScale));
         const float cardH = std::round(270.0f * uiScale);
         const float padX = std::max(0.0f, (avail.x - cardW) * 0.5f);
         const float padY = std::max(std::round(12.0f * uiScale), (avail.y - cardH) * 0.36f);
@@ -320,7 +320,7 @@ void DriverLoomApp::RenderWindowsUpdateTab() {
 
     if (ImGui::BeginTable("##WuTable", 5, kTableFlags, ImVec2(0.0f, tableH))) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn(hdm::Tr("Выбор", "Вибір", "Select"), ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 56.0f * uiScale, 0);
+        ImGui::TableSetupColumn(hdm::Tr("Выбор", "Вибір", "Select"), ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 64.0f * uiScale, 0);
         ImGui::TableSetupColumn(hdm::Tr("Обновление", "Оновлення", "Update"), ImGuiTableColumnFlags_WidthStretch, 1.85f, 1);
         ImGui::TableSetupColumn(hdm::Tr("Производитель / Модель", "Виробник / Модель", "Vendor / Model"), ImGuiTableColumnFlags_WidthStretch, 1.05f, 2);
         ImGui::TableSetupColumn(hdm::Tr("Размер", "Розмір", "Size"), ImGuiTableColumnFlags_WidthStretch, 0.48f, 3);

@@ -672,7 +672,7 @@ bool RenderCellText(const std::string& text, bool dimmed, bool alignToFrame) {
 }
 
 void RenderStatusBadge(const ImVec4& color, const char* text, bool alignToFrame) {
-    const float uiScale = (g_dpiScale > 0.5f ? g_dpiScale : 1.0f);
+    const float uiScale = std::max(g_dpiScale > 0.5f ? g_dpiScale : 1.0f, ImGui::GetFontSize() / 16.0f);
     const float textH = ImGui::GetTextLineHeight();
     const float frameH = ImGui::GetFrameHeight();
     const float badgeH = textH + std::round(6.0f * uiScale);
