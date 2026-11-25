@@ -1094,7 +1094,7 @@ std::vector<PowerSchemeItem> QueryPowerSchemes(std::string& outActiveName) {
 SystemDiagnostics::~SystemDiagnostics() {
     stopRequested_.store(true);
     cancelRequested_.store(true);
-    while (exportingReport_.load()) {
+    for (int iter = 0; iter < 60 && exportingReport_.load(); ++iter) {
         const DWORD tid = static_cast<DWORD>(exportThreadId_.load());
         if (tid != 0) {
             EnumThreadWindows(
@@ -1159,12 +1159,22 @@ SystemDiagnosticsSnapshot SystemDiagnostics::CollectSynchronously(
 void SystemDiagnostics::StartScanAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog) {
-    std::lock_guard<std::mutex> lock(threadMutex_);
+    std::thread oldThread;
+    std::unique_lock<std::mutex> lock(threadMutex_);
     if (stopRequested_.load() || runningAction_.load() || scanning_.exchange(true)) {
         return;
     }
     if (scanThread_.joinable()) {
-        scanThread_.join();
+        oldThread = std::move(scanThread_);
+    }
+    if (oldThread.joinable()) {
+        lock.unlock();
+        oldThread.join();
+        lock.lock();
+    }
+    if (stopRequested_.load()) {
+        scanning_.store(false);
+        return;
     }
 
     scanThread_ = std::thread([this, devs = std::move(devicesSnapshot), log = std::move(onLog)]() {
@@ -1194,18 +1204,29 @@ void SystemDiagnostics::RunMaintenanceAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog,
     ActionDoneCallback onComplete) {
-    std::lock_guard<std::mutex> lock(threadMutex_);
+    std::thread oldThread;
+    std::unique_lock<std::mutex> lock(threadMutex_);
     if (stopRequested_.load()) {
         return;
     }
     if (runningAction_.exchange(true)) {
+        lock.unlock();
         if (onLog) {
             onLog(LogLevel::Warning, "Операция обслуживания уже выполняется.");
         }
         return;
     }
     if (actionThread_.joinable()) {
-        actionThread_.join();
+        oldThread = std::move(actionThread_);
+    }
+    if (oldThread.joinable()) {
+        lock.unlock();
+        oldThread.join();
+        lock.lock();
+    }
+    if (stopRequested_.load()) {
+        runningAction_.store(false);
+        return;
     }
 
     cancelRequested_.store(false);
@@ -1246,11 +1267,13 @@ void SystemDiagnostics::RunMaintenanceAsync(
                 const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_svc");
                 std::wstring args = L"--cli-enable-service " + QuoteWin32Arg(Utf8ToWide(targetArg));
                 if (preferAuto) args += L" --auto-start";
-                args += L" --log " + QuoteWin32Arg(tempLog.wstring());
+                if (!tempLog.empty()) args += L" --log " + QuoteWin32Arg(tempLog.wstring());
                 const ElevatedRunResult run = ExecuteElevatedSelf(
-                    args, true, &tempLog, log, nullptr, &cancelRequested_, nullptr);
+                    args, true, tempLog.empty() ? nullptr : &tempLog, log, nullptr, &cancelRequested_, nullptr);
                 std::error_code ec;
-                std::filesystem::remove(tempLog, ec);
+                if (!tempLog.empty()) {
+                    std::filesystem::remove(tempLog, ec);
+                }
                 logUacFailure(run, "Включение службы");
                 ok = run.launched && run.exitCode == 0;
             }
@@ -1260,12 +1283,14 @@ void SystemDiagnostics::RunMaintenanceAsync(
                 ok = ResetWuDownloadCacheSync(log);
             } else {
                 const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_wuc");
-                const std::wstring args =
-                    L"--cli-reset-wucache --log " + QuoteWin32Arg(tempLog.wstring());
+                std::wstring args = L"--cli-reset-wucache";
+                if (!tempLog.empty()) args += L" --log " + QuoteWin32Arg(tempLog.wstring());
                 const ElevatedRunResult run = ExecuteElevatedSelf(
-                    args, true, &tempLog, log, nullptr, &cancelRequested_, nullptr);
+                    args, true, tempLog.empty() ? nullptr : &tempLog, log, nullptr, &cancelRequested_, nullptr);
                 std::error_code ec;
-                std::filesystem::remove(tempLog, ec);
+                if (!tempLog.empty()) {
+                    std::filesystem::remove(tempLog, ec);
+                }
                 logUacFailure(run, "Очистка кэша Windows Update");
                 ok = run.launched && run.exitCode == 0;
             }
@@ -1296,16 +1321,31 @@ void SystemDiagnostics::RunMaintenanceAsync(
             } else {
                 const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_sys");
                 const std::filesystem::path cancelMarker =
-                    std::filesystem::path(tempLog.wstring() + L".cancel");
+                    tempLog.empty()
+                        ? std::filesystem::path{}
+                        : std::filesystem::path(tempLog.wstring() + L".cancel");
                 std::error_code ec;
-                std::filesystem::remove(cancelMarker, ec);
-                const std::wstring args = std::wstring(cliSwitch) +
-                                          L" --log " + QuoteWin32Arg(tempLog.wstring()) +
-                                          L" --cancel-file " + QuoteWin32Arg(cancelMarker.wstring());
+                if (!cancelMarker.empty()) {
+                    std::filesystem::remove(cancelMarker, ec);
+                }
+                std::wstring args = cliSwitch;
+                if (!tempLog.empty()) {
+                    args += L" --log " + QuoteWin32Arg(tempLog.wstring());
+                }
+                if (!cancelMarker.empty()) {
+                    args += L" --cancel-file " + QuoteWin32Arg(cancelMarker.wstring());
+                }
                 const ElevatedRunResult run = ExecuteElevatedSelf(
-                    args, true, &tempLog, log, nullptr, &cancelRequested_, &cancelMarker);
-                std::filesystem::remove(tempLog, ec);
-                std::filesystem::remove(cancelMarker, ec);
+                    args, true,
+                    tempLog.empty() ? nullptr : &tempLog,
+                    log, nullptr, &cancelRequested_,
+                    cancelMarker.empty() ? nullptr : &cancelMarker);
+                if (!tempLog.empty()) {
+                    std::filesystem::remove(tempLog, ec);
+                }
+                if (!cancelMarker.empty()) {
+                    std::filesystem::remove(cancelMarker, ec);
+                }
                 logUacFailure(run, label.c_str());
                 ok = run.launched && run.exitCode == 0;
             }
@@ -1541,7 +1581,7 @@ bool SystemDiagnostics::RunSystemToolSync(
             nullptr,
             nullptr,
             TRUE,
-            CREATE_NO_WINDOW,
+            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
             nullptr,
             nullptr,
             &si,
@@ -1571,7 +1611,11 @@ bool SystemDiagnostics::RunSystemToolSync(
     for (;;) {
         if (cancelFlag != nullptr && cancelFlag->load()) {
             cancelled = true;
-            TerminateProcess(proc.Get(), 1);
+            GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pi.dwProcessId);
+            if (WaitForSingleObject(proc.Get(), 3000) == WAIT_TIMEOUT) {
+                TerminateProcess(proc.Get(), 1);
+                WaitForSingleObject(proc.Get(), 2000);
+            }
             break;
         }
 
@@ -1690,14 +1734,24 @@ bool SystemDiagnostics::SetActivePowerSchemeSync(
 void SystemDiagnostics::SetActivePowerSchemeAsync(
     const std::string& schemeGuidStr,
     LogCallback onLog) {
-    std::lock_guard<std::mutex> lock(threadMutex_);
+    std::thread oldThread;
+    std::unique_lock<std::mutex> lock(threadMutex_);
     if (stopRequested_.load() || IsBusy() || schemeGuidStr.empty()) {
         return;
     }
     runningAction_.store(true);
     SetActionPhase("Переключение схемы электропитания...");
     if (actionThread_.joinable()) {
-        actionThread_.join();
+        oldThread = std::move(actionThread_);
+    }
+    if (oldThread.joinable()) {
+        lock.unlock();
+        oldThread.join();
+        lock.lock();
+    }
+    if (stopRequested_.load()) {
+        runningAction_.store(false);
+        return;
     }
 
     actionThread_ = std::thread([this, schemeGuidStr, log = std::move(onLog)]() {
@@ -2350,12 +2404,22 @@ void SystemDiagnostics::ExportReportInteractiveAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     std::vector<SystemComponentItem> componentsSnapshot,
     LogCallback onLog) {
-    std::lock_guard<std::mutex> lock(threadMutex_);
+    std::thread oldThread;
+    std::unique_lock<std::mutex> lock(threadMutex_);
     if (stopRequested_.load() || exportingReport_.exchange(true)) {
         return;
     }
     if (exportThread_.joinable()) {
-        exportThread_.join();
+        oldThread = std::move(exportThread_);
+    }
+    if (oldThread.joinable()) {
+        lock.unlock();
+        oldThread.join();
+        lock.lock();
+    }
+    if (stopRequested_.load()) {
+        exportingReport_.store(false);
+        return;
     }
 
     exportThread_ = std::thread(

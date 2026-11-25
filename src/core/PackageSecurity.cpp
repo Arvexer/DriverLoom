@@ -15,6 +15,7 @@
 #include <cwchar>
 #include <fstream>
 #include <sstream>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -55,7 +56,7 @@ bool CreateUniqueTempWorkDir(std::filesystem::path& outDir, std::string* outErro
             continue;
         }
         wchar_t suffix[64]{};
-        std::swprintf(
+        const int suffixLen = std::swprintf(
             suffix,
             std::size(suffix),
             L"DriverLoom_%08lx%04x%04x%02x%02x%02x%02x%02x%02x%02x%02x",
@@ -64,13 +65,27 @@ bool CreateUniqueTempWorkDir(std::filesystem::path& outDir, std::string* outErro
             guid.Data3,
             guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
             guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
+        if (suffixLen <= 0 || suffixLen >= static_cast<int>(std::size(suffix))) {
+            continue;
+        }
         const std::filesystem::path candidate = tempRoot / suffix;
         if (CreateDirectoryW(candidate.c_str(), nullptr)) {
-            const DWORD attrs = GetFileAttributesW(candidate.c_str());
-            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+            HandleGuard dirHandle(CreateFileW(
+                candidate.c_str(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                nullptr));
+            BY_HANDLE_FILE_INFORMATION fi{};
+            if (dirHandle.IsValid() && GetFileInformationByHandle(dirHandle.Get(), &fi) &&
+                (fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+                (fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
                 outDir = candidate;
                 return true;
             }
+            dirHandle.Reset();
             RemoveDirectoryW(candidate.c_str());
             if (outError) *outError = "Временный каталог является точкой повторного анализа.";
             return false;
@@ -222,7 +237,11 @@ bool HasMsiMagicHeader(const std::filesystem::path& filePath) {
 
 bool ExtractZipViaShellCom(
     const std::filesystem::path& zipPath,
-    const std::filesystem::path& destDir) {
+    const std::filesystem::path& destDir,
+    const std::atomic<bool>* cancelFlag) {
+    constexpr size_t kMaxArchiveFiles = 1024;
+    constexpr uint64_t kMaxExtractedBytes = 512ULL * 1024ULL * 1024ULL;
+
     std::error_code ec;
     std::filesystem::create_directories(destDir, ec);
     if (ec) {
@@ -270,8 +289,31 @@ bool ExtractZipViaShellCom(
         return false;
     }
     long itemCount = 0;
-    if (FAILED(items->get_Count(&itemCount)) || itemCount <= 0) {
+    if (FAILED(items->get_Count(&itemCount)) || itemCount <= 0 ||
+        static_cast<size_t>(itemCount) > kMaxArchiveFiles) {
         return false;
+    }
+    for (long idx = 0; idx < itemCount; ++idx) {
+        VARIANT vIdx;
+        VariantInit(&vIdx);
+        vIdx.vt = VT_I4;
+        vIdx.lVal = idx;
+        ComPtr<FolderItem> itemObj;
+        if (FAILED(items->Item(vIdx, itemObj.Put())) || !itemObj) {
+            return false;
+        }
+        BSTR rawName = nullptr;
+        if (FAILED(itemObj->get_Name(&rawName)) || rawName == nullptr) {
+            if (rawName != nullptr) SysFreeString(rawName);
+            return false;
+        }
+        const std::wstring entryName(rawName);
+        SysFreeString(rawName);
+        if (entryName.empty() || entryName == L"." || entryName == L".." ||
+            entryName.find(L':') != std::wstring::npos ||
+            entryName.find(L"..") != std::wstring::npos) {
+            return false;
+        }
     }
 
     VARIANT vItems;
@@ -285,18 +327,82 @@ bool ExtractZipViaShellCom(
     vOpt.lVal = 0x0614; // FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_NOCONFIRMMKDIR
 
     hr = dstFolder->CopyHere(vItems, vOpt);
-    return SUCCEEDED(hr);
+    if (FAILED(hr)) {
+        return false;
+    }
+
+    // Folder::CopyHere can finalize asynchronously; poll until file tree settles and stays within limits.
+    size_t prevFiles = 0;
+    uint64_t prevBytes = 0;
+    int stableTicks = 0;
+    for (int poll = 0; poll < 100; ++poll) {
+        if (cancelFlag != nullptr && cancelFlag->load()) {
+            return false;
+        }
+        size_t curFiles = 0;
+        uint64_t curBytes = 0;
+        std::error_code scanEc;
+        for (std::filesystem::recursive_directory_iterator it(
+                 destDir,
+                 std::filesystem::directory_options::skip_permission_denied,
+                 scanEc);
+             !scanEc && it != std::filesystem::recursive_directory_iterator();
+             it.increment(scanEc)) {
+            const DWORD attrs = GetFileAttributesW(it->path().c_str());
+            if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                return false;
+            }
+            if ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+                continue;
+            }
+            ++curFiles;
+            std::error_code szEc;
+            const uint64_t fz = it->file_size(szEc);
+            if (!szEc) {
+                if (curBytes > kMaxExtractedBytes - fz) {
+                    return false;
+                }
+                curBytes += fz;
+            }
+            if (curFiles > kMaxArchiveFiles) {
+                return false;
+            }
+        }
+        if (scanEc) {
+            return false;
+        }
+        if (curFiles > 0 && curFiles == prevFiles && curBytes == prevBytes) {
+            ++stableTicks;
+            if (stableTicks >= 2) {
+                return true;
+            }
+        } else {
+            stableTicks = 0;
+            prevFiles = curFiles;
+            prevBytes = curBytes;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+    return prevFiles > 0;
 }
 
 UINT CALLBACK CabExtractCallback(PVOID ctx, UINT notification, UINT_PTR param1, UINT_PTR param2) {
     (void)param2;
+    if (notification == SPFILENOTIFY_NEEDNEWCABINET) {
+        return FILEOP_ABORT;
+    }
     if (notification == SPFILENOTIFY_FILEINCABINET) {
         auto* info = reinterpret_cast<FILE_IN_CABINET_INFO_W*>(param1);
-        const auto* baseDir = static_cast<const std::filesystem::path*>(ctx);
-        if (info == nullptr || info->NameInCabinet == nullptr || baseDir == nullptr) {
+        auto* cabCtx = static_cast<CabExtractContext*>(ctx);
+        if (info == nullptr || info->NameInCabinet == nullptr || cabCtx == nullptr) {
             return FILEOP_ABORT;
         }
-        const std::filesystem::path rel = std::filesystem::path(info->NameInCabinet).lexically_normal();
+        const std::wstring_view rawName(info->NameInCabinet);
+        if (rawName.empty() || rawName.find(L':') != std::wstring_view::npos) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return FILEOP_ABORT;
+        }
+        const std::filesystem::path rel = std::filesystem::path(rawName).lexically_normal();
         if (rel.empty() || rel == L"." || rel.is_absolute() || rel.has_root_name() ||
             rel.has_root_directory()) {
             SetLastError(ERROR_ACCESS_DENIED);
@@ -308,7 +414,13 @@ UINT CALLBACK CabExtractCallback(PVOID ctx, UINT notification, UINT_PTR param1, 
                 return FILEOP_ABORT;
             }
         }
-        const std::filesystem::path dest = (*baseDir / rel).lexically_normal();
+        if (cabCtx->fileCount >= cabCtx->maxFiles ||
+            static_cast<uint64_t>(info->FileSize) > cabCtx->maxTotalBytes - cabCtx->totalBytes) {
+            SetLastError(ERROR_DISK_FULL);
+            return FILEOP_ABORT;
+        }
+
+        const std::filesystem::path dest = (cabCtx->baseDir / rel).lexically_normal();
         const std::wstring destW = dest.wstring();
         if (destW.size() >= MAX_PATH) {
             SetLastError(ERROR_FILENAME_EXCED_RANGE);
@@ -319,6 +431,45 @@ UINT CALLBACK CabExtractCallback(PVOID ctx, UINT notification, UINT_PTR param1, 
         if (ec) {
             return FILEOP_ABORT;
         }
+
+        auto getCanonDir = [](const std::filesystem::path& p) -> std::wstring {
+            HandleGuard h(CreateFileW(
+                p.c_str(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                nullptr));
+            BY_HANDLE_FILE_INFORMATION fi{};
+            if (!h.IsValid() || !GetFileInformationByHandle(h.Get(), &fi) ||
+                (fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+                (fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                return {};
+            }
+            const DWORD needed = GetFinalPathNameByHandleW(h.Get(), nullptr, 0, FILE_NAME_NORMALIZED);
+            if (needed == 0) return {};
+            std::wstring buf(static_cast<size_t>(needed) + 1, L'\0');
+            const DWORD len = GetFinalPathNameByHandleW(h.Get(), buf.data(), needed + 1, FILE_NAME_NORMALIZED);
+            if (len == 0 || len >= buf.size()) return {};
+            buf.resize(len);
+            while (buf.size() > 3 && (buf.back() == L'\\' || buf.back() == L'/')) {
+                buf.pop_back();
+            }
+            return buf;
+        };
+        const std::wstring baseCanon = getCanonDir(cabCtx->baseDir);
+        const std::wstring parentCanon = getCanonDir(dest.parent_path());
+        if (baseCanon.empty() || parentCanon.empty() ||
+            parentCanon.size() < baseCanon.size() ||
+            _wcsnicmp(parentCanon.c_str(), baseCanon.c_str(), baseCanon.size()) != 0 ||
+            (parentCanon.size() > baseCanon.size() && parentCanon[baseCanon.size()] != L'\\')) {
+            SetLastError(ERROR_ACCESS_DENIED);
+            return FILEOP_ABORT;
+        }
+
+        ++cabCtx->fileCount;
+        cabCtx->totalBytes += static_cast<uint64_t>(info->FileSize);
         wcsncpy_s(info->FullTargetName, MAX_PATH, destW.c_str(), _TRUNCATE);
         return FILEOP_DOIT;
     }
@@ -618,7 +769,11 @@ bool LaunchAndWaitProcess(
     DWORD* outExitCode,
     DWORD* outLaunchErr,
     const std::atomic<bool>* cancelFlag,
-    const std::atomic<bool>* stopFlag) {
+    const std::atomic<bool>* stopFlag,
+    bool* outProcessStillRunning) {
+    if (outProcessStillRunning != nullptr) {
+        *outProcessStillRunning = false;
+    }
     CoInitGuard comInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
 
     SHELLEXECUTEINFOW sei{};
@@ -646,7 +801,10 @@ bool LaunchAndWaitProcess(
             if ((stopFlag != nullptr && stopFlag->load()) ||
                 (cancelFlag != nullptr && cancelFlag->load())) {
                 TerminateProcess(proc.Get(), ERROR_CANCELLED);
-                WaitForSingleObject(proc.Get(), 2000);
+                const DWORD waitTerm = WaitForSingleObject(proc.Get(), 2000);
+                if (outProcessStillRunning != nullptr && waitTerm != WAIT_OBJECT_0) {
+                    *outProcessStillRunning = true;
+                }
                 if (outLaunchErr) *outLaunchErr = ERROR_CANCELLED;
                 return false;
             }

@@ -64,14 +64,17 @@ void SystemRestore::CreateRestorePointAsync(
             }
             const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_sr");
             const std::wstring wideDesc = Utf8ToWide(description.empty() ? "DriverLoom" : description);
-            const std::wstring args =
-                L"--cli-restore-point " + QuoteWin32Arg(wideDesc) +
-                L" --log " + QuoteWin32Arg(tempLog.wstring());
+            std::wstring args = L"--cli-restore-point " + QuoteWin32Arg(wideDesc);
+            if (!tempLog.empty()) {
+                args += L" --log " + QuoteWin32Arg(tempLog.wstring());
+            }
 
-            const ElevatedRunResult run =
-                ExecuteElevatedSelf(args, true, &tempLog, log, nullptr, &stopRequested_);
+            const ElevatedRunResult run = ExecuteElevatedSelf(
+                args, true, tempLog.empty() ? nullptr : &tempLog, log, nullptr, &stopRequested_);
             std::error_code ec;
-            std::filesystem::remove(tempLog, ec);
+            if (!tempLog.empty()) {
+                std::filesystem::remove(tempLog, ec);
+            }
 
             if (!run.launched) {
                 if (run.launchError == ERROR_CANCELLED) {

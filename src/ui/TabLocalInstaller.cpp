@@ -355,9 +355,14 @@ void DriverLoomApp::RenderDriverStoreSection() {
     const float rmBtnW = CalcButtonWidth(rmTxt) + 8.0f * uiScale;
     const float actionColW = rmBtnW + style.CellPadding.x * 2.0f + std::round(6.0f * uiScale);
 
+    const char* selHdr = hdm::Tr("Выбор", "Вибір", "Select");
+    const float selColW = std::max(
+        74.0f * uiScale,
+        ImGui::CalcTextSize(selHdr).x + style.CellPadding.x * 2.0f + std::round(8.0f * uiScale));
+
     if (ImGui::BeginTable("##DriverStoreTable", 9, kTableFlags, ImGui::GetContentRegionAvail())) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn(hdm::Tr("Выбор", "Вибір", "Select"), ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 62.0f * uiScale, 8);
+        ImGui::TableSetupColumn(selHdr, ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, selColW, 8);
         ImGui::TableSetupColumn(hdm::Tr("Статус", "Статус", "Status"), ImGuiTableColumnFlags_DefaultSort | ImGuiTableColumnFlags_WidthStretch, 1.88f, 0);
         ImGui::TableSetupColumn(hdm::Tr("Пакет", "Пакет", "Package"), ImGuiTableColumnFlags_WidthStretch, 0.98f, 1);
         ImGui::TableSetupColumn(hdm::Tr("INF / Активное устройство", "INF / Активний пристрій", "INF / Active Device"), ImGuiTableColumnFlags_WidthStretch, 1.58f, 2);
@@ -556,17 +561,23 @@ void DriverLoomApp::RenderLocalInstallerTab() {
         localInstaller_.IsExportingBackup() ||
         localInstaller_.IsRemovingStorePackages();
 
+    const char* folderLbl = hdm::Tr("Папка с драйверами:", "Папка з драйверами:", "Drivers Folder:");
     const char* pickLbl = hdm::Tr("Обзор папки...###LocPick", "Огляд папки...###LocPick", "Browse Folder...###LocPick");
     const char* scanLbl = hdm::Tr("Найти .inf###LocScan", "Знайти .inf###LocScan", "Scan .inf###LocScan");
-    const float buttonsW =
-        CalcButtonWidth(hdm::Tr("Обзор папки...", "Огляд папки...", "Browse Folder...")) +
-        CalcButtonWidth(hdm::Tr("Найти .inf", "Знайти .inf", "Scan .inf")) +
-        style.ItemSpacing.x * 2.0f + 4.0f;
+    const float pickW = CalcButtonWidth(hdm::Tr("Обзор папки...", "Огляд папки...", "Browse Folder..."));
+    const float scanW = CalcButtonWidth(hdm::Tr("Найти .inf", "Знайти .inf", "Scan .inf"));
+    const float buttonsW = pickW + scanW + style.ItemSpacing.x * 2.0f + std::round(4.0f * uiScale);
+    const float labelW = ImGui::CalcTextSize(folderLbl).x + style.ItemSpacing.x;
+    const float availRowW = ImGui::GetContentRegionAvail().x;
+    const bool wrapButtonsToNextLine = (availRowW < labelW + std::round(220.0f * uiScale) + buttonsW);
 
     ImGui::AlignTextToFramePadding();
-    ImGui::TextUnformatted(hdm::Tr("Папка с драйверами:", "Папка з драйверами:", "Drivers Folder:"));
+    ImGui::TextUnformatted(folderLbl);
     ImGui::SameLine();
-    ImGui::SetNextItemWidth(std::max(180.0f, ImGui::GetContentRegionAvail().x - buttonsW));
+    ImGui::SetNextItemWidth(
+        wrapButtonsToNextLine
+            ? std::max(140.0f * uiScale, ImGui::GetContentRegionAvail().x)
+            : std::max(180.0f * uiScale, ImGui::GetContentRegionAvail().x - buttonsW));
     ImGui::InputTextWithHint(
         "##FolderInput",
         hdm::Tr(
@@ -576,7 +587,9 @@ void DriverLoomApp::RenderLocalInstallerTab() {
         localFolderBuf_,
         sizeof(localFolderBuf_));
 
-    ImGui::SameLine();
+    if (!wrapButtonsToNextLine) {
+        ImGui::SameLine();
+    }
     ImGui::BeginDisabled(busy);
     if (RenderSecondaryButton(pickLbl)) {
         localInstaller_.PickFolderAsync(
@@ -594,7 +607,7 @@ void DriverLoomApp::RenderLocalInstallerTab() {
                 }
             });
     }
-    ImGui::SameLine();
+    SameLineWrapIfNeeded(scanW);
     if (RenderSecondaryButton(scanLbl)) {
         localInstaller_.ScanInfFilesAsync(
             hdm::Utf8ToWide(localFolderBuf_), MakeLogger());

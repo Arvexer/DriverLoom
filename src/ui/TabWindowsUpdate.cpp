@@ -318,9 +318,15 @@ void DriverLoomApp::RenderWindowsUpdateTab() {
         ImGuiTableFlags_Resizable | ImGuiTableFlags_Sortable | ImGuiTableFlags_RowBg |
         ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_ScrollY;
 
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const char* selHdr = hdm::Tr("Выбор", "Вибір", "Select");
+    const float selColW = std::max(
+        74.0f * uiScale,
+        ImGui::CalcTextSize(selHdr).x + style.CellPadding.x * 2.0f + std::round(8.0f * uiScale));
+
     if (ImGui::BeginTable("##WuTable", 5, kTableFlags, ImVec2(0.0f, tableH))) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn(hdm::Tr("Выбор", "Вибір", "Select"), ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 64.0f * uiScale, 0);
+        ImGui::TableSetupColumn(selHdr, ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, selColW, 0);
         ImGui::TableSetupColumn(hdm::Tr("Обновление", "Оновлення", "Update"), ImGuiTableColumnFlags_WidthStretch, 1.85f, 1);
         ImGui::TableSetupColumn(hdm::Tr("Производитель / Модель", "Виробник / Модель", "Vendor / Model"), ImGuiTableColumnFlags_WidthStretch, 1.05f, 2);
         ImGui::TableSetupColumn(hdm::Tr("Размер", "Розмір", "Size"), ImGuiTableColumnFlags_WidthStretch, 0.48f, 3);
@@ -470,7 +476,7 @@ void DriverLoomApp::RenderWindowsUpdateTab() {
             "##WuDetails",
             ImVec2(0.0f, detailsH),
             true,
-            ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
+            ImGuiWindowFlags_None);
         ImGui::PopStyleColor();
         ImGui::TextWrapped("%s", sel.description.empty() ? sel.title.c_str() : sel.description.c_str());
         PushFontSafe(g_fontSmall);

@@ -1214,33 +1214,77 @@ bool DeviceScanner::RestoreInboxDriverByHardwareKeySync(
         return false;
     }
 
+    std::string trimmedKey = searchKey;
+    while (!trimmedKey.empty() && std::isspace(static_cast<unsigned char>(trimmedKey.front()))) {
+        trimmedKey.erase(trimmedKey.begin());
+    }
+    while (!trimmedKey.empty() && std::isspace(static_cast<unsigned char>(trimmedKey.back()))) {
+        trimmedKey.pop_back();
+    }
+    const std::string keyNorm = ToLowerAscii(trimmedKey);
+    const bool hasStructuredPnP =
+        (keyNorm.find("ven_") != std::string::npos && keyNorm.find("&dev_") != std::string::npos) ||
+        (keyNorm.find("vid_") != std::string::npos && keyNorm.find("&pid_") != std::string::npos);
+    const bool isExplicitInstance = (keyNorm.find('\\') != std::string::npos);
+    if (!isExplicitInstance && (!hasStructuredPnP || keyNorm.size() < 17)) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Ключ устройства слишком общий для безопасного восстановления системного драйвера: " +
+                      searchKey);
+        }
+        return false;
+    }
+
     SP_DEVINFO_DATA devInfoData{};
     devInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
-    bool foundDevice = false;
-    for (DWORD idx = 0; SetupDiEnumDeviceInfo(devInfoSet.Get(), idx, &devInfoData); ++idx) {
-        const std::vector<std::wstring> hwIds =
-            GetDeviceRegistryPropertyMultiString(devInfoSet.Get(), &devInfoData, SPDRP_HARDWAREID);
-        bool hwMatched = false;
-        for (const auto& wId : hwIds) {
-            if (ContainsCaseInsensitive(WideToUtf8(wId), searchKey)) {
-                hwMatched = true;
+    SP_DEVINFO_DATA matchedData{};
+    int matchCount = 0;
+    SP_DEVINFO_DATA enumData{};
+    enumData.cbSize = sizeof(SP_DEVINFO_DATA);
+    for (DWORD idx = 0; SetupDiEnumDeviceInfo(devInfoSet.Get(), idx, &enumData); ++idx) {
+        const std::string instId =
+            ToLowerAscii(WideToUtf8(GetDeviceInstanceIdString(devInfoSet.Get(), &enumData)));
+        bool exactMatch = (!instId.empty() && instId == keyNorm);
+        bool structuredMatch = false;
+        if (!exactMatch) {
+            const std::vector<std::wstring> hwIds =
+                GetDeviceRegistryPropertyMultiString(devInfoSet.Get(), &enumData, SPDRP_HARDWAREID);
+            for (const auto& wId : hwIds) {
+                const std::string hwNorm = ToLowerAscii(WideToUtf8(wId));
+                if (hwNorm == keyNorm) {
+                    exactMatch = true;
+                    break;
+                }
+                if (hasStructuredPnP && hwNorm.find(keyNorm) != std::string::npos) {
+                    structuredMatch = true;
+                }
+            }
+        }
+        if (exactMatch || structuredMatch) {
+            matchedData = enumData;
+            ++matchCount;
+            if (exactMatch && isExplicitInstance) {
+                matchCount = 1;
                 break;
             }
         }
-        const std::string instId =
-            WideToUtf8(GetDeviceInstanceIdString(devInfoSet.Get(), &devInfoData));
-        if (hwMatched || ContainsCaseInsensitive(instId, searchKey)) {
-            foundDevice = true;
-            break;
-        }
     }
-    if (!foundDevice) {
+    if (matchCount == 0) {
         if (onLog) {
             onLog(LogLevel::Warning,
                   "Устройство с ключом «" + searchKey + "» не найдено в PnP.");
         }
         return false;
     }
+    if (matchCount > 1) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Найдено несколько устройств по ключу «" + searchKey +
+                      "» — укажите конкретный Instance ID.");
+        }
+        return false;
+    }
+    devInfoData = matchedData;
 
     if (!SetupDiBuildDriverInfoList(devInfoSet.Get(), &devInfoData, SPDIT_COMPATDRIVER)) {
         if (onLog) {
@@ -1414,12 +1458,16 @@ void DeviceScanner::RunDeviceActionAsync(
                 if (!instanceId.empty()) {
                     args += L" --instance " + QuoteWin32Arg(Utf8ToWide(instanceId));
                 }
-                args += L" --log " + QuoteWin32Arg(tempLog.wstring());
+                if (!tempLog.empty()) {
+                    args += L" --log " + QuoteWin32Arg(tempLog.wstring());
+                }
 
-                const ElevatedRunResult res =
-                    ExecuteElevatedSelf(args, true, &tempLog, log, nullptr, &stopRequested_);
+                const ElevatedRunResult res = ExecuteElevatedSelf(
+                    args, true, tempLog.empty() ? nullptr : &tempLog, log, nullptr, &stopRequested_);
                 std::error_code ec;
-                std::filesystem::remove(tempLog, ec);
+                if (!tempLog.empty()) {
+                    std::filesystem::remove(tempLog, ec);
+                }
 
                 if (!res.launched) {
                     if (log) {

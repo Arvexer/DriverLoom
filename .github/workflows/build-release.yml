@@ -32,17 +32,79 @@ jobs:
           if (-not (Test-Path $exe)) { throw "Missing $exe" }
           $bytes = [IO.File]::ReadAllBytes($exe)
           $pe = [BitConverter]::ToInt32($bytes, 0x3C)
-          $dllChar = [BitConverter]::ToUInt16($bytes, $pe + 24 + 70)
+          $numSections = [BitConverter]::ToUInt16($bytes, $pe + 6)
+          $optHdrSize = [BitConverter]::ToUInt16($bytes, $pe + 20)
+          $optHdr = $pe + 24
+          $dllChar = [BitConverter]::ToUInt16($bytes, $optHdr + 70)
           $guardCf = (($dllChar -band 0x4000) -ne 0)
           $dynBase = (($dllChar -band 0x40) -ne 0)
           $nxCompat = (($dllChar -band 0x100) -ne 0)
           $highEntropy = (($dllChar -band 0x20) -ne 0)
+
+          $rvaToOffset = {
+            param([uint32]$rva)
+            if ($rva -eq 0) { return -1 }
+            $secBase = $optHdr + $optHdrSize
+            for ($s = 0; $s -lt $numSections; $s++) {
+              $secOff = $secBase + ($s * 40)
+              $vSize = [BitConverter]::ToUInt32($bytes, $secOff + 8)
+              $vAddr = [BitConverter]::ToUInt32($bytes, $secOff + 12)
+              $rawSize = [BitConverter]::ToUInt32($bytes, $secOff + 16)
+              $rawPtr = [BitConverter]::ToUInt32($bytes, $secOff + 20)
+              $span = [Math]::Max($vSize, $rawSize)
+              if ($rva -ge $vAddr -and $rva -lt ($vAddr + $span)) {
+                return [int]($rawPtr + ($rva - $vAddr))
+              }
+            }
+            return -1
+          }
+
+          $ddBase = $optHdr + 112
+          $impRva = [BitConverter]::ToUInt32($bytes, $ddBase + 1 * 8)
+          $impOff = & $rvaToOffset $impRva
+          $imports = @()
+          if ($impOff -gt 0) {
+            while ($impOff + 20 -le $bytes.Length) {
+              $nameRva = [BitConverter]::ToUInt32($bytes, $impOff + 12)
+              $firstThunk = [BitConverter]::ToUInt32($bytes, $impOff + 16)
+              if ($nameRva -eq 0 -and $firstThunk -eq 0) { break }
+              $nameOff = & $rvaToOffset $nameRva
+              if ($nameOff -gt 0) {
+                $end = $nameOff
+                while ($end -lt $bytes.Length -and $bytes[$end] -ne 0) { $end++ }
+                $dllName = [Text.Encoding]::ASCII.GetString($bytes, $nameOff, $end - $nameOff)
+                $imports += $dllName
+              }
+              $impOff += 20
+            }
+          }
+
+          $lcRva = [BitConverter]::ToUInt32($bytes, $ddBase + 10 * 8)
+          $lcSize = [BitConverter]::ToUInt32($bytes, $ddBase + 10 * 8 + 4)
+          $depLoadFlags = 0
+          $lcOff = & $rvaToOffset $lcRva
+          if ($lcOff -gt 0 -and $lcSize -ge 0x50 -and ($lcOff + 0x50) -le $bytes.Length) {
+            $depLoadFlags = [BitConverter]::ToUInt16($bytes, $lcOff + 0x4E)
+          }
+
           $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
           $size = (Get-Item $exe).Length
           Write-Host "Size: $size bytes"
           Write-Host "SHA256: $hash"
           Write-Host "DllCharacteristics: 0x$($dllChar.ToString('X4')) (HIGH_ENTROPY_VA=$highEntropy, DYNAMIC_BASE=$dynBase, NX_COMPAT=$nxCompat, GUARD_CF=$guardCf)"
+          Write-Host "DependentLoadFlags: 0x$($depLoadFlags.ToString('X4'))"
+          Write-Host "Imports: $($imports -join ', ')"
+
           if (-not $guardCf) { throw "Control Flow Guard (GUARD_CF) is not enabled!" }
+          if (-not $dynBase) { throw "ASLR (DYNAMIC_BASE) is not enabled!" }
+          if (-not $nxCompat) { throw "DEP (NX_COMPAT) is not enabled!" }
+          if (-not $highEntropy) { throw "64-bit High Entropy ASLR (HIGH_ENTROPY_VA) is not enabled!" }
+          if (($depLoadFlags -band 0x800) -eq 0) { throw "DependentLoadFlags missing LOAD_LIBRARY_SEARCH_SYSTEM32 (0x800)!" }
+          foreach ($imp in $imports) {
+            if ($imp -match '^(VCRUNTIME|MSVCP|CONCRT|UCRTBASE)') {
+              throw "Unexpected dynamic CRT dependency: $imp (expected static /MT!)"
+            }
+          }
 
       - name: Upload DriverLoom.exe artifact
         uses: actions/upload-artifact@v4

@@ -573,7 +573,7 @@ CatalogDriverMatch ResolveMsCatalogDriverCab(const std::string& searchKey) {
         "https://www.catalog.update.microsoft.com/Search.aspx?q=" +
         UrlEncodeCatalogParam(searchKey));
     const HttpResponse searchResp = WinHttpRequest(searchUrl, L"GET", true, 1024 * 1024);
-    if (!searchResp.ok || searchResp.body.empty()) {
+    if (!searchResp.ok || searchResp.truncated || searchResp.body.empty()) {
         return {};
     }
 
@@ -717,7 +717,7 @@ CatalogDriverMatch ResolveMsCatalogDriverCab(const std::string& searchKey) {
         128 * 1024,
         L"Content-Type: application/x-www-form-urlencoded\r\n",
         postBody);
-    if (!dlResp.ok || dlResp.body.empty()) {
+    if (!dlResp.ok || dlResp.truncated || dlResp.body.empty()) {
         return {bestVer, "", bestDateYmd};
     }
 
@@ -758,6 +758,7 @@ WingetManifestInfo ParseWingetInstallerYaml(
     bool inInstallers = false;
     bool inNestedFiles = false;
     size_t nestedIndent = std::string::npos;
+    size_t installersItemIndent = std::string::npos;
     std::string topType;
     std::string topSha256;
     std::string topNestedPath;
@@ -794,9 +795,10 @@ WingetManifestInfo ParseWingetInstallerYaml(
             inInstallers = true;
             inNestedFiles = false;
             nestedIndent = std::string::npos;
+            installersItemIndent = std::string::npos;
             continue;
         }
-        if (inNestedFiles && indent <= nestedIndent && trimmed.rfind("- ", 0) != 0) {
+        if (inNestedFiles && indent <= nestedIndent) {
             inNestedFiles = false;
             nestedIndent = std::string::npos;
         }
@@ -811,6 +813,7 @@ WingetManifestInfo ParseWingetInstallerYaml(
                     current = Entry{};
                 }
                 inInstallers = false;
+                installersItemIndent = std::string::npos;
             }
         }
         if (trimmed == "NestedInstallerFiles:") {
@@ -852,9 +855,14 @@ WingetManifestInfo ParseWingetInstallerYaml(
         }
 
         if (isListItem && !inNestedFiles) {
-            if (!current.url.empty()) {
-                entries.push_back(current);
-                current = Entry{};
+            if (installersItemIndent == std::string::npos) {
+                installersItemIndent = indent;
+            }
+            if (indent <= installersItemIndent) {
+                if (!current.url.empty()) {
+                    entries.push_back(current);
+                    current = Entry{};
+                }
             }
         }
 
@@ -960,7 +968,7 @@ WingetManifestInfo ResolveWingetPkgManifest(
         "https://github.com/microsoft/winget-pkgs/tree/master/manifests/" + encPath);
     const HttpResponse treeResp = WinHttpRequest(
         treeUrl, L"GET", true, 256 * 1024, L"Accept: application/json\r\n");
-    if (!treeResp.ok || treeResp.body.empty()) {
+    if (!treeResp.ok || treeResp.truncated || treeResp.body.empty()) {
         return result;
     }
 
@@ -989,7 +997,7 @@ WingetManifestInfo ResolveWingetPkgManifest(
         encPath + "/" + EncodeWingetPath(bestVer));
     const HttpResponse verResp = WinHttpRequest(
         verTreeUrl, L"GET", true, 128 * 1024, L"Accept: application/json\r\n");
-    if (!verResp.ok || verResp.body.empty()) {
+    if (!verResp.ok || verResp.truncated || verResp.body.empty()) {
         return result;
     }
 
@@ -1009,7 +1017,7 @@ WingetManifestInfo ResolveWingetPkgManifest(
         "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/" +
         encPath + "/" + EncodeWingetPath(bestVer) + "/" + EncodeWingetPath(installerYaml));
     const HttpResponse yamlResp = WinHttpRequest(rawUrl, L"GET", true, 128 * 1024);
-    if (!yamlResp.ok || yamlResp.body.empty()) {
+    if (!yamlResp.ok || yamlResp.truncated || yamlResp.body.empty()) {
         return result;
     }
 

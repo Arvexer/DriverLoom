@@ -605,8 +605,10 @@ inline ElevatedRunResult ExecuteElevatedSelf(
     sei.cbSize = sizeof(sei);
     sei.fMask = waitForCompletion ? SEE_MASK_NOCLOSEPROCESS : 0;
     sei.lpVerb = L"runas";
+    const std::wstring exeDir = std::filesystem::path(exePath).parent_path().wstring();
     sei.lpFile = exePath.c_str();
     sei.lpParameters = arguments.empty() ? nullptr : arguments.c_str();
+    sei.lpDirectory = exeDir.empty() ? nullptr : exeDir.c_str();
     sei.nShow = SW_HIDE;
     if (!waitForCompletion) {
         sei.nShow = SW_SHOWNORMAL;
@@ -688,7 +690,7 @@ inline ElevatedRunResult ExecuteElevatedSelf(
                 if (!abortSignaled) {
                     abortSignaled = true;
                     result.cancelled = true;
-                    if (cancelMarkerPath != nullptr) {
+                    if (cancelMarkerPath != nullptr && !cancelMarkerPath->empty()) {
                         std::ofstream marker(*cancelMarkerPath, std::ios::binary | std::ios::trunc);
                     }
                     abortDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);

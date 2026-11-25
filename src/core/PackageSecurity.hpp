@@ -21,6 +21,7 @@ public:
 
     void Set(std::filesystem::path dir);
     void Reset() noexcept;
+    void Release() noexcept { dir_.clear(); }
     [[nodiscard]] const std::filesystem::path& Path() const noexcept { return dir_; }
 
 private:
@@ -40,7 +41,16 @@ bool CreateUniqueTempWorkDir(std::filesystem::path& outDir, std::string* outErro
 [[nodiscard]] bool HasMsiMagicHeader(const std::filesystem::path& filePath);
 bool ExtractZipViaShellCom(
     const std::filesystem::path& zipPath,
-    const std::filesystem::path& destDir);
+    const std::filesystem::path& destDir,
+    const std::atomic<bool>* cancelFlag = nullptr);
+
+struct CabExtractContext {
+    std::filesystem::path baseDir;
+    size_t fileCount{0};
+    uint64_t totalBytes{0};
+    size_t maxFiles{1024};
+    uint64_t maxTotalBytes{512ULL * 1024ULL * 1024ULL};
+};
 UINT CALLBACK CabExtractCallback(PVOID ctx, UINT notification, UINT_PTR param1, UINT_PTR param2);
 
 /// Computes lowercase SHA-256 hex digest of a file using Windows CNG.
@@ -70,6 +80,7 @@ bool LaunchAndWaitProcess(
     DWORD* outExitCode,
     DWORD* outLaunchErr,
     const std::atomic<bool>* cancelFlag = nullptr,
-    const std::atomic<bool>* stopFlag = nullptr);
+    const std::atomic<bool>* stopFlag = nullptr,
+    bool* outProcessStillRunning = nullptr);
 
 } // namespace hdm

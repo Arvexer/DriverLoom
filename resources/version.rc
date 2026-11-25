@@ -35,7 +35,7 @@ BEGIN
         BEGIN
             VALUE "Comments", "Native Windows 10/11 Driver, Runtime & System Diagnostics Manager (RU/UA/EN)"
             VALUE "CompanyName", "Arvexer"
-            VALUE "FileDescription", "DriverLoom — Гибридный менеджер драйверов и игровых компонентов Windows"
+            VALUE "FileDescription", "DriverLoom - Native Windows Driver, Runtime & System Diagnostics Manager"
             VALUE "FileVersion", "1.2.0.0"
             VALUE "InternalName", "DriverLoom"
             VALUE "LegalCopyright", "Copyright (C) 2026 Arvexer"

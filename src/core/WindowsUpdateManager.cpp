@@ -1098,9 +1098,13 @@ void WindowsUpdateManager::StartDownloadAndInstallAsync(
 
             const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_wu");
             const std::filesystem::path cancelMarker =
-                std::filesystem::path(tempLog.wstring() + L".cancel");
+                tempLog.empty()
+                    ? std::filesystem::path{}
+                    : std::filesystem::path(tempLog.wstring() + L".cancel");
             std::error_code ec;
-            std::filesystem::remove(cancelMarker, ec);
+            if (!cancelMarker.empty()) {
+                std::filesystem::remove(cancelMarker, ec);
+            }
 
             std::wstring args =
                 L"--cli-wu-install " + QuoteWin32Arg(Utf8ToWide(JoinUpdateIds(selectedUpdateIds)));
@@ -1110,8 +1114,12 @@ void WindowsUpdateManager::StartDownloadAndInstallAsync(
             if (driversOnly) {
                 args += L" --drivers-only";
             }
-            args += L" --log " + QuoteWin32Arg(tempLog.wstring());
-            args += L" --cancel-file " + QuoteWin32Arg(cancelMarker.wstring());
+            if (!tempLog.empty()) {
+                args += L" --log " + QuoteWin32Arg(tempLog.wstring());
+            }
+            if (!cancelMarker.empty()) {
+                args += L" --cancel-file " + QuoteWin32Arg(cancelMarker.wstring());
+            }
 
             setPhase("Запуск установки с правами администратора...");
             state->progress.store(0.03f);
@@ -1150,13 +1158,17 @@ void WindowsUpdateManager::StartDownloadAndInstallAsync(
             const ElevatedRunResult run = ExecuteElevatedSelf(
                 args,
                 true,
-                &tempLog,
+                tempLog.empty() ? nullptr : &tempLog,
                 log,
                 handleMeta,
                 &state->cancelRequested,
-                &cancelMarker);
-            std::filesystem::remove(tempLog, ec);
-            std::filesystem::remove(cancelMarker, ec);
+                cancelMarker.empty() ? nullptr : &cancelMarker);
+            if (!tempLog.empty()) {
+                std::filesystem::remove(tempLog, ec);
+            }
+            if (!cancelMarker.empty()) {
+                std::filesystem::remove(cancelMarker, ec);
+            }
 
             if (!run.launched) {
                 summary.failedCount = selectedUpdateIds.size();
@@ -1335,6 +1347,8 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
         }
     };
 
+    bool anySearchSucceeded = false;
+
     // Pass 1: Fast offline search against the local WUA datastore already populated by scan.
     {
         ComPtr<ISearchResult> offlineResult;
@@ -1355,6 +1369,7 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
             return summary;
         }
         if (SUCCEEDED(hr) && offlineResult) {
+            anySearchSucceeded = true;
             collectMatches(offlineResult.Get());
         }
     }
@@ -1388,6 +1403,7 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
             return summary;
         }
         if (SUCCEEDED(hr) && onlineResult) {
+            anySearchSucceeded = true;
             collectMatches(onlineResult.Get());
         }
         if (driversOnly && matchedById.size() < requestedSet.size() && session && searcher) {
@@ -1407,9 +1423,25 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
                 return summary;
             }
             if (SUCCEEDED(hr) && fullResult) {
+                anySearchSucceeded = true;
                 collectMatches(fullResult.Get());
             }
         }
+    }
+
+    if (!anySearchSucceeded && matchedById.empty()) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Не удалось получить список обновлений Windows Update (ошибка локального и сетевого поиска).");
+        }
+        for (const auto& uid : updateIds) {
+            ++summary.failedCount;
+            if (onItemUpdate) {
+                onItemUpdate(uid, false, false, "Ошибка поиска Windows Update");
+            }
+        }
+        setProg(1.0f, "Ошибка поиска Windows Update");
+        return summary;
     }
 
     std::vector<TargetUpdate> targets;
@@ -2212,13 +2244,17 @@ void WindowsUpdateManager::SetUpdatesHiddenAsync(
                 const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_wuhide");
                 std::wstring args =
                     std::wstring(hide ? L"--cli-wu-hide " : L"--cli-wu-unhide ") +
-                    QuoteWin32Arg(Utf8ToWide(JoinUpdateIds(updateIds))) +
-                    L" --log " + QuoteWin32Arg(tempLog.wstring());
+                    QuoteWin32Arg(Utf8ToWide(JoinUpdateIds(updateIds)));
+                if (!tempLog.empty()) {
+                    args += L" --log " + QuoteWin32Arg(tempLog.wstring());
+                }
 
-                const ElevatedRunResult run =
-                    ExecuteElevatedSelf(args, true, &tempLog, log, nullptr, &state->cancelRequested);
+                const ElevatedRunResult run = ExecuteElevatedSelf(
+                    args, true, tempLog.empty() ? nullptr : &tempLog, log, nullptr, &state->cancelRequested);
                 std::error_code ec;
-                std::filesystem::remove(tempLog, ec);
+                if (!tempLog.empty()) {
+                    std::filesystem::remove(tempLog, ec);
+                }
                 if (!run.launched) {
                     log(run.launchError == ERROR_CANCELLED ? LogLevel::Warning : LogLevel::Error,
                         run.launchError == ERROR_CANCELLED

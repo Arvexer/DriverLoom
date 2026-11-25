@@ -129,12 +129,16 @@ elseif(MINGW)
     target_compile_options(DriverLoom PRIVATE
         -finput-charset=UTF-8
         -fexec-charset=UTF-8
+        -fstack-protector-strong
         -Wall
         -Wextra
         -Wpedantic
     )
     target_link_options(DriverLoom PRIVATE
         "-specs=${NO_DEFAULT_MANIFEST_SPECS}"
+        -Wl,--dynamicbase
+        -Wl,--high-entropy-va
+        -Wl,--nxcompat
         -static
         -static-libgcc
         -static-libstdc++

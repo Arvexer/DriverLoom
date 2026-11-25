@@ -1,4 +1,5 @@
 #include "core/LocalDriverInstaller.hpp"
+#include "common/Localization.hpp"
 #include "core/SystemRestore.hpp"
 
 #include <newdev.h>
@@ -114,7 +115,7 @@ std::wstring GetWindowsInfDirectory() {
 
 LocalDriverInstaller::~LocalDriverInstaller() {
     shuttingDown_.store(true);
-    while (picking_.load()) {
+    for (int iter = 0; iter < 60 && picking_.load(); ++iter) {
         const DWORD tid = static_cast<DWORD>(pickThreadId_.load());
         if (tid != 0) {
             EnumThreadWindows(
@@ -220,7 +221,10 @@ void LocalDriverInstaller::PickFolderAsync(
                 dialog->GetOptions(&options);
                 dialog->SetOptions(
                     options | FOS_PICKFOLDERS | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
-                dialog->SetTitle(L"Выберите папку с распакованными драйверами (.inf)");
+                dialog->SetTitle(Utf8ToWide(hdm::Tr(
+                    "Выберите папку с распакованными драйверами (.inf)",
+                    "Виберіть папку з розпакованими драйверами (.inf)",
+                    "Select folder containing extracted .inf drivers")).c_str());
 
                 // Pass nullptr owner across threads so UI thread teardown cannot deadlock in join()
                 hr = dialog->Show(nullptr);
@@ -820,7 +824,8 @@ DriverStoreSnapshot LocalDriverInstaller::ScanDriverStoreSynchronously(
 void LocalDriverInstaller::ScanDriverStoreAsync(
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog) {
-    std::lock_guard<std::mutex> lock(threadMutex_);
+    std::thread oldThread;
+    std::unique_lock<std::mutex> lock(threadMutex_);
     if (shuttingDown_.load() || installing_.load() || removingPackages_.load() || exportingBackup_.load()) {
         return;
     }
@@ -828,7 +833,16 @@ void LocalDriverInstaller::ScanDriverStoreAsync(
         return;
     }
     if (storeThread_.joinable()) {
-        storeThread_.join();
+        oldThread = std::move(storeThread_);
+    }
+    if (oldThread.joinable()) {
+        lock.unlock();
+        oldThread.join();
+        lock.lock();
+    }
+    if (shuttingDown_.load()) {
+        scanningStore_.store(false);
+        return;
     }
 
     storeThread_ = std::thread([this, devs = std::move(devicesSnapshot), log = std::move(onLog)]() {
@@ -874,8 +888,18 @@ void LocalDriverInstaller::ExportDriverStoreBackupAsync(
         }
         return;
     }
+    std::thread oldThread;
     if (backupThread_.joinable()) {
-        backupThread_.join();
+        oldThread = std::move(backupThread_);
+    }
+    if (oldThread.joinable()) {
+        lock.unlock();
+        oldThread.join();
+        lock.lock();
+    }
+    if (shuttingDown_.load()) {
+        exportingBackup_.store(false);
+        return;
     }
 
     progress_.store(0.0f);
@@ -1115,8 +1139,18 @@ void LocalDriverInstaller::RemoveDriverStorePackagesAsync(
         }
         return;
     }
+    std::thread oldThread;
     if (removeThread_.joinable()) {
-        removeThread_.join();
+        oldThread = std::move(removeThread_);
+    }
+    if (oldThread.joinable()) {
+        lock.unlock();
+        oldThread.join();
+        lock.lock();
+    }
+    if (shuttingDown_.load()) {
+        removingPackages_.store(false);
+        return;
     }
 
     progress_.store(0.0f);

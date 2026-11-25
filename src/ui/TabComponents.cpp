@@ -173,23 +173,30 @@ void DriverLoomApp::RenderComponentsTab() {
     if (g_isAdvancedMode) {
         ImGui::Dummy(ImVec2(0.0f, std::round(2.0f * uiScale)));
         PushFontSafe(g_fontSmall);
+        const char* selAvailLbl = hdm::Tr("Выбрать доступные###CompSelAvail", "Вибрати доступні###CompSelAvail", "Select Available###CompSelAvail");
+        const char* clrSelLbl = hdm::Tr("Снять выбор###CompClrSel", "Зняти вибір###CompClrSel", "Clear Selection###CompClrSel");
+        const char* rpCbLbl = hdm::Tr("Точка восстановления перед установкой###CompRpCb", "Точка відновлення перед встановленням###CompRpCb", "Create restore point before installing###CompRpCb");
+        const float clrSelW = CalcButtonWidth(clrSelLbl);
+        const char* rpCbVisible = hdm::Tr("Точка восстановления перед установкой", "Точка відновлення перед встановленням", "Create restore point before installing");
+        const float rpCbW =
+            ImGui::CalcTextSize(rpCbVisible).x + ImGui::GetFrameHeight() +
+            style.ItemInnerSpacing.x + std::round(8.0f * uiScale);
+
         ImGui::BeginDisabled(busy || batchTargets.empty());
-        if (RenderSecondaryButton(hdm::Tr("Выбрать доступные###CompSelAvail", "Вибрати доступні###CompSelAvail", "Select Available###CompSelAvail"))) {
+        if (RenderSecondaryButton(selAvailLbl)) {
             for (const auto& comp : batchTargets) {
                 selectedComponentIds_.insert(comp.id);
             }
         }
         ImGui::EndDisabled();
-        ImGui::SameLine();
+        SameLineWrapIfNeeded(clrSelW);
         ImGui::BeginDisabled(busy || selectedComponentIds_.empty());
-        if (RenderSecondaryButton(hdm::Tr("Снять выбор###CompClrSel", "Зняти вибір###CompClrSel", "Clear Selection###CompClrSel"))) {
+        if (RenderSecondaryButton(clrSelLbl)) {
             selectedComponentIds_.clear();
         }
         ImGui::EndDisabled();
-        ImGui::SameLine(0.0f, 14.0f * uiScale);
-        ImGui::Checkbox(
-            hdm::Tr("Точка восстановления перед установкой###CompRpCb", "Точка відновлення перед встановленням###CompRpCb", "Create restore point before installing###CompRpCb"),
-            &compRestoreBefore_);
+        SameLineWrapIfNeeded(rpCbW);
+        ImGui::Checkbox(rpCbLbl, &compRestoreBefore_);
         PopFontSafe(g_fontSmall);
     }
 
