@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <unordered_set>
+#include <vector>
 
 namespace hdm {
 
@@ -47,6 +48,10 @@ struct HttpResponse {
 };
 
 [[nodiscard]] bool IsHttpsUrl(std::string_view url);
+[[nodiscard]] bool IsAllowedHttpsHost(
+    std::string_view url,
+    const std::vector<std::string_view>& allowedSuffixes);
+[[nodiscard]] std::string ExtractHttpsHost(std::string_view url);
 [[nodiscard]] std::string StripUrlQuery(std::string_view url);
 [[nodiscard]] std::string ExtractJsonStringField(
     const std::string& json,
@@ -70,6 +75,7 @@ bool DownloadFileViaWinHttp(
     std::string* outError,
     float baseProgress = 0.0f,
     float progressSpan = 1.0f,
-    const std::atomic<bool>* cancelFlag = nullptr);
+    const std::atomic<bool>* cancelFlag = nullptr,
+    const std::vector<std::string_view>& allowedHostSuffixes = {});
 
 } // namespace hdm

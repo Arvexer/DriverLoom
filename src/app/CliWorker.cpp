@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cwctype>
 #include <filesystem>
 #include <fstream>
 #include <mutex>
@@ -18,6 +19,189 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+namespace {
+
+bool EqualsIgnoreCaseWide(const std::wstring& a, const std::wstring& b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        if (std::towlower(a[i]) != std::towlower(b[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+std::wstring StripTrailingSeparators(std::wstring s) {
+    while (s.size() > 3 && (s.back() == L'\\' || s.back() == L'/')) {
+        s.pop_back();
+    }
+    return s;
+}
+
+std::wstring GetFinalPathString(HANDLE handle) {
+    if (handle == nullptr || handle == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+    const DWORD needed = GetFinalPathNameByHandleW(handle, nullptr, 0, FILE_NAME_NORMALIZED);
+    if (needed == 0) {
+        return {};
+    }
+    std::wstring out(static_cast<size_t>(needed) + 1, L'\0');
+    const DWORD written =
+        GetFinalPathNameByHandleW(handle, out.data(), needed + 1, FILE_NAME_NORMALIZED);
+    if (written == 0 || written >= out.size()) {
+        return {};
+    }
+    out.resize(written);
+    return out;
+}
+
+std::wstring ResolveCanonicalTempDir() {
+    const DWORD needed = GetTempPathW(0, nullptr);
+    if (needed == 0) {
+        return {};
+    }
+    std::wstring tempBuf(static_cast<size_t>(needed) + 1, L'\0');
+    const DWORD len = GetTempPathW(needed + 1, tempBuf.data());
+    if (len == 0 || len > needed) {
+        return {};
+    }
+    tempBuf.resize(len);
+    hdm::HandleGuard tempDirHandle(CreateFileW(
+        tempBuf.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS,
+        nullptr));
+    if (!tempDirHandle.IsValid()) {
+        return {};
+    }
+    return StripTrailingSeparators(GetFinalPathString(tempDirHandle.Get()));
+}
+
+bool ValidateWorkerTempPath(
+    const std::wstring& rawPath,
+    const std::wstring& requiredSuffix,
+    std::wstring& outCanonicalTempDir,
+    std::wstring& outFileName) {
+    outCanonicalTempDir.clear();
+    outFileName.clear();
+    if (rawPath.empty() || rawPath.rfind(L"\\\\", 0) == 0 || rawPath.rfind(L"//", 0) == 0) {
+        return false;
+    }
+
+    const std::filesystem::path candidate(rawPath);
+    if (!candidate.is_absolute()) {
+        return false;
+    }
+    for (const auto& part : candidate) {
+        if (part == L"..") {
+            return false;
+        }
+    }
+
+    const std::wstring fileName = candidate.filename().wstring();
+    const std::wstring kRequiredPrefix = L"DriverLoom_";
+    if (fileName.size() <= kRequiredPrefix.size() + requiredSuffix.size() ||
+        fileName.rfind(kRequiredPrefix, 0) != 0 ||
+        fileName.compare(
+            fileName.size() - requiredSuffix.size(), requiredSuffix.size(), requiredSuffix) != 0) {
+        return false;
+    }
+    for (wchar_t ch : fileName) {
+        const bool ok = (ch >= L'0' && ch <= L'9') || (ch >= L'A' && ch <= L'Z') ||
+                        (ch >= L'a' && ch <= L'z') || ch == L'_' || ch == L'-' || ch == L'.';
+        if (!ok) {
+            return false;
+        }
+    }
+
+    const std::wstring canonicalTemp = ResolveCanonicalTempDir();
+    if (canonicalTemp.empty()) {
+        return false;
+    }
+    const std::filesystem::path parentPath = candidate.parent_path();
+    if (parentPath.empty()) {
+        return false;
+    }
+    hdm::HandleGuard parentHandle(CreateFileW(
+        parentPath.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr));
+    if (!parentHandle.IsValid()) {
+        return false;
+    }
+    BY_HANDLE_FILE_INFORMATION parentInfo{};
+    if (!GetFileInformationByHandle(parentHandle.Get(), &parentInfo) ||
+        (parentInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+        return false;
+    }
+    const std::wstring parentCanon = StripTrailingSeparators(GetFinalPathString(parentHandle.Get()));
+    if (!EqualsIgnoreCaseWide(parentCanon, canonicalTemp)) {
+        return false;
+    }
+
+    outCanonicalTempDir = canonicalTemp;
+    outFileName = fileName;
+    return true;
+}
+
+hdm::HandleGuard OpenValidatedTempLogFile(const std::wstring& rawPath) {
+    std::wstring canonicalTemp;
+    std::wstring fileName;
+    if (!ValidateWorkerTempPath(rawPath, L".log", canonicalTemp, fileName)) {
+        return hdm::HandleGuard{};
+    }
+
+    const DWORD attrs = GetFileAttributesW(rawPath.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES &&
+        (attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+        return hdm::HandleGuard{};
+    }
+
+    hdm::HandleGuard handle(CreateFileW(
+        rawPath.c_str(),
+        GENERIC_WRITE | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr));
+    if (!handle.IsValid()) {
+        return hdm::HandleGuard{};
+    }
+
+    BY_HANDLE_FILE_INFORMATION fileInfo{};
+    if (!GetFileInformationByHandle(handle.Get(), &fileInfo) ||
+        (fileInfo.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0 ||
+        fileInfo.nNumberOfLinks != 1) {
+        return hdm::HandleGuard{};
+    }
+
+    const std::wstring expectedFinal = canonicalTemp + L"\\" + fileName;
+    const std::wstring actualFinal = GetFinalPathString(handle.Get());
+    if (!EqualsIgnoreCaseWide(actualFinal, expectedFinal)) {
+        return hdm::HandleGuard{};
+    }
+
+    LARGE_INTEGER zero{};
+    if (!SetFilePointerEx(handle.Get(), zero, nullptr, FILE_BEGIN) ||
+        !SetEndOfFile(handle.Get())) {
+        return hdm::HandleGuard{};
+    }
+    return handle;
+}
+
+} // namespace
 
 // --- Elevated CLI Worker Mode ---
 int RunCliModeIfRequested() {
@@ -117,30 +301,7 @@ int RunCliModeIfRequested() {
     }
 
     std::mutex fileLogMutex;
-    hdm::HandleGuard logFile;
-    if (!logPath.empty()) {
-        const std::filesystem::path logFsPath(logPath);
-        const DWORD attrs = GetFileAttributesW(logFsPath.c_str());
-        if (attrs == INVALID_FILE_ATTRIBUTES) {
-            logFile.Reset(CreateFileW(
-                logFsPath.c_str(),
-                GENERIC_WRITE,
-                FILE_SHARE_READ,
-                nullptr,
-                CREATE_NEW,
-                FILE_ATTRIBUTE_NORMAL,
-                nullptr));
-        } else if ((attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
-            logFile.Reset(CreateFileW(
-                logFsPath.c_str(),
-                GENERIC_WRITE,
-                FILE_SHARE_READ,
-                nullptr,
-                TRUNCATE_EXISTING,
-                FILE_ATTRIBUTE_NORMAL,
-                nullptr));
-        }
-    }
+    hdm::HandleGuard logFile = OpenValidatedTempLogFile(logPath);
     auto writeRawLine = [&](const std::string& rawLine) {
         std::lock_guard<std::mutex> lock(fileLogMutex);
         if (!logFile.IsValid()) {
@@ -255,12 +416,14 @@ int RunCliModeIfRequested() {
         std::thread watcher;
 
         explicit CancelFileWatcherGuard(const std::wstring& path) {
-            if (!path.empty()) {
-                const std::filesystem::path marker(path);
-                watcher = std::thread([marker, this]() {
+            std::wstring canonicalTemp;
+            std::wstring fileName;
+            if (ValidateWorkerTempPath(path, L".log.cancel", canonicalTemp, fileName)) {
+                watcher = std::thread([path, this]() {
                     while (!stop.load()) {
-                        std::error_code ec;
-                        if (std::filesystem::exists(marker, ec)) {
+                        const DWORD attrs = GetFileAttributesW(path.c_str());
+                        if (attrs != INVALID_FILE_ATTRIBUTES &&
+                            (attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0) {
                             cancel.store(true);
                             break;
                         }

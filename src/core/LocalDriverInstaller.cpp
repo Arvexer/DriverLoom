@@ -27,7 +27,6 @@ bool HasInfExtension(const std::filesystem::path& p) {
 }
 
 using DiInstallDriverWFn = BOOL(WINAPI*)(HWND, LPCWSTR, DWORD, PBOOL);
-using DiUninstallDriverWFn = BOOL(WINAPI*)(HWND, LPCWSTR, DWORD, PBOOL);
 using SetupGetInfDriverStoreLocationWFn =
     BOOL(WINAPI*)(PCWSTR, PSP_ALTPLATFORM_INFO, PCWSTR, PWSTR, DWORD, PDWORD);
 
@@ -1053,24 +1052,6 @@ bool LocalDriverInstaller::RemoveDriverStorePackagesSync(
             "DriverLoom: перед очисткой старых пакетов DriverStore", onLog);
     }
 
-    hdm::ModuleGuard newdevMod(
-        LoadLibraryExW(L"newdev.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32));
-    DiUninstallDriverWFn diUninstallDriverW = nullptr;
-    if (newdevMod.Get() != nullptr) {
-        diUninstallDriverW = reinterpret_cast<DiUninstallDriverWFn>(
-            reinterpret_cast<void*>(GetProcAddress(newdevMod.Get(), "DiUninstallDriverW")));
-    }
-    if (diUninstallDriverW == nullptr) {
-        if (onLog) {
-            onLog(LogLevel::Error,
-                  "Не удалось загрузить DiUninstallDriverW из newdev.dll: " +
-                      FormatWin32Error(GetLastError()));
-        }
-        if (outFailedCount) *outFailedCount = oemInfNames.size();
-        return false;
-    }
-
-    const std::filesystem::path infDir(GetWindowsInfDirectory());
     for (const auto& name : oemInfNames) {
         if (ParseOemInfNumber(name) < 0) {
             ++failed;
@@ -1079,13 +1060,10 @@ bool LocalDriverInstaller::RemoveDriverStorePackagesSync(
             }
             continue;
         }
-        const std::filesystem::path fullInf = infDir / Utf8ToWide(name);
-        BOOL needReboot = FALSE;
-        if (diUninstallDriverW(nullptr, fullInf.c_str(), 0, &needReboot)) {
+        const std::wstring wideInf = Utf8ToWide(name);
+        // Never pass SUOI_FORCEDELETE so Windows safely rejects packages still bound to a device.
+        if (SetupUninstallOEMInfW(wideInf.c_str(), 0, nullptr)) {
             ++removed;
-            if (needReboot) {
-                rebootReq = true;
-            }
             if (onLog) {
                 onLog(LogLevel::Success, "Удалён пакет из DriverStore: " + name);
             }

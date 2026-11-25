@@ -32,6 +32,7 @@ struct WingetManifestInfo {
     bool ok{false};
     std::string version;
     std::string url;
+    std::string sha256;
     std::string nestedRelativePath;
     std::string silentArgs;
 };

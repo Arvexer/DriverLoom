@@ -71,7 +71,7 @@ void DriverLoomApp::RebuildDriverStoreViewCache(ImGuiTableSortSpecs* sortSpecs) 
 }
 
 void DriverLoomApp::RenderDriverStoreSection() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     const ImGuiStyle& style = ImGui::GetStyle();
     const bool isAppForeground = (GetForegroundWindow() == hwnd_);
     const bool busy = localInstaller_.IsPickingFolder() ||
@@ -86,10 +86,11 @@ void DriverLoomApp::RenderDriverStoreSection() {
             "Экспорт бэкапа в папку...###DsExp",
             "Експорт бекапу в папку...###DsExp",
             "Export Backup Folder...###DsExp"))) {
+        const bool skipDuplicatesSnapshot = backupSkipDuplicates_;
         localInstaller_.PickFolderAsync(
             hwnd_,
             MakeLogger(),
-            [this](bool picked, const std::wstring& path) {
+            [this, skipDuplicatesSnapshot](bool picked, const std::wstring& path) {
                 if (picked && !path.empty()) {
                     const std::string utf8 = hdm::WideToUtf8(path);
                     {
@@ -99,7 +100,7 @@ void DriverLoomApp::RenderDriverStoreSection() {
                     }
                     localInstaller_.ExportDriverStoreBackupAsync(
                         path,
-                        backupSkipDuplicates_,
+                        skipDuplicatesSnapshot,
                         MakeLogger(),
                         [this, path](bool ok, size_t exportedCount) {
                             if (ok && exportedCount > 0) {
@@ -493,7 +494,7 @@ void DriverLoomApp::RenderDriverStoreSection() {
 }
 
 void DriverLoomApp::RenderLocalInstallerTab() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     const ImGuiStyle& style = ImGui::GetStyle();
     const bool isAppForeground = (GetForegroundWindow() == hwnd_);
 

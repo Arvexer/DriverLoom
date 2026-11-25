@@ -9,7 +9,7 @@
 #include <sstream>
 
 void DriverLoomApp::RenderDiagnosticsTab() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     const ImGuiStyle& style = ImGui::GetStyle();
     const bool busy = diagnostics_.IsBusy();
     const bool isAppForeground = (GetForegroundWindow() == hwnd_);
@@ -144,9 +144,23 @@ void DriverLoomApp::RenderDiagnosticsTab() {
     const float cardPadX = std::round(13.0f * uiScale);
     const float cardPadY = std::round(9.0f * uiScale);
     const float cardSpacingY = std::round(4.0f * uiScale);
-    const float cardH = std::round(118.0f * uiScale);
     const float cardGap = std::round(10.0f * uiScale);
     const float cardW = std::max(240.0f, (ImGui::GetContentRegionAvail().x - cardGap) * 0.5f);
+    const float cardInnerW = std::max(160.0f, cardW - cardPadX * 2.0f);
+
+    const char* mbSiteLbl = hdm::Tr("Сайт платы###MbSite", "Сайт плати###MbSite", "Board Website###MbSite");
+    const char* mbSearchLbl = hdm::Tr("Найти драйверы###MbSearch", "Знайти драйвери###MbSearch", "Find Drivers###MbSearch");
+    const char* mbCopyLbl = hdm::Tr("Копировать###MbCopy", "Копіювати###MbCopy", "Copy###MbCopy");
+    const float mbSiteW = !diagCache_.motherboard.supportUrl.empty() ? CalcButtonWidth(mbSiteLbl) : 0.0f;
+    const float mbSearchW = CalcButtonWidth(mbSearchLbl);
+    const float mbCopyW = g_isAdvancedMode ? CalcButtonWidth(mbCopyLbl) : 0.0f;
+    float mbBtnsTotalW = mbSearchW;
+    if (mbSiteW > 0.0f) mbBtnsTotalW += mbSiteW + style.ItemSpacing.x;
+    if (mbCopyW > 0.0f) mbBtnsTotalW += mbCopyW + style.ItemSpacing.x;
+    const bool moboNeedsTwoRows = (mbBtnsTotalW > cardInnerW);
+    const float cardH = std::max(
+        std::round(118.0f * uiScale),
+        moboNeedsTwoRows ? (std::round(118.0f * uiScale) + ImGui::GetFrameHeight() + cardSpacingY) : 0.0f);
 
     // Left Card: Motherboard & BIOS
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(cardPadX, cardPadY));
@@ -187,23 +201,25 @@ void DriverLoomApp::RenderDiagnosticsTab() {
             ImGui::SetTooltip("%s", boardTitle.c_str());
         }
 
-        const float btnsY = cardH - cardPadY - ImGui::GetFrameHeight();
+        const float mbBtnBlockH =
+            moboNeedsTwoRows ? (ImGui::GetFrameHeight() * 2.0f + cardSpacingY) : ImGui::GetFrameHeight();
+        const float btnsY = cardH - cardPadY - mbBtnBlockH;
         if (ImGui::GetCursorPosY() < btnsY) {
             ImGui::SetCursorPosY(btnsY);
         }
         if (!mb.supportUrl.empty()) {
-            if (RenderSecondaryButton(hdm::Tr("Сайт платы###MbSite", "Сайт плати###MbSite", "Board Website###MbSite"))) {
+            if (RenderSecondaryButton(mbSiteLbl)) {
                 OpenUrlInBrowser(mb.supportUrl);
             }
-            ImGui::SameLine();
+            SameLineWrapIfNeeded(mbSearchW);
         }
-        if (RenderSecondaryButton(hdm::Tr("Найти драйверы###MbSearch", "Знайти драйвери###MbSearch", "Find Drivers###MbSearch"))) {
+        if (RenderSecondaryButton(mbSearchLbl)) {
             OpenUrlInBrowser(
                 "https://www.google.com/search?q=" + UrlEncode(boardTitle + " chipset lan audio drivers Windows"));
         }
         if (g_isAdvancedMode) {
-            ImGui::SameLine();
-            if (RenderSecondaryButton(hdm::Tr("Копировать###MbCopy", "Копіювати###MbCopy", "Copy###MbCopy"))) {
+            SameLineWrapIfNeeded(mbCopyW);
+            if (RenderSecondaryButton(mbCopyLbl)) {
                 const std::string copyText = boardTitle + " | " + biosInfo;
                 ImGui::SetClipboardText(copyText.c_str());
             }
@@ -326,7 +342,41 @@ void DriverLoomApp::RenderDiagnosticsTab() {
         ((diagSectionIndex_ == 0 || diagSectionIndex_ == 1) && g_isAdvancedMode);
 
     const float footerPadY = std::round(8.0f * uiScale);
-    const float footerH = showFooterBar ? (ImGui::GetFrameHeight() + footerPadY * 2.0f) : 0.0f;
+    const float footerInnerW = std::max(200.0f, ImGui::GetContentRegionAvail().x - cardPadX * 2.0f);
+    int footerRows = 1;
+    if (showFooterBar && diagSectionIndex_ != 3) {
+        float rowNeededW = 0.0f;
+        if (diagSectionIndex_ == 2) {
+            rowNeededW =
+                CalcButtonWidth(hdm::Tr("Создать точку отката###FtRpCreate", "Створити точку відкату###FtRpCreate", "Create Restore Point###FtRpCreate")) +
+                CalcButtonWidth(hdm::Tr("Откатить Windows...###FtRstrui", "Відкотити Windows...###FtRstrui", "Open System Restore###FtRstrui")) +
+                CalcButtonWidth(hdm::Tr("Настроить защиту диска###FtProt", "Налаштувати захист диска###FtProt", "Protection Settings###FtProt")) +
+                style.ItemSpacing.x * 2.0f;
+        } else if (diagSectionIndex_ == 4) {
+            rowNeededW =
+                CalcButtonWidth(hdm::Tr("Обновить снимок «До»###SnapSaveBtn", "Оновити знімок «До»###SnapSaveBtn", "Capture New Baseline###SnapSaveBtn")) +
+                CalcButtonWidth("Changes (999)") + CalcButtonWidth("All (999)") +
+                CalcButtonWidth(hdm::Tr("Копировать###SnapCopyBtn", "Копіювати###SnapCopyBtn", "Copy###SnapCopyBtn")) +
+                style.ItemSpacing.x * 3.0f;
+        } else {
+            const char* sfcHdr = hdm::Tr("Проверка системных файлов:", "Перевірка системних файлів:", "System File Check:");
+            rowNeededW =
+                ImGui::CalcTextSize(sfcHdr).x + 10.0f +
+                CalcButtonWidth("SFC /scannow") +
+                CalcButtonWidth("DISM CheckHealth") +
+                CalcButtonWidth("DISM RestoreHealth") +
+                style.ItemSpacing.x * 3.0f;
+        }
+        if (rowNeededW > footerInnerW) {
+            footerRows = 2;
+        }
+    }
+    const float footerH =
+        showFooterBar
+            ? (ImGui::GetFrameHeight() * static_cast<float>(footerRows) +
+               style.ItemSpacing.y * static_cast<float>(footerRows - 1) +
+               footerPadY * 2.0f)
+            : 0.0f;
     const float tableH = std::max(
         110.0f,
         ImGui::GetContentRegionAvail().y - (showFooterBar ? (footerH + style.ItemSpacing.y) : 0.0f));
@@ -684,17 +734,19 @@ void DriverLoomApp::RenderDiagnosticsTab() {
                 hdm::Tr("DriverLoom (ручная точка восстановления)", "DriverLoom (ручна точка відновлення)", "DriverLoom (manual restore point)"),
                 MakeLogger(),
                 [this](bool ok, const std::string&) {
-                    if (ok && !diagnostics_.IsBusy()) diagnostics_.StartScanAsync(devicesCache_, nullptr);
+                    if (ok) pendingDiagRescan_.store(true);
                 });
         }
         ImGui::EndDisabled();
 
-        ImGui::SameLine();
-        if (RenderSecondaryButton(hdm::Tr("Откатить Windows...###FtRstrui", "Відкотити Windows...###FtRstrui", "Open System Restore###FtRstrui"))) {
+        const char* rstruiLbl = hdm::Tr("Откатить Windows...###FtRstrui", "Відкотити Windows...###FtRstrui", "Open System Restore###FtRstrui");
+        const char* protLbl = hdm::Tr("Настроить защиту диска###FtProt", "Налаштувати захист диска###FtProt", "Protection Settings###FtProt");
+        SameLineWrapIfNeeded(CalcButtonWidth(rstruiLbl));
+        if (RenderSecondaryButton(rstruiLbl)) {
             launchSystem32Tool(L"rstrui.exe");
         }
-        ImGui::SameLine();
-        if (RenderSecondaryButton(hdm::Tr("Настроить защиту диска###FtProt", "Налаштувати захист диска###FtProt", "Protection Settings###FtProt"))) {
+        SameLineWrapIfNeeded(CalcButtonWidth(protLbl));
+        if (RenderSecondaryButton(protLbl)) {
             launchSystem32Tool(L"SystemPropertiesProtection.exe");
         }
     } else if (diagSectionIndex_ == 4) {
@@ -707,14 +759,15 @@ void DriverLoomApp::RenderDiagnosticsTab() {
         char chgLbl[64], allLbl[64];
         std::snprintf(chgLbl, sizeof(chgLbl), hdm::Tr("Изменения (%zu)###SnapFiltChg", "Зміни (%zu)###SnapFiltChg", "Changes (%zu)###SnapFiltChg"), snapshotChangedCount_);
         std::snprintf(allLbl, sizeof(allLbl), hdm::Tr("Все (%zu)###SnapFiltAll", "Усі (%zu)###SnapFiltAll", "All (%zu)###SnapFiltAll"), snapshotDiffRows_.size());
-        ImGui::SameLine();
+        SameLineWrapIfNeeded(CalcButtonWidth(chgLbl));
         if (RenderPillButton(chgLbl, !snapShowAll_)) snapShowAll_ = false;
-        ImGui::SameLine();
+        SameLineWrapIfNeeded(CalcButtonWidth(allLbl));
         if (RenderPillButton(allLbl, snapShowAll_)) snapShowAll_ = true;
 
-        ImGui::SameLine();
+        const char* copySnapLbl = hdm::Tr("Копировать###SnapCopyBtn", "Копіювати###SnapCopyBtn", "Copy###SnapCopyBtn");
+        SameLineWrapIfNeeded(CalcButtonWidth(copySnapLbl));
         ImGui::BeginDisabled(snapshotChangedCount_ == 0);
-        if (RenderSecondaryButton(hdm::Tr("Копировать###SnapCopyBtn", "Копіювати###SnapCopyBtn", "Copy###SnapCopyBtn"))) {
+        if (RenderSecondaryButton(copySnapLbl)) {
             std::ostringstream oss;
             oss << "## DriverLoom Before / After (" << baselineTimestamp_ << ")\n";
             for (const auto& r : snapshotDiffRows_) {
@@ -730,15 +783,15 @@ void DriverLoomApp::RenderDiagnosticsTab() {
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("%s", hdm::Tr("Проверка системных файлов:", "Перевірка системних файлів:", "System File Check:"));
         ImGui::BeginDisabled(busy);
-        ImGui::SameLine(0.0f, 10.0f);
+        SameLineWrapIfNeeded(CalcButtonWidth("SFC /scannow"));
         if (RenderSecondaryButton("SFC /scannow")) {
             diagnostics_.RunMaintenanceAsync(hdm::MaintenanceAction::SfcScan, "", devicesCache_, MakeLogger());
         }
-        ImGui::SameLine();
+        SameLineWrapIfNeeded(CalcButtonWidth("DISM CheckHealth"));
         if (RenderSecondaryButton("DISM CheckHealth")) {
             diagnostics_.RunMaintenanceAsync(hdm::MaintenanceAction::DismCheckHealth, "", devicesCache_, MakeLogger());
         }
-        ImGui::SameLine();
+        SameLineWrapIfNeeded(CalcButtonWidth("DISM RestoreHealth"));
         if (RenderSecondaryButton("DISM RestoreHealth")) {
             diagnostics_.RunMaintenanceAsync(hdm::MaintenanceAction::DismRestoreHealth, "", devicesCache_, MakeLogger());
         }

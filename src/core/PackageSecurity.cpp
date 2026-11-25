@@ -1,11 +1,13 @@
 #include "core/PackageSecurity.hpp"
 #include "core/OnlineCatalogClient.hpp"
 
+#include <bcrypt.h>
 #include <objbase.h>
 #include <oleauto.h>
 #include <setupapi.h>
 #include <shldisp.h>
 #include <softpub.h>
+#include <wincrypt.h>
 #include <wintrust.h>
 
 #include <algorithm>
@@ -14,6 +16,7 @@
 #include <fstream>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 namespace hdm {
 
@@ -51,7 +54,7 @@ bool CreateUniqueTempWorkDir(std::filesystem::path& outDir, std::string* outErro
         if (FAILED(CoCreateGuid(&guid))) {
             continue;
         }
-        wchar_t suffix[40]{};
+        wchar_t suffix[64]{};
         std::swprintf(
             suffix,
             std::size(suffix),
@@ -322,10 +325,142 @@ UINT CALLBACK CabExtractCallback(PVOID ctx, UINT notification, UINT_PTR param1, 
     return NO_ERROR;
 }
 
+namespace {
+
+std::string ReadCertFieldUtf8(PCCERT_CONTEXT cert, DWORD type, void* typePara) {
+    if (cert == nullptr) {
+        return {};
+    }
+    const DWORD needed = CertGetNameStringW(cert, type, 0, typePara, nullptr, 0);
+    if (needed <= 1) {
+        return {};
+    }
+    std::wstring buf(static_cast<size_t>(needed), L'\0');
+    const DWORD written = CertGetNameStringW(cert, type, 0, typePara, buf.data(), needed);
+    if (written <= 1) {
+        return {};
+    }
+    return WideToUtf8(buf.c_str());
+}
+
+bool MatchesAnyPublisher(
+    const std::string& subjectLower,
+    const std::string& cnLower,
+    const std::string& orgLower,
+    const std::vector<std::string_view>& allowedPublishers) {
+    if (allowedPublishers.empty()) {
+        return true;
+    }
+    for (std::string_view rawToken : allowedPublishers) {
+        const std::string token = ToLowerAscii(rawToken);
+        if (token.empty()) {
+            continue;
+        }
+        if (cnLower.find(token) != std::string::npos ||
+            orgLower.find(token) != std::string::npos ||
+            subjectLower.find(token) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
+bool ComputeFileSha256Hex(
+    const std::filesystem::path& filePath,
+    std::string& outHex,
+    std::string* outReason) {
+    outHex.clear();
+    const std::wstring wPath = filePath.wstring();
+    HandleGuard file(CreateFileW(
+        wPath.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
+        nullptr));
+    if (!file.IsValid()) {
+        if (outReason != nullptr) *outReason = FormatWin32Error(GetLastError());
+        return false;
+    }
+    BY_HANDLE_FILE_INFORMATION fi{};
+    if (!GetFileInformationByHandle(file.Get(), &fi) ||
+        (fi.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+        if (outReason != nullptr) *outReason = "Файл является точкой повторного анализа или каталогом.";
+        return false;
+    }
+
+    struct BcryptAlgGuard {
+        BCRYPT_ALG_HANDLE h{nullptr};
+        ~BcryptAlgGuard() {
+            if (h != nullptr) BCryptCloseAlgorithmProvider(h, 0);
+        }
+    } alg;
+    if (BCryptOpenAlgorithmProvider(&alg.h, BCRYPT_SHA256_ALGORITHM, nullptr, 0) < 0) {
+        if (outReason != nullptr) *outReason = "Не удалось инициализировать CNG SHA-256.";
+        return false;
+    }
+
+    DWORD hashObjSize = 0;
+    DWORD cbData = 0;
+    if (BCryptGetProperty(
+            alg.h, BCRYPT_OBJECT_LENGTH, reinterpret_cast<PUCHAR>(&hashObjSize),
+            sizeof(hashObjSize), &cbData, 0) < 0 ||
+        hashObjSize == 0) {
+        if (outReason != nullptr) *outReason = "Ошибка получения размера хэш-объекта SHA-256.";
+        return false;
+    }
+
+    struct BcryptHashGuard {
+        BCRYPT_HASH_HANDLE h{nullptr};
+        ~BcryptHashGuard() {
+            if (h != nullptr) BCryptDestroyHash(h);
+        }
+    } hash;
+    std::vector<UCHAR> hashObj(hashObjSize);
+    if (BCryptCreateHash(alg.h, &hash.h, hashObj.data(), hashObjSize, nullptr, 0, 0) < 0) {
+        if (outReason != nullptr) *outReason = "Не удалось создать контекст SHA-256.";
+        return false;
+    }
+
+    std::vector<UCHAR> readBuf(65536);
+    for (;;) {
+        DWORD bytesRead = 0;
+        if (!ReadFile(file.Get(), readBuf.data(), static_cast<DWORD>(readBuf.size()), &bytesRead, nullptr)) {
+            if (outReason != nullptr) *outReason = FormatWin32Error(GetLastError());
+            return false;
+        }
+        if (bytesRead == 0) {
+            break;
+        }
+        if (BCryptHashData(hash.h, readBuf.data(), bytesRead, 0) < 0) {
+            if (outReason != nullptr) *outReason = "Ошибка вычисления SHA-256.";
+            return false;
+        }
+    }
+
+    UCHAR digest[32]{};
+    if (BCryptFinishHash(hash.h, digest, sizeof(digest), 0) < 0) {
+        if (outReason != nullptr) *outReason = "Не удалось завершить вычисление SHA-256.";
+        return false;
+    }
+
+    static constexpr char kHex[] = "0123456789abcdef";
+    outHex.reserve(64);
+    for (UCHAR b : digest) {
+        outHex.push_back(kHex[(b >> 4) & 0x0Fu]);
+        outHex.push_back(kHex[b & 0x0Fu]);
+    }
+    return true;
+}
+
 bool VerifyAndLockAuthenticodeFile(
     const std::filesystem::path& filePath,
     HandleGuard* outReadLock,
-    std::string* outReason) {
+    std::string* outReason,
+    const std::vector<std::string_view>& allowedPublishers) {
     if (outReadLock != nullptr) {
         outReadLock->Reset();
     }
@@ -348,11 +483,19 @@ bool VerifyAndLockAuthenticodeFile(
         FILE_SHARE_READ,
         nullptr,
         OPEN_EXISTING,
-        FILE_ATTRIBUTE_NORMAL,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr));
     if (!fileLock.IsValid()) {
         if (outReason != nullptr) {
             *outReason = FormatWin32Error(GetLastError());
+        }
+        return false;
+    }
+    BY_HANDLE_FILE_INFORMATION bhfi{};
+    if (!GetFileInformationByHandle(fileLock.Get(), &bhfi) ||
+        (bhfi.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+        if (outReason != nullptr) {
+            *outReason = "Файл является точкой повторного анализа или каталогом.";
         }
         return false;
     }
@@ -388,6 +531,41 @@ bool VerifyAndLockAuthenticodeFile(
         static_cast<HWND>(INVALID_HANDLE_VALUE), &policyGuid, &trustData);
 
     if (status == ERROR_SUCCESS) {
+        if (!allowedPublishers.empty()) {
+            bool signerMatched = false;
+            std::string actualSigner;
+            CRYPT_PROVIDER_DATA* provData = WTHelperProvDataFromStateData(trustData.hWVTStateData);
+            if (provData != nullptr) {
+                CRYPT_PROVIDER_SGNR* signer = WTHelperGetProvSignerFromChain(provData, 0, FALSE, 0);
+                if (signer != nullptr) {
+                    CRYPT_PROVIDER_CERT* leafCert = WTHelperGetProvCertFromChain(signer, 0);
+                    if (leafCert != nullptr && leafCert->pCert != nullptr) {
+                        const std::string simple = ReadCertFieldUtf8(
+                            leafCert->pCert, CERT_NAME_SIMPLE_DISPLAY_TYPE, nullptr);
+                        const std::string cn = ReadCertFieldUtf8(
+                            leafCert->pCert, CERT_NAME_ATTR_TYPE,
+                            const_cast<LPSTR>(szOID_COMMON_NAME));
+                        const std::string org = ReadCertFieldUtf8(
+                            leafCert->pCert, CERT_NAME_ATTR_TYPE,
+                            const_cast<LPSTR>(szOID_ORGANIZATION_NAME));
+                        actualSigner = !org.empty() ? org : (!cn.empty() ? cn : simple);
+                        signerMatched = MatchesAnyPublisher(
+                            ToLowerAscii(simple),
+                            ToLowerAscii(cn),
+                            ToLowerAscii(org),
+                            allowedPublishers);
+                    }
+                }
+            }
+            if (!signerMatched) {
+                if (outReason != nullptr) {
+                    *outReason = actualSigner.empty()
+                                     ? "Не удалось определить издателя сертификата."
+                                     : ("Неожиданный издатель подписи: " + actualSigner);
+                }
+                return false;
+            }
+        }
         if (outReadLock != nullptr) {
             *outReadLock = std::move(fileLock);
         }
@@ -397,6 +575,41 @@ bool VerifyAndLockAuthenticodeFile(
         *outReason = FormatWin32Error(static_cast<DWORD>(status));
     }
     return false;
+}
+
+bool VerifyExtractedDirectoryBinaries(
+    const std::filesystem::path& dir,
+    const std::vector<std::string_view>& allowedPublishers,
+    std::string* outReason) {
+    std::error_code ec;
+    for (std::filesystem::recursive_directory_iterator it(
+             dir,
+             std::filesystem::directory_options::skip_permission_denied,
+             ec);
+         !ec && it != std::filesystem::recursive_directory_iterator();
+         it.increment(ec)) {
+        const DWORD attrs = GetFileAttributesW(it->path().c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            if (outReason != nullptr) {
+                *outReason = "Обнаружена точка повторного анализа (reparse point) в распакованном архиве.";
+            }
+            return false;
+        }
+        if ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            continue;
+        }
+        const std::string ext = ToLowerAscii(WideToUtf8(it->path().extension().wstring()));
+        if (ext == ".exe" || ext == ".dll" || ext == ".sys" || ext == ".msi" || ext == ".cab") {
+            std::string reason;
+            if (!VerifyAndLockAuthenticodeFile(it->path(), nullptr, &reason, allowedPublishers)) {
+                if (outReason != nullptr) {
+                    *outReason = WideToUtf8(it->path().filename().wstring()) + ": " + reason;
+                }
+                return false;
+            }
+        }
+    }
+    return !ec;
 }
 
 bool LaunchAndWaitProcess(
@@ -413,8 +626,10 @@ bool LaunchAndWaitProcess(
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
     sei.lpVerb = IsProcessElevated() ? L"open" : L"runas";
     const std::wstring wFile = exePath.wstring();
+    const std::wstring wDir = exePath.parent_path().wstring();
     sei.lpFile = wFile.c_str();
     sei.lpParameters = args.empty() ? nullptr : args.c_str();
+    sei.lpDirectory = wDir.empty() ? nullptr : wDir.c_str();
     sei.nShow = SW_SHOWNORMAL;
 
     if (!ShellExecuteExW(&sei)) {

@@ -5,7 +5,7 @@
 #include <cstdio>
 
 void DriverLoomApp::RenderOverviewTab() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     const bool isAppForeground = (GetForegroundWindow() == hwnd_);
 
     const bool scanning = scanner_.IsScanning() || componentsScanner_.IsScanning() ||

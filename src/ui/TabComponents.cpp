@@ -58,7 +58,7 @@ void DriverLoomApp::RebuildComponentsViewCache(ImGuiTableSortSpecs* sortSpecs) {
 }
 
 void DriverLoomApp::RenderComponentsTab() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     const ImGuiStyle& style = ImGui::GetStyle();
     const bool isAppForeground = (GetForegroundWindow() == hwnd_);
 
@@ -326,7 +326,9 @@ void DriverLoomApp::RenderComponentsTab() {
         PushFontSafe(g_fontSmall);
         const float smallTextH = ImGui::GetTextLineHeight();
         const float badgeH = smallTextH + std::round(6.0f * uiScale);
-        const float badgeEstW = ImGui::CalcTextSize(shortBadge).x + std::round(30.0f * uiScale);
+        const float badgePadW = std::round(30.0f * uiScale);
+        const float badgeEstW = ImGui::CalcTextSize(shortBadge).x + badgePadW;
+        const float badgeMaxW = std::min(badgeEstW, std::max(72.0f * uiScale, leftTextMaxW * 0.44f));
         PopFontSafe(g_fontSmall);
 
         PushFontSafe(g_fontSecondaryHeader);
@@ -337,20 +339,26 @@ void DriverLoomApp::RenderComponentsTab() {
         const float lineGapY = std::round(5.0f * uiScale);
         const float leftBlockH = line1H + lineGapY + smallTextH;
         const float line1TopY = std::max(rowPadY, std::round((cardH - leftBlockH) * 0.5f));
+        const float titleGapX = std::round(10.0f * uiScale);
 
         ImGui::SetCursorPosY(line1TopY);
         ImGui::BeginGroup();
         {
             PushFontSafe(g_fontSecondaryHeader);
             ImGui::SetCursorPosY(line1TopY + std::max(0.0f, (line1H - titleH) * 0.5f));
-            const std::string shownTitle = EllipsizeUtf8(nameShown, std::max(80.0f, leftTextMaxW - badgeEstW - 10.0f));
+            const std::string shownTitle = EllipsizeUtf8(
+                nameShown, std::max(80.0f * uiScale, leftTextMaxW - badgeMaxW - titleGapX));
+            const float shownTitleW = ImGui::CalcTextSize(shownTitle.c_str()).x;
             ImGui::TextColored(CardHeaderTextColor(), "%s", shownTitle.c_str());
             PopFontSafe(g_fontSecondaryHeader);
 
-            ImGui::SameLine(0.0f, std::round(10.0f * uiScale));
+            const float remainingBadgeW = std::max(
+                52.0f * uiScale,
+                leftTextMaxW - shownTitleW - titleGapX);
+            ImGui::SameLine(0.0f, titleGapX);
             PushFontSafe(g_fontSmall);
             ImGui::SetCursorPosY(line1TopY + std::max(0.0f, (line1H - badgeH) * 0.5f));
-            RenderStatusBadge(badgeCol, shortBadge, false);
+            RenderStatusBadge(badgeCol, shortBadge, false, remainingBadgeW);
             PopFontSafe(g_fontSmall);
 
             ImGui::SetCursorPosY(line1TopY + line1H + lineGapY);

@@ -33,6 +33,7 @@ UINT g_resizeWidth = 0;
 UINT g_resizeHeight = 0;
 
 DriverLoomApp* g_appInstance = nullptr;
+HWND g_mainHwnd = nullptr;
 bool g_isRenderingFrame = false;
 bool g_pendingDpiReload = false;
 float g_pendingDpiScale = 1.0f;
@@ -396,9 +397,10 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-        const float scale = (g_dpiScale > 0.5f ? g_dpiScale : 1.0f);
-        LONG minW = static_cast<LONG>(std::round(980.0f * scale));
-        LONG minH = static_cast<LONG>(std::round(640.0f * scale));
+        const float dpi = (g_dpiScale > 0.5f ? g_dpiScale : 1.0f);
+        const float minScale = std::min(dpi, EffectiveUiScale());
+        LONG minW = static_cast<LONG>(std::round(980.0f * minScale));
+        LONG minH = static_cast<LONG>(std::round(640.0f * minScale));
         HMONITOR mon = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi{};
         mi.cbSize = sizeof(mi);
@@ -449,6 +451,19 @@ void RenderSingleFrame(
     if (g_mainRenderTargetView == nullptr) {
         g_isRenderingFrame = false;
         return;
+    }
+
+    if (g_pendingDpiReload || g_pendingScaleReload) {
+        if (g_pendingDpiReload) {
+            g_dpiScale = g_pendingDpiScale;
+            g_pendingDpiReload = false;
+        }
+        g_pendingScaleReload = false;
+        const float effScale = EffectiveUiScale();
+        ApplyAppTheme(g_mainHwnd, effScale, g_isLightTheme, true);
+        ImGui_ImplDX11_InvalidateDeviceObjects();
+        LoadAppFonts(effScale);
+        ImGui_ImplDX11_CreateDeviceObjects();
     }
 
     ImGui_ImplDX11_NewFrame();
@@ -533,6 +548,8 @@ void RenderSingleFrame(
 } // namespace
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+
     const int cliExit = RunCliModeIfRequested();
     if (cliExit >= 0) {
         return cliExit;
@@ -591,6 +608,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                         g_isLightTheme = true;
                     } else if (themeArg == L"dark" || themeArg == L"DARK") {
                         g_isLightTheme = false;
+                    }
+                } else if (arg == L"--scale" && i + 1 < argc) {
+                    const int scalePct = _wtoi(argv[++i]);
+                    if (scalePct >= 80 && scalePct <= 175) {
+                        g_uiScalePercent = scalePct;
                     }
                 }
             }
@@ -651,6 +673,30 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         UnregisterClassW(wc.lpszClassName, wc.hInstance);
         return 1;
     }
+    g_mainHwnd = hwnd;
+
+    g_dpiScale = ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd);
+    if (g_dpiScale > 0.5f) {
+        int initW = static_cast<int>(std::round(1280.0f * g_dpiScale));
+        int initH = static_cast<int>(std::round(820.0f * g_dpiScale));
+        HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (mon != nullptr && GetMonitorInfoW(mon, &mi)) {
+            const int workW = mi.rcWork.right - mi.rcWork.left;
+            const int workH = mi.rcWork.bottom - mi.rcWork.top;
+            if (workW > 480) initW = std::min(initW, workW);
+            if (workH > 360) initH = std::min(initH, workH);
+        }
+        SetWindowPos(
+            hwnd,
+            nullptr,
+            0,
+            0,
+            initW,
+            initH,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
 
     SetWindowTitleBarDark(hwnd, !g_isLightTheme);
 
@@ -673,8 +719,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
 
     g_dpiScale = ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd);
-    ApplyAppTheme(hwnd, g_dpiScale, g_isLightTheme, true);
-    LoadAppFonts(g_dpiScale);
+    const float startupScale = EffectiveUiScale();
+    ApplyAppTheme(hwnd, startupScale, g_isLightTheme, true);
+    LoadAppFonts(startupScale);
 
     ImGui_ImplWin32_Init(hwnd);
     ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
@@ -714,18 +761,11 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
             }
             g_swapChainOccluded = false;
 
-            if (g_pendingDpiReload) {
-                g_dpiScale = g_pendingDpiScale;
-                g_pendingDpiReload = false;
-                ApplyAppTheme(hwnd, g_dpiScale, g_isLightTheme, true);
-                ImGui_ImplDX11_InvalidateDeviceObjects();
-                LoadAppFonts(g_dpiScale);
-                ImGui_ImplDX11_CreateDeviceObjects();
-            }
-
             RenderSingleFrame(&screenshotPath, &screenshotTaken, &done, &captureSuiteDir, &suiteStep);
         }
     }
+
+    g_mainHwnd = nullptr;
 
     ImGui_ImplDX11_Shutdown();
     ImGui_ImplWin32_Shutdown();

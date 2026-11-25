@@ -732,7 +732,7 @@ CatalogDriverMatch ResolveMsCatalogDriverCab(const std::string& searchKey) {
         if (cabUrl.rfind("http://", 0) == 0) {
             cabUrl.replace(0, 7, "https://");
         }
-        if (cabUrl.rfind("https://", 0) == 0) {
+        if (IsAllowedHttpsHost(cabUrl, {"download.windowsupdate.com", "windowsupdate.com"})) {
             return {bestVer, cabUrl, bestDateYmd};
         }
         cabPos += 4;
@@ -748,6 +748,7 @@ WingetManifestInfo ParseWingetInstallerYaml(
     struct Entry {
         std::string arch;
         std::string url;
+        std::string sha256;
         std::string installerType;
         std::string nestedPath;
         std::string silent;
@@ -758,9 +759,24 @@ WingetManifestInfo ParseWingetInstallerYaml(
     bool inNestedFiles = false;
     size_t nestedIndent = std::string::npos;
     std::string topType;
+    std::string topSha256;
     std::string topNestedPath;
     std::string topSilent;
     std::string topSilentProgress;
+
+    auto normalizeSha256 = [](std::string_view raw) -> std::string {
+        std::string hex = ToLowerAscii(TrimCopy(raw));
+        if (hex.size() != 64) {
+            return {};
+        }
+        for (char c : hex) {
+            const bool isHex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            if (!isHex) {
+                return {};
+            }
+        }
+        return hex;
+    };
 
     std::istringstream iss(yaml);
     std::string rawLine;
@@ -822,6 +838,8 @@ WingetManifestInfo ParseWingetInstallerYaml(
                 info.version = val;
             } else if (key == "InstallerType" && !val.empty()) {
                 topType = ToLowerAscii(val);
+            } else if (key == "InstallerSha256" && !val.empty()) {
+                topSha256 = normalizeSha256(val);
             } else if (key == "RelativeFilePath" && inNestedFiles && !val.empty() &&
                        topNestedPath.empty()) {
                 topNestedPath = val;
@@ -844,6 +862,8 @@ WingetManifestInfo ParseWingetInstallerYaml(
             current.arch = ToLowerAscii(val);
         } else if (key == "InstallerUrl" && !val.empty()) {
             current.url = val;
+        } else if (key == "InstallerSha256" && !val.empty()) {
+            current.sha256 = normalizeSha256(val);
         } else if (key == "InstallerType" && !val.empty()) {
             current.installerType = ToLowerAscii(val);
         } else if (key == "RelativeFilePath" && !val.empty() && current.nestedPath.empty()) {
@@ -913,6 +933,7 @@ WingetManifestInfo ParseWingetInstallerYaml(
 
     info.ok = !info.version.empty() && !chosen->url.empty();
     info.url = chosen->url;
+    info.sha256 = !chosen->sha256.empty() ? chosen->sha256 : topSha256;
     const std::string& rawNested = !chosen->nestedPath.empty() ? chosen->nestedPath : topNestedPath;
     if (IsSafeRelativeInstallerPath(rawNested)) {
         info.nestedRelativePath = TrimCopy(rawNested);

@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace hdm {
 
@@ -42,10 +43,24 @@ bool ExtractZipViaShellCom(
     const std::filesystem::path& destDir);
 UINT CALLBACK CabExtractCallback(PVOID ctx, UINT notification, UINT_PTR param1, UINT_PTR param2);
 
-/// Verifies Authenticode chain with revocation checking while holding a FILE_SHARE_READ handle.
+/// Computes lowercase SHA-256 hex digest of a file using Windows CNG.
+bool ComputeFileSha256Hex(
+    const std::filesystem::path& filePath,
+    std::string& outHex,
+    std::string* outReason);
+
+/// Verifies Authenticode chain with revocation checking (and optional signer publisher pinning)
+/// while holding a FILE_SHARE_READ handle.
 bool VerifyAndLockAuthenticodeFile(
     const std::filesystem::path& filePath,
     HandleGuard* outReadLock,
+    std::string* outReason,
+    const std::vector<std::string_view>& allowedPublishers = {});
+
+/// Verifies every executable/library binary extracted into a temporary folder.
+bool VerifyExtractedDirectoryBinaries(
+    const std::filesystem::path& dir,
+    const std::vector<std::string_view>& allowedPublishers,
     std::string* outReason);
 
 /// Launches a verified installer via ShellExecuteExW and waits with cancellation support.

@@ -311,6 +311,9 @@ void MergeOnlineMetadataIntoRefreshed(
                 if (!oldItem.directInstallerUrl.empty()) {
                     newItem.directInstallerUrl = oldItem.directInstallerUrl;
                 }
+                if (!oldItem.expectedSha256.empty()) {
+                    newItem.expectedSha256 = oldItem.expectedSha256;
+                }
                 if (!oldItem.installerArgs.empty()) {
                     newItem.installerArgs = oldItem.installerArgs;
                 }
@@ -806,8 +809,10 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                         ? ParseLatestVulkanRuntimeFromJson(resp.body)
                         : std::pair<std::string, std::string>{};
                 updateItem("rt_vulkan", [&](SystemComponentItem& item) {
-                    if (!vkLatest.empty() && !vkUrl.empty()) {
+                    if (!vkLatest.empty() && !vkUrl.empty() &&
+                        IsAllowedHttpsHost(vkUrl, {"lunarg.com"})) {
                         item.directInstallerUrl = vkUrl;
+                        item.expectedSha256.clear();
                         item.installerArgs = "";
                         ApplyResolvedVersionToItem(item, vkLatest, "Не найден");
                     } else {
@@ -825,7 +830,11 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                 const HttpResponse resp = WinHttpRequest(
                     L"https://steelseries.com/gg/downloads/gg/latest/windows", L"HEAD", false);
                 std::string ver;
-                std::string url = IsHttpsUrl(resp.locationHeader) ? resp.locationHeader : std::string{};
+                std::string url =
+                    IsAllowedHttpsHost(resp.locationHeader, {"steelseries.com", "steelseriescdn.com"})
+                        ? resp.locationHeader
+                        : std::string{};
+                std::string sha256;
                 if (!url.empty()) {
                     const size_t ggPos = url.find("SteelSeriesGG");
                     if (ggPos != std::string::npos) {
@@ -840,12 +849,18 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                     const WingetManifestInfo wm = ResolveWingetPkgManifest("s/SteelSeries/GG", "x64");
                     if (wm.ok) {
                         ver = wm.version;
-                        if (url.empty()) url = wm.url;
+                        if (url.empty()) {
+                            url = wm.url;
+                            sha256 = wm.sha256;
+                        } else if (wm.url == url) {
+                            sha256 = wm.sha256;
+                        }
                     }
                 }
                 updateItem("sw_steelseries", [&](SystemComponentItem& item) {
                     if (!url.empty()) {
                         item.directInstallerUrl = url;
+                        item.expectedSha256 = sha256;
                     }
                     if (!ver.empty()) {
                         ApplyResolvedVersionToItem(item, ver, "Не установлено");
@@ -875,8 +890,9 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                     const std::string nvVer = ExtractJsonStringField(resp.body, "Version");
                     const std::string nvUrl = ExtractJsonStringField(resp.body, "DownloadURL");
                     updateItem("gpu_nvidia", [&](SystemComponentItem& item) {
-                        if (!nvUrl.empty()) {
+                        if (!nvUrl.empty() && IsAllowedHttpsHost(nvUrl, {"nvidia.com"})) {
                             item.directInstallerUrl = nvUrl;
+                            item.expectedSha256.clear();
                             item.installerArgs = "";
                         }
                         if (!nvVer.empty()) {
@@ -897,8 +913,9 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                 const auto [amdVer, amdUrl] = ParseAmdAdrenalinFromHtml(resp.body);
                 updateItem("gpu_amd", [&](SystemComponentItem& item) {
                     item.onlineChecked = true;
-                    if (!amdUrl.empty()) {
+                    if (!amdUrl.empty() && IsAllowedHttpsHost(amdUrl, {"amd.com"})) {
                         item.directInstallerUrl = amdUrl;
+                        item.expectedSha256.clear();
                         item.installerArgs = "";
                     }
                     if (!amdVer.empty()) {
@@ -918,8 +935,9 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                 const auto [chipVer, chipUrl] = ParseAmdChipsetFromHtml(resp.body);
                 updateItem("chip_amd", [&](SystemComponentItem& item) {
                     item.onlineChecked = true;
-                    if (!chipUrl.empty()) {
+                    if (!chipUrl.empty() && IsAllowedHttpsHost(chipUrl, {"amd.com"})) {
                         item.directInstallerUrl = chipUrl;
+                        item.expectedSha256.clear();
                     }
                     if (!chipVer.empty()) {
                         ApplyResolvedVersionToItem(item, chipVer, "Не установлен");
@@ -974,6 +992,7 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                         if (wm.ok) {
                             if (!wm.url.empty()) {
                                 item.directInstallerUrl = wm.url;
+                                item.expectedSha256 = wm.sha256;
                             }
                             if (!wm.nestedRelativePath.empty()) {
                                 item.nestedInstallerHint = wm.nestedRelativePath;
@@ -1082,6 +1101,150 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
     });
 }
 
+namespace {
+
+std::string ExtractRegistrableDomain(std::string_view host) {
+    if (host.empty()) {
+        return {};
+    }
+    const size_t lastDot = host.rfind('.');
+    if (lastDot == std::string_view::npos || lastDot == 0) {
+        return std::string(host);
+    }
+    const size_t prevDot = host.rfind('.', lastDot - 1);
+    if (prevDot == std::string_view::npos) {
+        return std::string(host);
+    }
+    return std::string(host.substr(prevDot + 1));
+}
+
+std::vector<std::string_view> GetAllowedDownloadHostsForItem(
+    const SystemComponentItem& item,
+    bool isCabPackage,
+    std::string& scratchDomainStorage) {
+    scratchDomainStorage.clear();
+    if (isCabPackage || item.id == "catalog_autoinstall" ||
+        item.id.rfind("catalog_", 0) == 0) {
+        return {"download.windowsupdate.com", "windowsupdate.com"};
+    }
+    if (item.id == "rt_vcredist_x64" || item.id == "rt_vcredist_x86" ||
+        item.id == "rt_vc2013" || item.id == "rt_vc2012" || item.id == "rt_vc2010" ||
+        item.id == "rt_dx_legacy" || item.id == "rt_dotnet8" || item.id == "rt_dotnet9" ||
+        item.id == "rt_dotnet10" || item.id == "rt_netfx48" || item.id == "rt_webview2") {
+        return {"microsoft.com", "aka.ms", "windowsupdate.com", "azureedge.net", "msecnd.net"};
+    }
+    if (item.id == "rt_vulkan") {
+        return {"lunarg.com"};
+    }
+    if (item.id == "rt_openal") {
+        return {"openal.org"};
+    }
+    if (item.id == "gpu_nvidia") {
+        return {"nvidia.com"};
+    }
+    if (item.id == "gpu_amd" || item.id == "chip_amd") {
+        return {"amd.com"};
+    }
+    if (item.id == "intel_dsa") {
+        return {"intel.com", "aka.ms"};
+    }
+    if (item.id == "sw_steelseries") {
+        return {"steelseries.com", "steelseriescdn.com", "github.com", "githubusercontent.com"};
+    }
+    if (item.id == "sw_logitech") {
+        return {"logi.com", "logitech.com", "logitechg.com", "github.com", "githubusercontent.com"};
+    }
+    if (item.id == "sw_corsair") {
+        return {"corsair.com", "github.com", "githubusercontent.com"};
+    }
+    if (item.id == "sw_asus") {
+        return {"asus.com", "github.com", "githubusercontent.com"};
+    }
+
+    const std::string host = ExtractHttpsHost(item.directInstallerUrl);
+    scratchDomainStorage = ExtractRegistrableDomain(host);
+    std::vector<std::string_view> hosts;
+    if (!scratchDomainStorage.empty()) {
+        hosts.push_back(scratchDomainStorage);
+    }
+    hosts.push_back("github.com");
+    hosts.push_back("githubusercontent.com");
+    hosts.push_back("aka.ms");
+    hosts.push_back("microsoft.com");
+    return hosts;
+}
+
+std::vector<std::string_view> GetExpectedPublishersForItem(
+    const SystemComponentItem& item,
+    bool isCabPackage) {
+    if (isCabPackage || item.id == "catalog_autoinstall" ||
+        item.id.rfind("catalog_", 0) == 0) {
+        return {"Microsoft", "Intel", "Realtek", "AMD", "Advanced Micro Devices",
+                "NVIDIA", "Broadcom", "Qualcomm", "MediaTek", "ASUSTeK", "ASUS"};
+    }
+    if (item.id == "rt_vcredist_x64" || item.id == "rt_vcredist_x86" ||
+        item.id == "rt_vc2013" || item.id == "rt_vc2012" || item.id == "rt_vc2010" ||
+        item.id == "rt_dx_legacy" || item.id == "rt_dotnet8" || item.id == "rt_dotnet9" ||
+        item.id == "rt_dotnet10" || item.id == "rt_netfx48" || item.id == "rt_webview2") {
+        return {"Microsoft"};
+    }
+    if (item.id == "rt_vulkan") {
+        return {"LunarG", "Khronos"};
+    }
+    if (item.id == "rt_openal") {
+        return {"Creative", "OpenAL"};
+    }
+    if (item.id == "gpu_nvidia") {
+        return {"NVIDIA"};
+    }
+    if (item.id == "gpu_amd" || item.id == "chip_amd") {
+        return {"AMD", "Advanced Micro Devices"};
+    }
+    if (item.id == "intel_dsa") {
+        return {"Intel"};
+    }
+    if (item.id == "sw_razer") {
+        return {"Razer"};
+    }
+    if (item.id == "sw_logitech") {
+        return {"Logitech"};
+    }
+    if (item.id == "sw_steelseries") {
+        return {"SteelSeries"};
+    }
+    if (item.id == "sw_corsair") {
+        return {"Corsair"};
+    }
+    if (item.id == "sw_asus") {
+        return {"ASUSTeK", "ASUS"};
+    }
+    if (item.id == "sw_epos") {
+        return {"EPOS", "Sennheiser", "DSEA"};
+    }
+    if (item.id == "sw_elgato") {
+        return {"Elgato", "Corsair"};
+    }
+
+    const std::string brandCheck = ToLowerAscii(item.vendor + " " + item.name);
+    if (brandCheck.find("asus") != std::string::npos) return {"ASUSTeK", "ASUS"};
+    if (brandCheck.find("dell") != std::string::npos) return {"Dell"};
+    if (brandCheck.find("msi") != std::string::npos) return {"Micro-Star", "MSI"};
+    if (brandCheck.find("samsung") != std::string::npos) return {"Samsung"};
+    if (brandCheck.find("philips") != std::string::npos) return {"Philips", "MMD", "TPV", "Portrait Displays"};
+    if (brandCheck.find("viewsonic") != std::string::npos) return {"ViewSonic"};
+    if (brandCheck.find("lg") != std::string::npos) return {"LG Electronics", "LG"};
+    if (brandCheck.find("benq") != std::string::npos) return {"BenQ"};
+    if (brandCheck.find("aoc") != std::string::npos) return {"AOC", "TPV"};
+    if (brandCheck.find("lenovo") != std::string::npos) return {"Lenovo"};
+    if (brandCheck.find("acer") != std::string::npos) return {"Acer"};
+    if (brandCheck.find("hp ") != std::string::npos || brandCheck.find("hewlett") != std::string::npos) {
+        return {"HP", "Hewlett"};
+    }
+    return {};
+}
+
+} // namespace
+
 bool SystemComponentsScanner::InstallSingleComponentSync(
     const SystemComponentItem& item,
     float baseProgress,
@@ -1125,6 +1288,12 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             "Загрузка официального установщика \"" + item.name + "\"...");
     }
 
+    std::string allowedDomainScratch;
+    const std::vector<std::string_view> allowedHosts =
+        GetAllowedDownloadHostsForItem(item, isCabPackage, allowedDomainScratch);
+    const std::vector<std::string_view> allowedPublishers =
+        GetExpectedPublishersForItem(item, isCabPackage);
+
     std::string errMsg;
     if (!DownloadFileViaWinHttp(
             Utf8ToWide(item.directInstallerUrl),
@@ -1133,7 +1302,8 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             &errMsg,
             baseProgress,
             progressSpan,
-            &cancelInstallRequested_)) {
+            &cancelInstallRequested_,
+            allowedHosts)) {
         if (!stopRequested_.load() && log) {
             log(cancelInstallRequested_.load() ? LogLevel::Warning : LogLevel::Error,
                 "Ошибка скачивания " + item.name + ": " + errMsg);
@@ -1142,11 +1312,32 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         return false;
     }
 
+    if (!item.expectedSha256.empty()) {
+        std::string actualSha;
+        std::string shaErr;
+        if (!ComputeFileSha256Hex(destFile, actualSha, &shaErr)) {
+            if (!stopRequested_.load() && log) {
+                log(LogLevel::Error, "Не удалось проверить SHA-256 пакета " + item.name + ": " + shaErr);
+            }
+            SetPhaseMessage("Ошибка проверки SHA-256");
+            return false;
+        }
+        if (ToLowerAscii(actualSha) != ToLowerAscii(item.expectedSha256)) {
+            if (!stopRequested_.load() && log) {
+                log(LogLevel::Error,
+                    "Контрольная сумма SHA-256 скачанного пакета " + item.name +
+                        " не совпадает с манифестом. Установка отменена.");
+            }
+            SetPhaseMessage("SHA-256 не совпадает");
+            return false;
+        }
+    }
+
     if (isCabPackage) {
         SetPhaseMessage("Проверка подписи CAB-пакета...");
         HandleGuard cabLock;
         std::string sigErr;
-        if (!VerifyAndLockAuthenticodeFile(destFile, &cabLock, &sigErr)) {
+        if (!VerifyAndLockAuthenticodeFile(destFile, &cabLock, &sigErr, allowedPublishers)) {
             if (!stopRequested_.load() && log) {
                 log(LogLevel::Error,
                     "Цифровая подпись CAB-пакета не прошла проверку (" + sigErr + ").");
@@ -1359,6 +1550,18 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             SetPhaseMessage("Установщик не найден");
             return false;
         }
+        if (item.expectedSha256.empty()) {
+            std::string dirSigErr;
+            if (!VerifyExtractedDirectoryBinaries(extractDir, allowedPublishers, &dirSigErr)) {
+                if (!stopRequested_.load() && log) {
+                    log(LogLevel::Error,
+                        "Содержимое распакованного архива не прошло проверку подписи (" +
+                            dirSigErr + "). Запуск отменён в целях безопасности.");
+                }
+                SetPhaseMessage("Подпись архива не подтверждена");
+                return false;
+            }
+        }
     }
 
     if (cancelInstallRequested_.load()) {
@@ -1369,7 +1572,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
     SetPhaseMessage("Проверка цифровой подписи Authenticode...");
     HandleGuard targetLock;
     std::string sigErr;
-    if (!VerifyAndLockAuthenticodeFile(targetExe, &targetLock, &sigErr)) {
+    if (!VerifyAndLockAuthenticodeFile(targetExe, &targetLock, &sigErr, allowedPublishers)) {
         if (!stopRequested_.load() && log) {
             log(LogLevel::Error,
                 "Цифровая подпись установщика не прошла проверку (" + sigErr +
@@ -1419,11 +1622,26 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
                 errorAlreadyLogged = true;
             } else if (std::filesystem::is_regular_file(dxSetup, ec)) {
                 HandleGuard dxSetupLock;
+                HandleGuard dsetupDllLock;
+                HandleGuard dsetup32DllLock;
+                const std::filesystem::path dsetupDll = dxExtractDir / L"DSETUP.dll";
+                const std::filesystem::path dsetup32Dll = dxExtractDir / L"dsetup32.dll";
+                const std::vector<std::string_view> msPub{"Microsoft"};
                 std::string dxSigErr;
-                if (!VerifyAndLockAuthenticodeFile(dxSetup, &dxSetupLock, &dxSigErr)) {
+                bool companionOk = true;
+                if (std::filesystem::is_regular_file(dsetupDll, ec)) {
+                    companionOk = VerifyAndLockAuthenticodeFile(
+                        dsetupDll, &dsetupDllLock, &dxSigErr, msPub);
+                }
+                if (companionOk && std::filesystem::is_regular_file(dsetup32Dll, ec)) {
+                    companionOk = VerifyAndLockAuthenticodeFile(
+                        dsetup32Dll, &dsetup32DllLock, &dxSigErr, msPub);
+                }
+                if (!companionOk ||
+                    !VerifyAndLockAuthenticodeFile(dxSetup, &dxSetupLock, &dxSigErr, msPub)) {
                     if (!stopRequested_.load() && log) {
                         log(LogLevel::Error,
-                            "Цифровая подпись DXSETUP.exe не прошла проверку (" + dxSigErr +
+                            "Цифровая подпись компонентов DirectX не прошла проверку (" + dxSigErr +
                                 "). Запуск отменён в целях безопасности.");
                     }
                     launchErr = ERROR_INVALID_DATA;
@@ -1437,6 +1655,8 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
                         &cancelInstallRequested_,
                         &stopRequested_);
                     dxSetupLock.Reset();
+                    dsetup32DllLock.Reset();
+                    dsetupDllLock.Reset();
                 }
             } else {
                 if (!stopRequested_.load() && log) {

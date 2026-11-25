@@ -34,6 +34,7 @@ struct SystemComponentItem {
     int latestDateYmd{0};
     std::string officialPageUrl;
     std::string directInstallerUrl;
+    std::string expectedSha256;
     std::string installerArgs;
     std::string nestedInstallerHint;
     std::string wingetRepoPath;

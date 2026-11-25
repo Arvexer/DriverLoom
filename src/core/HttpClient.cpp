@@ -2,14 +2,114 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cwctype>
 #include <utility>
 #include <vector>
+
+#ifndef WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3
+#define WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3 0x00002000
+#endif
 
 namespace hdm {
 
 namespace {
 
 thread_local HttpRequestRegistry* t_activeHttpRegistry = nullptr;
+
+void EnforceTls12Or13(HINTERNET sessionHandle) noexcept {
+    if (sessionHandle == nullptr) {
+        return;
+    }
+    DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+    if (!WinHttpSetOption(sessionHandle, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols))) {
+        protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+        WinHttpSetOption(sessionHandle, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols));
+    }
+}
+
+bool EqualsIgnoreCaseAscii(std::string_view a, std::string_view b) noexcept {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < a.size(); ++i) {
+        const unsigned char ca = static_cast<unsigned char>(a[i]);
+        const unsigned char cb = static_cast<unsigned char>(b[i]);
+        if (std::tolower(ca) != std::tolower(cb)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool MatchesAllowedHostSuffix(
+    std::string_view hostLower,
+    const std::vector<std::string_view>& allowedSuffixes) {
+    if (allowedSuffixes.empty()) {
+        return false;
+    }
+    for (std::string_view rawSuffix : allowedSuffixes) {
+        const std::string suffix = ToLowerAscii(rawSuffix);
+        if (suffix.empty()) {
+            continue;
+        }
+        if (hostLower == suffix) {
+            return true;
+        }
+        if (hostLower.size() > suffix.size() &&
+            hostLower[hostLower.size() - suffix.size() - 1] == '.' &&
+            EqualsIgnoreCaseAscii(
+                hostLower.substr(hostLower.size() - suffix.size()), suffix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool CrackHttpsUrl(
+    const std::wstring& url,
+    std::wstring& outHost,
+    std::wstring& outPath,
+    INTERNET_PORT& outPort) {
+    URL_COMPONENTS urlComp{};
+    urlComp.dwStructSize = sizeof(urlComp);
+    wchar_t hostBuf[256]{};
+    wchar_t pathBuf[2048]{};
+    urlComp.lpszHostName = hostBuf;
+    urlComp.dwHostNameLength = static_cast<DWORD>(std::size(hostBuf));
+    urlComp.lpszUrlPath = pathBuf;
+    urlComp.dwUrlPathLength = static_cast<DWORD>(std::size(pathBuf));
+    if (!WinHttpCrackUrl(url.c_str(), static_cast<DWORD>(url.size()), 0, &urlComp) ||
+        urlComp.nScheme != INTERNET_SCHEME_HTTPS || hostBuf[0] == L'\0') {
+        return false;
+    }
+    outHost.assign(hostBuf);
+    outPath.assign(pathBuf[0] != L'\0' ? pathBuf : L"/");
+    outPort = urlComp.nPort;
+    return true;
+}
+
+std::wstring ResolveRedirectTarget(
+    const std::wstring& currentHost,
+    INTERNET_PORT currentPort,
+    const std::wstring& rawLocation) {
+    if (rawLocation.empty()) {
+        return {};
+    }
+    if (rawLocation.rfind(L"https://", 0) == 0 || rawLocation.rfind(L"http://", 0) == 0) {
+        return rawLocation;
+    }
+    if (rawLocation.rfind(L"//", 0) == 0) {
+        return L"https:" + rawLocation;
+    }
+    std::wstring origin = L"https://" + currentHost;
+    if (currentPort != 0 && currentPort != INTERNET_DEFAULT_HTTPS_PORT) {
+        origin += L":" + std::to_wstring(currentPort);
+    }
+    if (rawLocation.front() == L'/') {
+        return origin + rawLocation;
+    }
+    return origin + L"/" + rawLocation;
+}
 
 class WinHttpGuard {
 public:
@@ -43,6 +143,10 @@ public:
         }
     }
     ~TrackedWinHttpRequestGuard() {
+        Reset();
+    }
+
+    void Reset(HINTERNET h = nullptr) noexcept {
         if (handle_ != nullptr) {
             if (registry_ != nullptr) {
                 registry_->CloseIfOwned(handle_);
@@ -50,6 +154,13 @@ public:
                 WinHttpCloseHandle(handle_);
             }
             handle_ = nullptr;
+        }
+        if (h != nullptr) {
+            handle_ = h;
+            if (registry_ != nullptr && !registry_->Register(handle_)) {
+                WinHttpCloseHandle(handle_);
+                handle_ = nullptr;
+            }
         }
     }
 
@@ -125,6 +236,29 @@ bool IsHttpsUrl(std::string_view url) {
     return url.size() > 8 && ToLowerAscii(url.substr(0, 8)) == "https://";
 }
 
+std::string ExtractHttpsHost(std::string_view url) {
+    if (!IsHttpsUrl(url)) {
+        return {};
+    }
+    std::wstring host;
+    std::wstring path;
+    INTERNET_PORT port = 0;
+    if (!CrackHttpsUrl(Utf8ToWide(url), host, path, port)) {
+        return {};
+    }
+    return ToLowerAscii(WideToUtf8(host));
+}
+
+bool IsAllowedHttpsHost(
+    std::string_view url,
+    const std::vector<std::string_view>& allowedSuffixes) {
+    const std::string host = ExtractHttpsHost(url);
+    if (host.empty()) {
+        return false;
+    }
+    return MatchesAllowedHostSuffix(host, allowedSuffixes);
+}
+
 std::string StripUrlQuery(std::string_view url) {
     const size_t q = url.find('?');
     return std::string(q == std::string_view::npos ? url : url.substr(0, q));
@@ -182,6 +316,7 @@ HttpResponse WinHttpRequest(
     if (!session.IsValid()) {
         return res;
     }
+    EnforceTls12Or13(session.Get());
     WinHttpSetTimeouts(session.Get(), 3000, 3000, 3500, 6000);
 
     WinHttpGuard connect(WinHttpConnect(session.Get(), hostBuf, urlComp.nPort, 0));
@@ -252,7 +387,14 @@ HttpResponse WinHttpRequest(
 
     if (std::wstring_view(method) != L"HEAD" && res.ok) {
         DWORD avail = 0;
-        while (WinHttpQueryDataAvailable(request.Get(), &avail) && avail > 0) {
+        for (;;) {
+            if (!WinHttpQueryDataAvailable(request.Get(), &avail)) {
+                res.ok = false;
+                break;
+            }
+            if (avail == 0) {
+                break;
+            }
             if (res.body.size() >= maxBytes) {
                 res.truncated = true;
                 break;
@@ -260,8 +402,11 @@ HttpResponse WinHttpRequest(
             const size_t toRead = std::min<size_t>(avail, maxBytes - res.body.size());
             std::string chunk(toRead, '\0');
             DWORD readBytes = 0;
-            if (!WinHttpReadData(request.Get(), chunk.data(), static_cast<DWORD>(toRead), &readBytes) ||
-                readBytes == 0) {
+            if (!WinHttpReadData(request.Get(), chunk.data(), static_cast<DWORD>(toRead), &readBytes)) {
+                res.ok = false;
+                break;
+            }
+            if (readBytes == 0) {
                 break;
             }
             chunk.resize(readBytes);
@@ -278,25 +423,8 @@ bool DownloadFileViaWinHttp(
     std::string* outError,
     float baseProgress,
     float progressSpan,
-    const std::atomic<bool>* cancelFlag) {
-    URL_COMPONENTS urlComp{};
-    urlComp.dwStructSize = sizeof(urlComp);
-    wchar_t hostBuf[256]{};
-    wchar_t pathBuf[2048]{};
-    urlComp.lpszHostName = hostBuf;
-    urlComp.dwHostNameLength = static_cast<DWORD>(std::size(hostBuf));
-    urlComp.lpszUrlPath = pathBuf;
-    urlComp.dwUrlPathLength = static_cast<DWORD>(std::size(pathBuf));
-
-    if (!WinHttpCrackUrl(url.c_str(), static_cast<DWORD>(url.size()), 0, &urlComp)) {
-        if (outError) *outError = "Некорректный URL загрузки.";
-        return false;
-    }
-    if (urlComp.nScheme != INTERNET_SCHEME_HTTPS) {
-        if (outError) *outError = "Загрузка разрешена только по защищённому протоколу HTTPS.";
-        return false;
-    }
-
+    const std::atomic<bool>* cancelFlag,
+    const std::vector<std::string_view>& allowedHostSuffixes) {
     WinHttpGuard session(WinHttpOpen(
         L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) DriverLoom/1.0",
         WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
@@ -307,54 +435,112 @@ bool DownloadFileViaWinHttp(
         if (outError) *outError = "Ошибка WinHttpOpen: " + FormatWin32Error(GetLastError());
         return false;
     }
+    EnforceTls12Or13(session.Get());
     WinHttpSetTimeouts(session.Get(), 5000, 5000, 10000, 60000);
 
-    WinHttpGuard connect(WinHttpConnect(session.Get(), hostBuf, urlComp.nPort, 0));
-    if (!connect.IsValid()) {
-        if (outError) *outError = "Ошибка WinHttpConnect: " + FormatWin32Error(GetLastError());
-        return false;
-    }
-
-    TrackedWinHttpRequestGuard request(WinHttpOpenRequest(
-        connect.Get(),
-        L"GET",
-        pathBuf,
-        nullptr,
-        WINHTTP_NO_REFERER,
-        WINHTTP_DEFAULT_ACCEPT_TYPES,
-        WINHTTP_FLAG_SECURE));
-    if (!request.IsValid()) {
-        if (outError) *outError = "Ошибка WinHttpOpenRequest: " + FormatWin32Error(GetLastError());
-        return false;
-    }
-
-    DWORD redirPolicy = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
-    WinHttpSetOption(request.Get(), WINHTTP_OPTION_REDIRECT_POLICY, &redirPolicy, sizeof(redirPolicy));
-
-    if (std::wstring_view(hostBuf).find(L"amd.com") != std::wstring_view::npos) {
-        WinHttpAddRequestHeaders(
-            request.Get(),
-            L"Referer: https://www.amd.com/\r\n",
-            static_cast<DWORD>(-1),
-            WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
-    }
-
-    if (!WinHttpSendRequest(request.Get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                            WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
-        !WinHttpReceiveResponse(request.Get(), nullptr)) {
-        if (outError) *outError = "Ошибка HTTP-запроса: " + FormatWin32Error(GetLastError());
-        return false;
-    }
-
+    std::wstring currentUrl = url;
+    WinHttpGuard connect;
+    TrackedWinHttpRequestGuard request;
     DWORD status = 0;
-    DWORD statusLen = sizeof(status);
-    WinHttpQueryHeaders(
-        request.Get(),
-        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_HEADER_NAME_BY_INDEX,
-        &status,
-        &statusLen,
-        WINHTTP_NO_HEADER_INDEX);
+
+    constexpr int kMaxRedirects = 8;
+    for (int hop = 0; hop <= kMaxRedirects; ++hop) {
+        if (cancelFlag != nullptr && cancelFlag->load()) {
+            if (outError) *outError = "Отменено пользователем.";
+            return false;
+        }
+        std::wstring host;
+        std::wstring path;
+        INTERNET_PORT port = 0;
+        if (!CrackHttpsUrl(currentUrl, host, path, port)) {
+            if (outError) {
+                *outError = IsHttpsUrl(WideToUtf8(currentUrl))
+                                ? "Некорректный URL загрузки."
+                                : "Загрузка разрешена только по защищённому протоколу HTTPS.";
+            }
+            return false;
+        }
+        if (!allowedHostSuffixes.empty()) {
+            const std::string hostLower = ToLowerAscii(WideToUtf8(host));
+            if (!MatchesAllowedHostSuffix(hostLower, allowedHostSuffixes)) {
+                if (outError) {
+                    *outError = "Хост загрузки не входит в доверенный список (" + hostLower + ").";
+                }
+                return false;
+            }
+        }
+
+        request.Reset();
+        connect.Reset(WinHttpConnect(session.Get(), host.c_str(), port, 0));
+        if (!connect.IsValid()) {
+            if (outError) *outError = "Ошибка WinHttpConnect: " + FormatWin32Error(GetLastError());
+            return false;
+        }
+
+        request.Reset(WinHttpOpenRequest(
+            connect.Get(),
+            L"GET",
+            path.c_str(),
+            nullptr,
+            WINHTTP_NO_REFERER,
+            WINHTTP_DEFAULT_ACCEPT_TYPES,
+            WINHTTP_FLAG_SECURE));
+        if (!request.IsValid()) {
+            if (outError) *outError = "Ошибка WinHttpOpenRequest: " + FormatWin32Error(GetLastError());
+            return false;
+        }
+
+        DWORD redirPolicy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        WinHttpSetOption(request.Get(), WINHTTP_OPTION_REDIRECT_POLICY, &redirPolicy, sizeof(redirPolicy));
+
+        if (host.find(L"amd.com") != std::wstring::npos) {
+            WinHttpAddRequestHeaders(
+                request.Get(),
+                L"Referer: https://www.amd.com/\r\n",
+                static_cast<DWORD>(-1),
+                WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+        }
+
+        if (!WinHttpSendRequest(request.Get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+            !WinHttpReceiveResponse(request.Get(), nullptr)) {
+            if (outError) *outError = "Ошибка HTTP-запроса: " + FormatWin32Error(GetLastError());
+            return false;
+        }
+
+        status = 0;
+        DWORD statusLen = sizeof(status);
+        WinHttpQueryHeaders(
+            request.Get(),
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX,
+            &status,
+            &statusLen,
+            WINHTTP_NO_HEADER_INDEX);
+
+        if (status == 301 || status == 302 || status == 303 || status == 307 || status == 308) {
+            if (hop == kMaxRedirects) {
+                if (outError) *outError = "Превышено число перенаправлений HTTP.";
+                return false;
+            }
+            wchar_t locBuf[2048]{};
+            DWORD locBytes = sizeof(locBuf);
+            if (!WinHttpQueryHeaders(
+                    request.Get(),
+                    WINHTTP_QUERY_LOCATION,
+                    WINHTTP_HEADER_NAME_BY_INDEX,
+                    locBuf,
+                    &locBytes,
+                    WINHTTP_NO_HEADER_INDEX) ||
+                locBuf[0] == L'\0') {
+                if (outError) *outError = "Сервер вернул пустой заголовок перенаправления.";
+                return false;
+            }
+            currentUrl = ResolveRedirectTarget(host, port, locBuf);
+            continue;
+        }
+        break;
+    }
     if (status < 200 || status >= 300) {
         if (outError) *outError = "Сервер вернул HTTP статус " + std::to_string(status);
         return false;

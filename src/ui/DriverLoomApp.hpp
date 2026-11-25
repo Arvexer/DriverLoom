@@ -130,16 +130,11 @@ private:
     bool exitRequested_{false};
     std::atomic<bool> rebootRequired_{false};
     std::atomic<bool> pendingDeviceRescan_{false};
+    std::atomic<bool> pendingDiagRescan_{false};
     bool silentDeviceRescan_{false};
     double lastFocusRefreshTime_{-10.0};
 
     hdm::LogBuffer logBuffer_;
-    hdm::DeviceScanner scanner_;
-    hdm::SystemComponentsScanner componentsScanner_;
-    hdm::SystemDiagnostics diagnostics_;
-    hdm::WindowsUpdateManager wuManager_;
-    hdm::LocalDriverInstaller localInstaller_;
-    hdm::SystemRestore systemRestore_;
 
     // System diagnostics snapshot & tab subview state
     hdm::SystemDiagnosticsSnapshot diagCache_;
@@ -228,6 +223,14 @@ private:
     std::atomic<bool> stopAppUpdate_{false};
     std::mutex appHttpMutex_;
     void* activeAppUpdateRequest_{nullptr};
+
+    // Background worker managers must be declared after caches, logBuffer_, and flags so they join first on destruction.
+    hdm::DeviceScanner scanner_;
+    hdm::SystemComponentsScanner componentsScanner_;
+    hdm::SystemDiagnostics diagnostics_;
+    hdm::WindowsUpdateManager wuManager_;
+    hdm::LocalDriverInstaller localInstaller_;
+    hdm::SystemRestore systemRestore_;
     std::thread appUpdateThread_;
     std::thread baselineSaveThread_;
 };

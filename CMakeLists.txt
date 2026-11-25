@@ -98,6 +98,8 @@ target_link_libraries(DriverLoom PRIVATE
     cfgmgr32
     winhttp
     wintrust
+    crypt32
+    bcrypt
     version
     uuid
     shell32
@@ -111,6 +113,7 @@ if(MSVC)
     target_link_libraries(DriverLoom PRIVATE wuguid)
     target_link_options(DriverLoom PRIVATE
         /MANIFEST:NO
+        /DEPENDENTLOADFLAG:0x800
         /GUARD:CF
         /DYNAMICBASE
         /NXCOMPAT

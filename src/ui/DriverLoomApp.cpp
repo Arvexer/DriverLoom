@@ -122,7 +122,7 @@ bool DriverLoomApp::IsUserRelevantDeviceIssue(const hdm::DeviceInfo& d) {
 
 void DriverLoomApp::RenderFrame() {
     if (pendingThemeChange_ >= 0) {
-        ApplyAppTheme(hwnd_, g_dpiScale, pendingThemeChange_ != 0);
+        ApplyAppTheme(hwnd_, EffectiveUiScale(), pendingThemeChange_ != 0);
         SaveUserPreferences();
         pendingThemeChange_ = -1;
     }
@@ -149,7 +149,7 @@ void DriverLoomApp::RenderFrame() {
     }
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
 
     ImGui::SetNextWindowPos(vp->WorkPos);
     ImGui::SetNextWindowSize(vp->WorkSize);
@@ -279,7 +279,7 @@ void DriverLoomApp::RenderFrame() {
 }
 
 void DriverLoomApp::RenderSidebar() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     const bool isAppForeground = (GetForegroundWindow() == hwnd_);
 
     AppUpdateState updState = AppUpdateState::Idle;
@@ -360,7 +360,24 @@ void DriverLoomApp::RenderSidebar() {
     const ImVec4 diagBadgeCol =
         (diagCache_.valid && diagCache_.disabledCriticalServices > 0) ? DangerColor() : WarningColor();
 
-    // Primary Navigation Items
+    const ImGuiStyle& sbStyle = ImGui::GetStyle();
+    const float footerItemH = std::round(38.0f * uiScale);
+    const float quickRowH = std::round(32.0f * uiScale);
+    const float bottomMargin = std::round(16.0f * uiScale);
+    const float footerTotalH =
+        1.0f + sbStyle.ItemSpacing.y +
+        std::round(4.0f * uiScale) + sbStyle.ItemSpacing.y +
+        footerItemH + sbStyle.ItemSpacing.y +
+        std::round(4.0f * uiScale) + sbStyle.ItemSpacing.y +
+        quickRowH;
+    const float navChildH = std::max(
+        std::round(80.0f * uiScale),
+        ImGui::GetContentRegionAvail().y - bottomMargin - footerTotalH);
+
+    // Primary Navigation Items (scrollable so tall font scales never collide with bottom utility footer)
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::BeginChild("##SidebarNav", ImVec2(0.0f, navChildH), ImGuiChildFlags_None, ImGuiWindowFlags_None);
+    ImGui::PopStyleColor();
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(0.0f, std::round(4.0f * uiScale)));
 
     if (RenderSidebarNavItem(
@@ -424,18 +441,9 @@ void DriverLoomApp::RenderSidebar() {
     }
 
     ImGui::PopStyleVar();
+    ImGui::EndChild();
 
-    // Bottom Utility Footer pinned accurately with comfortable bottom breathing margin
-    const ImGuiStyle& sbStyle = ImGui::GetStyle();
-    const float footerItemH = std::round(38.0f * uiScale);
-    const float quickRowH = std::round(32.0f * uiScale);
-    const float bottomMargin = std::round(16.0f * uiScale);
-    const float footerTotalH =
-        1.0f + sbStyle.ItemSpacing.y +
-        std::round(4.0f * uiScale) + sbStyle.ItemSpacing.y +
-        footerItemH + sbStyle.ItemSpacing.y +
-        std::round(4.0f * uiScale) + sbStyle.ItemSpacing.y +
-        quickRowH;
+    // Bottom Utility Footer pinned accurately below the scrollable nav area
     const float targetY = ImGui::GetWindowHeight() - bottomMargin - footerTotalH;
     if (ImGui::GetCursorPosY() < targetY) {
         ImGui::SetCursorPosY(targetY);
@@ -522,7 +530,7 @@ void DriverLoomApp::RenderSidebar() {
 }
 
 void DriverLoomApp::RenderSettingsTab() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     const ImGuiStyle& style = ImGui::GetStyle();
     const bool isAppForeground = (GetForegroundWindow() == hwnd_);
 
@@ -702,8 +710,11 @@ void DriverLoomApp::RenderSettingsTab() {
 
         const char* themeLbl = hdm::Tr("Тема оформления:", "Тема оформлення:", "Color Theme:");
         const char* langLbl = hdm::Tr("Язык интерфейса:", "Мова інтерфейсу:", "Language:");
+        const char* scaleLbl = hdm::Tr("Масштаб интерфейса:", "Масштаб інтерфейсу:", "Interface Scale:");
         const float labelColW =
-            std::max(ImGui::CalcTextSize(themeLbl).x, ImGui::CalcTextSize(langLbl).x) +
+            std::max(
+                ImGui::CalcTextSize(themeLbl).x,
+                std::max(ImGui::CalcTextSize(langLbl).x, ImGui::CalcTextSize(scaleLbl).x)) +
             std::round(14.0f * uiScale);
 
         ImGui::AlignTextToFramePadding();
@@ -739,6 +750,27 @@ void DriverLoomApp::RenderSettingsTab() {
         if (RenderPillButton("English###SetEn", curLang == hdm::Lang::En)) {
             hdm::SetLang(hdm::Lang::En);
             SaveUserPreferences();
+        }
+
+        ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", scaleLbl);
+        ImGui::SameLine(cardPad + labelColW);
+        constexpr int kScalePresets[5] = {90, 100, 110, 125, 150};
+        for (int i = 0; i < 5; ++i) {
+            const int preset = kScalePresets[i];
+            char scaleBtnLbl[32];
+            std::snprintf(scaleBtnLbl, sizeof(scaleBtnLbl), "%d%%###SetScale%d", preset, preset);
+            if (i > 0) {
+                SameLineWrapIfNeeded(CalcButtonWidth(scaleBtnLbl));
+            }
+            if (RenderPillButton(scaleBtnLbl, g_uiScalePercent == preset)) {
+                if (g_uiScalePercent != preset) {
+                    g_uiScalePercent = preset;
+                    g_pendingScaleReload = true;
+                    SaveUserPreferences();
+                }
+            }
         }
 
         ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
@@ -850,8 +882,8 @@ void DriverLoomApp::RenderSettingsTab() {
                     "DriverLoom (manual restore point)"),
                 MakeLogger(),
                 [this](bool ok, const std::string&) {
-                    if (ok && !diagnostics_.IsBusy()) {
-                        diagnostics_.StartScanAsync(devicesCache_, nullptr);
+                    if (ok) {
+                        pendingDiagRescan_.store(true);
                     }
                 });
         }
@@ -945,7 +977,7 @@ void DriverLoomApp::ConfigureCaptureState(
     int selectDevRow) {
     g_isAdvancedMode = advancedMode;
     if (g_isLightTheme != lightTheme) {
-        ApplyAppTheme(hwnd_, g_dpiScale, lightTheme);
+        ApplyAppTheme(hwnd_, EffectiveUiScale(), lightTheme);
     }
     activeTabIndex_ = tab;
     diagSectionIndex_ = diagSec;
@@ -1248,6 +1280,9 @@ void DriverLoomApp::SyncScannerSnapshots() {
     if (!scanner_.IsScanning() && pendingDeviceRescan_.exchange(false)) {
         scanner_.StartScanAsync(silentDeviceRescan_ ? nullptr : MakeLogger());
     }
+    if (!diagnostics_.IsBusy() && pendingDiagRescan_.exchange(false)) {
+        diagnostics_.StartScanAsync(devicesCache_, nullptr);
+    }
 
     if (g_windowRegainedFocus.exchange(false)) {
         const double now = ImGui::GetTime();
@@ -1266,7 +1301,7 @@ void DriverLoomApp::SyncScannerSnapshots() {
 }
 
 void DriverLoomApp::RenderRebootBanner() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     const ImGuiStyle& style = ImGui::GetStyle();
     const float padY = std::round(8.0f * uiScale);
     const float bannerHeight = ImGui::GetFrameHeight() + padY * 2.0f;
@@ -1518,7 +1553,7 @@ void DriverLoomApp::RenderAboutModal() {
     }
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     const float modalW = std::min(620.0f * uiScale, vp->WorkSize.x * 0.92f);
     const float maxModalH = std::max(260.0f * uiScale, vp->WorkSize.y * 0.90f);
     ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
@@ -1864,7 +1899,7 @@ void DriverLoomApp::HandleKeyboardShortcuts() {
 }
 
 void DriverLoomApp::RenderStatusBarAndLogDrawer() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     bool wasDirty = false;
     const auto entries = logBuffer_.Snapshot(&wasDirty);
 
@@ -1999,6 +2034,7 @@ void DriverLoomApp::RenderStatusBarAndLogDrawer() {
     ImGui::AlignTextToFramePadding();
     ImGui::TextDisabled("(%zu)", entries.size());
 
+    const float headerEndX = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(10.0f * uiScale, 4.0f * uiScale));
     const char* copyTxt = hdm::Tr("Копировать", "Копіювати", "Copy");
     const char* clearTxt = hdm::Tr("Очистить", "Очистити", "Clear");
@@ -2010,14 +2046,12 @@ void DriverLoomApp::RenderStatusBarAndLogDrawer() {
     const float autoW = ImGui::CalcTextSize(autoTxt).x + ImGui::GetFrameHeight() + 8.0f;
     const float totalRightW = autoW + copyW + clearW + hideW + style.ItemSpacing.x * 3.0f;
     const float winRight = ImGui::GetWindowContentRegionMax().x;
-    if (winRight - totalRightW > ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x + 12.0f) {
+    if (winRight - totalRightW > headerEndX + 12.0f * uiScale) {
         ImGui::SameLine(winRight - totalRightW);
-    } else {
-        ImGui::SameLine(0.0f, 16.0f);
     }
 
     ImGui::Checkbox(hdm::Tr("Автопрокрутка###LogAuto", "Автопрокрутка###LogAuto", "Auto-scroll###LogAuto"), &logAutoScroll_);
-    ImGui::SameLine();
+    SameLineWrapIfNeeded(copyW);
     if (RenderSecondaryButton(hdm::Tr("Копировать###LogCopy", "Копіювати###LogCopy", "Copy###LogCopy"), ImVec2(copyW, 0.0f))) {
         std::string all;
         for (const auto& e : entries) {
@@ -2025,11 +2059,11 @@ void DriverLoomApp::RenderStatusBarAndLogDrawer() {
         }
         ImGui::SetClipboardText(all.c_str());
     }
-    ImGui::SameLine();
+    SameLineWrapIfNeeded(clearW);
     if (RenderSecondaryButton(hdm::Tr("Очистить###LogClr", "Очистити###LogClr", "Clear###LogClr"), ImVec2(clearW, 0.0f))) {
         logBuffer_.Clear();
     }
-    ImGui::SameLine();
+    SameLineWrapIfNeeded(hideW);
     if (RenderSecondaryButton(hdm::Tr("Свернуть###LogHide", "Згорнути###LogHide", "Collapse###LogHide"), ImVec2(hideW, 0.0f))) {
         logPanelExpanded_ = false;
     }

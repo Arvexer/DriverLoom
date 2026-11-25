@@ -17,6 +17,14 @@ bool g_autoCheckAppUpdates = true;
 bool g_autoCheckOnlineUpdates = true;
 bool g_pinLogPanel = false;
 float g_dpiScale = 1.0f;
+int g_uiScalePercent = 100;
+bool g_pendingScaleReload = false;
+
+float EffectiveUiScale() noexcept {
+    const float dpi = (g_dpiScale > 0.5f ? g_dpiScale : 1.0f);
+    const int clampedPct = std::clamp(g_uiScalePercent, 80, 175);
+    return std::clamp(dpi * (static_cast<float>(clampedPct) / 100.0f), 0.75f, 3.0f);
+}
 
 ImFont* g_fontSmall = nullptr;
 ImFont* g_fontRegular = nullptr;
@@ -41,7 +49,7 @@ void SetWindowTitleBarDark(HWND hwnd, bool useDark) {
     if (hwnd == nullptr) {
         return;
     }
-    HMODULE dwm = LoadLibraryW(L"dwmapi.dll");
+    HMODULE dwm = LoadLibraryExW(L"dwmapi.dll", nullptr, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (dwm == nullptr) {
         return;
     }
@@ -232,6 +240,15 @@ void ApplyBaseLayoutStyle(ImGuiStyle& style, float scale) {
     if (scale > 0.5f && scale != 1.0f) {
         style.ScaleAllSizes(scale);
     }
+    // ScaleAllSizes uses ImTrunc, which shrinks 1px borders/separators/caret to 0 at <100% scale.
+    style.ChildBorderSize = std::max(1.0f, style.ChildBorderSize);
+    style.PopupBorderSize = std::max(1.0f, style.PopupBorderSize);
+    style.FrameBorderSize = std::max(1.0f, style.FrameBorderSize);
+    style.TabBorderSize = std::max(1.0f, style.TabBorderSize);
+    style.TabBarBorderSize = std::max(1.0f, style.TabBarBorderSize);
+    style.SeparatorSize = std::max(1.0f, style.SeparatorSize);
+    style.InputTextCursorSize = std::max(1.0f, style.InputTextCursorSize);
+    style.MouseCursorScale = std::max(1.0f, style.MouseCursorScale);
 }
 
 void ApplyModernDarkThemeColors(ImGuiStyle& style) {
@@ -393,6 +410,11 @@ void LoadUserPreferences() noexcept {
     if (readDword(L"PinLogPanel", dw)) {
         g_pinLogPanel = (dw != 0);
     }
+    if (readDword(L"UiScalePercent", dw)) {
+        if (dw >= 80 && dw <= 175) {
+            g_uiScalePercent = static_cast<int>(dw);
+        }
+    }
     if (readDword(L"Language", dw)) {
         if (dw == static_cast<DWORD>(hdm::Lang::Ru)) {
             hdm::SetLang(hdm::Lang::Ru);
@@ -434,6 +456,7 @@ void SaveUserPreferences() noexcept {
     writeDword(L"AutoCheckUpdates", g_autoCheckAppUpdates ? 1u : 0u);
     writeDword(L"AutoCheckOnlineUpdates", g_autoCheckOnlineUpdates ? 1u : 0u);
     writeDword(L"PinLogPanel", g_pinLogPanel ? 1u : 0u);
+    writeDword(L"UiScalePercent", static_cast<DWORD>(std::clamp(g_uiScalePercent, 80, 175)));
     writeDword(L"Language", static_cast<DWORD>(hdm::GetLang()));
 }
 
@@ -671,8 +694,8 @@ bool RenderCellText(const std::string& text, bool dimmed, bool alignToFrame) {
     return (shown != raw);
 }
 
-void RenderStatusBadge(const ImVec4& color, const char* text, bool alignToFrame) {
-    const float uiScale = std::max(g_dpiScale > 0.5f ? g_dpiScale : 1.0f, ImGui::GetFontSize() / 16.0f);
+void RenderStatusBadge(const ImVec4& color, const char* text, bool alignToFrame, float maxWidth) {
+    const float uiScale = EffectiveUiScale();
     const float textH = ImGui::GetTextLineHeight();
     const float frameH = ImGui::GetFrameHeight();
     const float badgeH = textH + std::round(6.0f * uiScale);
@@ -682,7 +705,10 @@ void RenderStatusBadge(const ImVec4& color, const char* text, bool alignToFrame)
     const float padRight = std::round(9.0f * uiScale);
     const float radius = std::max(3.2f, textH * 0.21f);
     const float dotToText = std::round(6.0f * uiScale);
-    const float availW = std::max(44.0f * uiScale, ImGui::GetContentRegionAvail().x - 2.0f);
+    float availW = std::max(44.0f * uiScale, ImGui::GetContentRegionAvail().x - 2.0f);
+    if (maxWidth > 0.0f) {
+        availW = std::min(availW, std::max(44.0f * uiScale, maxWidth));
+    }
     const float maxTextW = std::max(12.0f, availW - (padLeft + radius * 2.0f + dotToText + padRight));
 
     const std::string shown = EllipsizeUtf8(text != nullptr ? std::string(text) : "", maxTextW);
@@ -721,7 +747,7 @@ void RenderStatusBadge(const ImVec4& color, const char* text, bool alignToFrame)
 }
 
 bool RenderPillButton(const char* label, bool active, const ImVec2& size) {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::round(14.0f * uiScale));
     if (g_isLightTheme) {
         if (active) {
@@ -759,7 +785,7 @@ bool RenderPillButton(const char* label, bool active, const ImVec2& size) {
 }
 
 float CalcSubSectionTabWidth(const char* label) {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     PushFontSafe(g_fontSecondaryHeader);
     const float w = ImGui::CalcTextSize(label, nullptr, true).x + std::round(14.0f * uiScale) * 2.0f;
     PopFontSafe(g_fontSecondaryHeader);
@@ -767,7 +793,7 @@ float CalcSubSectionTabWidth(const char* label) {
 }
 
 bool RenderSubSectionHeaderTab(const char* label, bool active) {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     PushFontSafe(g_fontSecondaryHeader);
     ImGui::PushStyleVar(ImGuiStyleVar_FrameRounding, std::round(7.0f * uiScale));
     ImGui::PushStyleVar(
@@ -822,7 +848,7 @@ bool RenderSubSectionHeaderTab(const char* label, bool active) {
 }
 
 void RenderSecondaryCardHeader(const char* title, const char* rightMeta) {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     PushFontSafe(g_fontSecondaryHeader);
     const float textH = ImGui::GetTextLineHeight();
     const float availW = std::max(60.0f, ImGui::GetContentRegionAvail().x);
@@ -959,7 +985,7 @@ bool RenderSecondaryButtonWithIcon(
                                             : (std::string("##") + std::string(full));
 
     const ImGuiStyle& style = ImGui::GetStyle();
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     const float iconSz = std::round(13.5f * uiScale);
     const float iconGap = std::round(7.0f * uiScale);
     const ImVec2 txtSz =
@@ -1154,7 +1180,7 @@ float CalcSummaryInfoBadgeWidth(const SummaryBadgeSegment* segments, size_t coun
     if (segments == nullptr || count == 0) {
         return 0.0f;
     }
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     const float padX = std::round(9.0f * uiScale);
     const float gap = std::round(4.0f * uiScale);
     const float sepPad = std::round(6.0f * uiScale);
@@ -1183,7 +1209,7 @@ void RenderSummaryInfoBadge(const SummaryBadgeSegment* segments, size_t count) {
     if (segments == nullptr || count == 0) {
         return;
     }
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     const float padX = std::round(9.0f * uiScale);
     const float gap = std::round(4.0f * uiScale);
     const float sepPad = std::round(6.0f * uiScale);
@@ -1484,7 +1510,7 @@ bool RenderSidebarNavItem(
     size_t badgeCount,
     const ImVec4& badgeColor,
     float width) {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     const float itemW = (width > 0.0f) ? width : ImGui::GetContentRegionAvail().x;
     const float itemH = std::round(38.0f * uiScale);
 
@@ -1613,7 +1639,7 @@ bool RenderIconButton(
 }
 
 void RenderPageHeader(const char* title, const char* subtitle) {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     PushFontSafe(g_fontMainTab);
     ImGui::TextUnformatted(title != nullptr ? title : "");
     PopFontSafe(g_fontMainTab);

@@ -15,6 +15,9 @@ extern bool g_autoCheckAppUpdates;
 extern bool g_autoCheckOnlineUpdates;
 extern bool g_pinLogPanel;
 extern float g_dpiScale;
+extern int g_uiScalePercent;
+extern bool g_pendingScaleReload;
+float EffectiveUiScale() noexcept;
 
 extern ImFont* g_fontSmall;
 extern ImFont* g_fontRegular;
@@ -119,7 +122,11 @@ bool LoadBaselineSnapshotFromRegistry(
 
 std::string EllipsizeUtf8(const std::string& text, float maxWidth);
 bool RenderCellText(const std::string& text, bool dimmed = false, bool alignToFrame = false);
-void RenderStatusBadge(const ImVec4& color, const char* text, bool alignToFrame = false);
+void RenderStatusBadge(
+    const ImVec4& color,
+    const char* text,
+    bool alignToFrame = false,
+    float maxWidth = 0.0f);
 bool RenderPillButton(const char* label, bool active, const ImVec2& size = ImVec2(0.0f, 0.0f));
 float CalcSubSectionTabWidth(const char* label);
 bool RenderSubSectionHeaderTab(const char* label, bool active);

@@ -5,7 +5,7 @@
 #include <cstdio>
 
 void DriverLoomApp::RenderWindowsUpdateTab() {
-    const float uiScale = std::max(1.0f, ImGui::GetFontSize() / 16.0f);
+    const float uiScale = EffectiveUiScale();
     const bool isAppForeground = (GetForegroundWindow() == hwnd_);
     if (!g_isAdvancedMode) {
         wuRestoreBefore_ = true;
