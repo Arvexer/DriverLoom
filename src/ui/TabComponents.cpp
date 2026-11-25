@@ -200,15 +200,16 @@ void DriverLoomApp::RenderComponentsTab() {
         ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
         const float prog = componentsScanner_.Progress();
         const std::string phase = hdm::TrDyn(componentsScanner_.PhaseMessage());
-        char overlay[256];
-        std::snprintf(overlay, sizeof(overlay), "%s (%.0f%%)", phase.c_str(), prog * 100.0f);
+        char pctBuf[16];
+        std::snprintf(pctBuf, sizeof(pctBuf), "%.0f%%", prog * 100.0f);
+        const std::string overlay = phase + " (" + pctBuf + ")";
         const char* cancelTxt = hdm::Tr("Отмена", "Скасувати", "Cancel");
         const float cancelW = CalcButtonWidth(cancelTxt) + 8.0f * uiScale;
         ImGui::ProgressBar(
             prog,
             ImVec2(std::max(120.0f, ImGui::GetContentRegionAvail().x - cancelW - style.ItemSpacing.x),
                    ImGui::GetFrameHeight()),
-            overlay);
+            overlay.c_str());
         ImGui::SameLine();
         if (RenderSecondaryButton(hdm::Tr("Отмена###CompCancel", "Скасувати###CompCancel", "Cancel###CompCancel"), ImVec2(cancelW, 0.0f))) {
             componentsScanner_.RequestCancelInstall();
@@ -405,6 +406,7 @@ void DriverLoomApp::RenderComponentsTab() {
             ImGui::BeginDisabled(busy);
             if (RenderActionButton(btnLbl, ImVec2(primaryW, 0.0f), needAction)) {
                 componentsScanner_.DownloadAndInstallAsync(item, devicesCache_, MakeLogger());
+                selectedComponentIds_.erase(item.id);
             }
             ImGui::EndDisabled();
             ImGui::SameLine();

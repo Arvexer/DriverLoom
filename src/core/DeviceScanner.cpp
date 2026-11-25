@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <filesystem>
 
 namespace hdm {
@@ -95,6 +96,50 @@ std::wstring GetDeviceRegistryPropertyString(
         return {};
     }
     return std::wstring(buf.data());
+}
+
+std::vector<std::wstring> GetDeviceRegistryPropertyMultiString(
+    HDEVINFO devInfoSet,
+    PSP_DEVINFO_DATA devInfoData,
+    DWORD property) {
+    std::vector<std::wstring> values;
+    DWORD regType = 0;
+    DWORD requiredSize = 0;
+    SetupDiGetDeviceRegistryPropertyW(
+        devInfoSet, devInfoData, property, &regType, nullptr, 0, &requiredSize);
+    if (requiredSize == 0 || GetLastError() != ERROR_INSUFFICIENT_BUFFER) {
+        return values;
+    }
+
+    std::vector<wchar_t> buf(requiredSize / sizeof(wchar_t) + 2, L'\0');
+    if (!SetupDiGetDeviceRegistryPropertyW(
+            devInfoSet,
+            devInfoData,
+            property,
+            &regType,
+            reinterpret_cast<PBYTE>(buf.data()),
+            requiredSize,
+            nullptr)) {
+        return values;
+    }
+
+    if (regType == REG_MULTI_SZ) {
+        const wchar_t* p = buf.data();
+        const wchar_t* end = buf.data() + buf.size();
+        while (p < end && *p != L'\0') {
+            std::wstring entry(p);
+            if (!entry.empty()) {
+                values.push_back(std::move(entry));
+            }
+            p += std::wcslen(p) + 1;
+        }
+    } else {
+        std::wstring single(buf.data());
+        if (!single.empty()) {
+            values.push_back(std::move(single));
+        }
+    }
+    return values;
 }
 
 std::wstring GetDeviceInstanceIdString(HDEVINFO devInfoSet, PSP_DEVINFO_DATA devInfoData) {
@@ -799,13 +844,33 @@ std::vector<DeviceInfo> DeviceScanner::ScanSynchronously(const LogCallback& onLo
             GetDeviceRegistryPropertyString(devInfoSet.Get(), &devInfoData, SPDRP_MFG));
         info.deviceClass = WideToUtf8(
             GetDeviceRegistryPropertyString(devInfoSet.Get(), &devInfoData, SPDRP_CLASS));
-        info.hardwareId = WideToUtf8(
-            GetDeviceRegistryPropertyString(devInfoSet.Get(), &devInfoData, SPDRP_HARDWAREID));
-        info.searchHardwareKey = ExtractVenDevOrVidPid(info.hardwareId);
+        const std::vector<std::wstring> hwIds =
+            GetDeviceRegistryPropertyMultiString(devInfoSet.Get(), &devInfoData, SPDRP_HARDWAREID);
+        info.hardwareId = hwIds.empty() ? std::string{} : WideToUtf8(hwIds[0]);
+        for (const auto& wId : hwIds) {
+            const std::string candidate = ExtractVenDevOrVidPid(WideToUtf8(wId));
+            const std::string candUpper = ToUpperAscii(candidate);
+            if (candUpper.find("VEN_") != std::string::npos ||
+                candUpper.find("VID_") != std::string::npos) {
+                info.searchHardwareKey = candidate;
+                break;
+            }
+        }
+        if (info.searchHardwareKey.empty()) {
+            info.searchHardwareKey = ExtractVenDevOrVidPid(info.hardwareId);
+        }
 
         const std::string upperHw = ToUpperAscii(info.hardwareId);
         info.usbVendorId = ExtractHex4AfterTag(upperHw, "VID_");
         info.pciVendorId = ExtractHex4AfterTag(upperHw, "VEN_");
+        for (const auto& wId : hwIds) {
+            if (!info.usbVendorId.empty() && !info.pciVendorId.empty()) {
+                break;
+            }
+            const std::string u = ToUpperAscii(WideToUtf8(wId));
+            if (info.usbVendorId.empty()) info.usbVendorId = ExtractHex4AfterTag(u, "VID_");
+            if (info.pciVendorId.empty()) info.pciVendorId = ExtractHex4AfterTag(u, "VEN_");
+        }
 
         info.instanceId = WideToUtf8(wInstanceId);
 
@@ -1153,12 +1218,18 @@ bool DeviceScanner::RestoreInboxDriverByHardwareKeySync(
     devInfoData.cbSize = sizeof(SP_DEVINFO_DATA);
     bool foundDevice = false;
     for (DWORD idx = 0; SetupDiEnumDeviceInfo(devInfoSet.Get(), idx, &devInfoData); ++idx) {
-        const std::string hwId = WideToUtf8(
-            GetDeviceRegistryPropertyString(devInfoSet.Get(), &devInfoData, SPDRP_HARDWAREID));
+        const std::vector<std::wstring> hwIds =
+            GetDeviceRegistryPropertyMultiString(devInfoSet.Get(), &devInfoData, SPDRP_HARDWAREID);
+        bool hwMatched = false;
+        for (const auto& wId : hwIds) {
+            if (ContainsCaseInsensitive(WideToUtf8(wId), searchKey)) {
+                hwMatched = true;
+                break;
+            }
+        }
         const std::string instId =
             WideToUtf8(GetDeviceInstanceIdString(devInfoSet.Get(), &devInfoData));
-        if (ContainsCaseInsensitive(hwId, searchKey) ||
-            ContainsCaseInsensitive(instId, searchKey)) {
+        if (hwMatched || ContainsCaseInsensitive(instId, searchKey)) {
             foundDevice = true;
             break;
         }

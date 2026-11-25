@@ -261,7 +261,8 @@ WindowsReadinessInfo ReadWindowsReadiness() {
                 KEY_READ,
                 fsKey.Put()) == ERROR_SUCCESS) {
             DWORD disableTrim = 0;
-            if (ReadRegDwordVal(fsKey.Get(), L"DisableDeleteNotify", disableTrim)) {
+            if (ReadRegDwordVal(fsKey.Get(), L"NtfsDisableDeleteNotify", disableTrim) ||
+                ReadRegDwordVal(fsKey.Get(), L"DisableDeleteNotify", disableTrim)) {
                 r.trimEnabled = (disableTrim == 0);
             }
         }
@@ -1331,6 +1332,21 @@ bool SystemDiagnostics::EnableServiceSync(
     bool autoStart,
     const LogCallback& onLog) {
     if (serviceName.empty()) {
+        return false;
+    }
+    bool allowedService = false;
+    const std::string reqLower = ToLowerAscii(serviceName);
+    for (const auto& def : kMonitoredServices) {
+        if (reqLower == ToLowerAscii(def.nameUtf8)) {
+            allowedService = true;
+            break;
+        }
+    }
+    if (!allowedService) {
+        if (onLog) {
+            onLog(LogLevel::Error,
+                  "Служба «" + serviceName + "» не входит в список разрешённых системных служб.");
+        }
         return false;
     }
     ScHandleGuard scm(OpenSCManagerW(nullptr, nullptr, SC_MANAGER_CONNECT));

@@ -1062,9 +1062,9 @@ void DriverLoomApp::RebuildSnapshotDiff() {
                 row.kind = SnapshotDiffKind::DriverUpdated;
                 ++snapshotChangedCount_;
             } else if (statusChanged) {
-                row.kind = (curHealth > base.health)
-                               ? SnapshotDiffKind::NewIssue
-                               : SnapshotDiffKind::IssueFixed;
+                row.kind = (curHealth < base.health)
+                               ? SnapshotDiffKind::IssueFixed
+                               : SnapshotDiffKind::NewIssue;
                 ++snapshotChangedCount_;
             } else {
                 row.kind = SnapshotDiffKind::Unchanged;
@@ -1808,7 +1808,9 @@ void DriverLoomApp::HandleKeyboardShortcuts() {
         openAboutPopupNextFrame_ = true;
     }
 
-    if (!io.WantTextInput && ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
+    if (!io.WantTextInput && !aboutModalOpen_ &&
+        !ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) &&
+        ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         if (activeTabIndex_ == PageDevices && !selectedDeviceInstanceId_.empty()) {
             selectedDeviceInstanceId_.clear();
         } else if (activeTabIndex_ == PageWindowsUpdate && selectedWuIndex_ >= 0) {

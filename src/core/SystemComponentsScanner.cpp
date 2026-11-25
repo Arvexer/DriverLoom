@@ -2329,7 +2329,7 @@ constexpr PeripheralVendorRule kPeripheralRules[] = {
      "Фирменный софт ASUS для материнских плат и периферии: подсветка Aura Sync, управление вентиляторами и профили (по желанию).",
      "https://www.asus.com/supportonly/armoury%20crate/helpdesk_download/",
      "https://dlcdnets.asus.com/pub/ASUS/mb/14Utilities/ArmouryCrateInstallTool.zip",
-     "a/Asus/ArmouryCrate", "ArmouryCrateInstaller_3.3.6.0/ArmouryCrateInstaller.exe", "/SILENT", "Поиск...",
+     "a/Asus/ArmouryCrate", nullptr, "/SILENT", "Поиск...",
      {"Armoury Crate", "ASUS Framework", nullptr}},
     {"sw_wooting", "Wooting", "Wootility (клавиатуры Wooting)",
      "Конфигуратор аналоговых клавиатур Wooting: настройка Rapid Trigger, точки срабатывания клавиш, профилей и прошивки.",
@@ -2467,7 +2467,7 @@ MonitorBrandInfo GetMonitorBrandSupport(const std::string& pnpOrBrand, const std
                 "SmartControl",
                 "p/Philips/SmartControl",
                 "https://gz-dlsw.tpv-tech.com/MNT/PHILIPS/files/Software/SmartControl.exe.zip",
-                "SmartControl Setup 7.2.0.exe",
+                nullptr,
                 "/S"};
     }
     if (pnpOrBrand == "VSC" || ContainsCaseInsensitive(model, "ViewSonic")) {
@@ -3937,7 +3937,7 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
         SystemComponentItem vc13;
         vc13.id = "rt_vc2013";
         vc13.category = ComponentCategory::GamingRuntime;
-        vc13.name = "Visual C++ 2013 Redistributable (x64 / x86)";
+        vc13.name = "Visual C++ 2013 Redistributable (x64)";
         vc13.vendor = "Microsoft";
         vc13.purposeDescription =
             "Библиотеки C++ 2013 (msvcr120.dll / msvcp120.dll). Используются играми прошлых лет (2013–2018 гг.) и старыми игровыми движками.";
@@ -3948,10 +3948,8 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
         vc13.latestVersion = "12.0.40664.0";
         const std::string v13x64 = CheckVcRuntimeKey(
             L"SOFTWARE\\Microsoft\\VisualStudio\\12.0\\VC\\Runtimes\\x64", KEY_WOW64_64KEY);
-        const std::string v13x86 = CheckVcRuntimeKey(
-            L"SOFTWARE\\WOW6432Node\\Microsoft\\VisualStudio\\12.0\\VC\\Runtimes\\x86", KEY_WOW64_32KEY);
-        vc13.installed = !v13x64.empty() || !v13x86.empty();
-        vc13.installedVersion = !v13x64.empty() ? v13x64 : v13x86;
+        vc13.installed = !v13x64.empty();
+        vc13.installedVersion = v13x64;
         vc13.updateAvailable = !vc13.installed;
         vc13.statusText = vc13.installed ? ("Установлен (" + vc13.installedVersion + ")") : "Не установлен";
         result.push_back(std::move(vc13));
@@ -3959,7 +3957,7 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
         SystemComponentItem vc12;
         vc12.id = "rt_vc2012";
         vc12.category = ComponentCategory::GamingRuntime;
-        vc12.name = "Visual C++ 2012 Redistributable (x64 / x86)";
+        vc12.name = "Visual C++ 2012 Redistributable (x64)";
         vc12.vendor = "Microsoft";
         vc12.purposeDescription =
             "Библиотеки C++ 2012 (msvcr110.dll / msvcp110.dll). Требуются для игр 2012–2016 гг. и ряда системных утилит.";
@@ -3971,10 +3969,8 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
         vc12.latestVersion = "11.0.61030.0";
         const std::string v12x64 = CheckVcRuntimeKey(
             L"SOFTWARE\\Microsoft\\VisualStudio\\11.0\\VC\\Runtimes\\x64", KEY_WOW64_64KEY);
-        const std::string v12x86 = CheckVcRuntimeKey(
-            L"SOFTWARE\\WOW6432Node\\Microsoft\\VisualStudio\\11.0\\VC\\Runtimes\\x86", KEY_WOW64_32KEY);
-        vc12.installed = !v12x64.empty() || !v12x86.empty();
-        vc12.installedVersion = !v12x64.empty() ? v12x64 : v12x86;
+        vc12.installed = !v12x64.empty();
+        vc12.installedVersion = v12x64;
         vc12.updateAvailable = !vc12.installed;
         vc12.statusText = vc12.installed ? ("Установлен (" + vc12.installedVersion + ")") : "Не установлен";
         result.push_back(std::move(vc12));
@@ -3982,7 +3978,7 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
         SystemComponentItem vc10;
         vc10.id = "rt_vc2010";
         vc10.category = ComponentCategory::GamingRuntime;
-        vc10.name = "Visual C++ 2010 Redistributable (x64 / x86)";
+        vc10.name = "Visual C++ 2010 Redistributable (x64)";
         vc10.vendor = "Microsoft";
         vc10.purposeDescription =
             "Библиотеки C++ 2010 (msvcr100.dll / msvcp100.dll). Часто требуются для классических игр (2010–2015 гг.) и старых лаунчеров.";
@@ -3994,10 +3990,8 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
         vc10.latestVersion = "10.0.40219";
         const std::string v10x64 = CheckVcRuntimeKey(
             L"SOFTWARE\\Microsoft\\VisualStudio\\10.0\\VC\\VCRedist\\x64", KEY_WOW64_64KEY);
-        const std::string v10x86 = CheckVcRuntimeKey(
-            L"SOFTWARE\\WOW6432Node\\Microsoft\\VisualStudio\\10.0\\VC\\VCRedist\\x86", KEY_WOW64_32KEY);
-        vc10.installed = !v10x64.empty() || !v10x86.empty();
-        vc10.installedVersion = !v10x64.empty() ? v10x64 : v10x86;
+        vc10.installed = !v10x64.empty();
+        vc10.installedVersion = v10x64;
         vc10.updateAvailable = !vc10.installed;
         vc10.statusText = vc10.installed ? ("Установлен (" + vc10.installedVersion + ")") : "Не установлен";
         result.push_back(std::move(vc10));

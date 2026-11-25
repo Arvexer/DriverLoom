@@ -328,9 +328,10 @@ void DriverLoomApp::RenderDriverStoreSection() {
     if (localInstaller_.IsExportingBackup() || localInstaller_.IsRemovingStorePackages()) {
         const float prog = localInstaller_.Progress();
         const std::string statusMsg = hdm::TrDyn(localInstaller_.StatusMessage());
-        char overlay[128];
-        std::snprintf(overlay, sizeof(overlay), "%.0f%% — %s", prog * 100.0f, statusMsg.c_str());
-        ImGui::ProgressBar(prog, ImVec2(-1.0f, 18.0f * uiScale), overlay);
+        char pctBuf[16];
+        std::snprintf(pctBuf, sizeof(pctBuf), "%.0f%%", prog * 100.0f);
+        const std::string overlay = std::string(pctBuf) + " — " + statusMsg;
+        ImGui::ProgressBar(prog, ImVec2(-1.0f, 18.0f * uiScale), overlay.c_str());
     }
 
     ImGui::Spacing();

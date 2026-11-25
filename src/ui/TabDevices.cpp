@@ -226,22 +226,20 @@ void DriverLoomApp::RenderDevicesTab() {
     if (catalogBusy) {
         const float prog = componentsScanner_.Progress();
         const std::string phase = hdm::TrDyn(componentsScanner_.PhaseMessage());
-        char overlay[256];
-        std::snprintf(
-            overlay,
-            sizeof(overlay),
-            "%s (%.0f%%)",
-            phase.empty()
-                ? hdm::Tr("Установка официального драйвера...", "Встановлення офіційного драйвера...", "Installing official driver...")
-                : phase.c_str(),
-            prog * 100.0f);
+        char pctBuf[16];
+        std::snprintf(pctBuf, sizeof(pctBuf), "%.0f%%", prog * 100.0f);
+        const std::string overlay =
+            (phase.empty()
+                 ? std::string(hdm::Tr("Установка официального драйвера...", "Встановлення офіційного драйвера...", "Installing official driver..."))
+                 : phase) +
+            " (" + pctBuf + ")";
         const char* cancelTxt = hdm::Tr("Отмена", "Скасувати", "Cancel");
         const float cancelW = CalcButtonWidth(cancelTxt) + 8.0f * uiScale;
         ImGui::ProgressBar(
             prog,
             ImVec2(std::max(120.0f, ImGui::GetContentRegionAvail().x - cancelW - ImGui::GetStyle().ItemSpacing.x),
                    ImGui::GetFrameHeight()),
-            overlay);
+            overlay.c_str());
         ImGui::SameLine();
         if (RenderSecondaryButton(hdm::Tr("Отмена###CatCancel", "Скасувати###CatCancel", "Cancel###CatCancel"),
                                   ImVec2(cancelW, 0.0f))) {

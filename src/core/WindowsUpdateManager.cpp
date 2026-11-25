@@ -462,7 +462,10 @@ HRESULT RunAsyncSearch(
     if (outAbortedCleanly != nullptr) *outAbortedCleanly = true;
     if (outOutcome != nullptr) *outOutcome = JobWaitOutcome::Completed;
 
-    searcher->put_Online(online ? VARIANT_TRUE : VARIANT_FALSE);
+    HRESULT hrOnline = searcher->put_Online(online ? VARIANT_TRUE : VARIANT_FALSE);
+    if (FAILED(hrOnline)) {
+        return hrOnline;
+    }
 
     BstrGuard criteria(criteriaW);
     VARIANT emptyState;
@@ -583,7 +586,10 @@ ComPtr<IUpdateCollection> MakeSingleUpdateCollection(IUpdate* upd) {
         return coll;
     }
     LONG addedIdx = 0;
-    coll->Add(upd, &addedIdx);
+    if (FAILED(coll->Add(upd, &addedIdx))) {
+        coll.Reset();
+        return coll;
+    }
     return coll;
 }
 
@@ -729,6 +735,7 @@ void WindowsUpdateManager::SelectAll(bool selected, bool includeHidden) {
 
 void WindowsUpdateManager::StartSearchAsync(LogCallback onLog, bool driversOnly) {
     std::thread oldSearch;
+    bool busy = false;
     {
         std::lock_guard<std::mutex> tLock(impl_->threadMutex);
         std::lock_guard<std::mutex> cbLock(impl_->callbackMutex);
@@ -736,20 +743,24 @@ void WindowsUpdateManager::StartSearchAsync(LogCallback onLog, bool driversOnly)
             return;
         }
         if (impl_->searching.load() || impl_->installing.load()) {
-            if (onLog) {
-                onLog(LogLevel::Warning, "Windows Update уже выполняет операцию.");
+            busy = true;
+        } else {
+            impl_->cancelRequested.store(false);
+            impl_->searching.store(true);
+            impl_->progress.store(0.0f);
+            if (impl_->searchDoneEvent.IsValid()) {
+                ResetEvent(impl_->searchDoneEvent.Get());
             }
-            return;
+            if (impl_->searchThread.joinable()) {
+                oldSearch = std::move(impl_->searchThread);
+            }
         }
-        impl_->cancelRequested.store(false);
-        impl_->searching.store(true);
-        impl_->progress.store(0.0f);
-        if (impl_->searchDoneEvent.IsValid()) {
-            ResetEvent(impl_->searchDoneEvent.Get());
+    }
+    if (busy) {
+        if (onLog) {
+            onLog(LogLevel::Warning, "Windows Update уже выполняет операцию.");
         }
-        if (impl_->searchThread.joinable()) {
-            oldSearch = std::move(impl_->searchThread);
-        }
+        return;
     }
     if (oldSearch.joinable()) {
         oldSearch.join();
@@ -974,6 +985,7 @@ void WindowsUpdateManager::StartDownloadAndInstallAsync(
     }
 
     std::thread oldInstall;
+    bool busy = false;
     {
         std::lock_guard<std::mutex> tLock(impl_->threadMutex);
         std::lock_guard<std::mutex> cbLock(impl_->callbackMutex);
@@ -981,20 +993,24 @@ void WindowsUpdateManager::StartDownloadAndInstallAsync(
             return;
         }
         if (impl_->searching.load() || impl_->installing.load()) {
-            if (onLog) {
-                onLog(LogLevel::Warning, "Windows Update уже выполняет операцию.");
+            busy = true;
+        } else {
+            impl_->cancelRequested.store(false);
+            impl_->installing.store(true);
+            impl_->progress.store(0.0f);
+            if (impl_->installDoneEvent.IsValid()) {
+                ResetEvent(impl_->installDoneEvent.Get());
             }
-            return;
+            if (impl_->installThread.joinable()) {
+                oldInstall = std::move(impl_->installThread);
+            }
         }
-        impl_->cancelRequested.store(false);
-        impl_->installing.store(true);
-        impl_->progress.store(0.0f);
-        if (impl_->installDoneEvent.IsValid()) {
-            ResetEvent(impl_->installDoneEvent.Get());
+    }
+    if (busy) {
+        if (onLog) {
+            onLog(LogLevel::Warning, "Windows Update уже выполняет операцию.");
         }
-        if (impl_->installThread.joinable()) {
-            oldInstall = std::move(impl_->installThread);
-        }
+        return;
     }
     if (oldInstall.joinable()) {
         oldInstall.join();
@@ -1572,7 +1588,17 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
                     continue;
                 }
             }
-            downloader->put_Updates(singleColl.Get());
+            hr = downloader->put_Updates(singleColl.Get());
+            if (FAILED(hr)) {
+                if (onLog) {
+                    onLog(LogLevel::Error,
+                          stepPrefix + "Ошибка назначения списка загрузки (put_Updates): " +
+                              FormatWuErrorDiagnostic(hr));
+                }
+                ++summary.failedCount;
+                if (onItemUpdate) onItemUpdate(target.id, false, false, "Ошибка загрузки");
+                continue;
+            }
 
             VARIANT emptyState;
             VariantInit(&emptyState);
@@ -1769,7 +1795,17 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
         }
 
         ConfigureInstallerSilent(installer.Get(), true);
-        installer->put_Updates(singleColl.Get());
+        hr = installer->put_Updates(singleColl.Get());
+        if (FAILED(hr)) {
+            if (onLog) {
+                onLog(LogLevel::Error,
+                      stepPrefix + "Ошибка назначения списка установки (put_Updates): " +
+                          FormatWuErrorDiagnostic(hr));
+            }
+            ++summary.failedCount;
+            if (onItemUpdate) onItemUpdate(target.id, false, false, "Ошибка установки");
+            continue;
+        }
 
         if (onLog) {
             onLog(LogLevel::Info, stepPrefix + "Установка: " + target.title + "...");

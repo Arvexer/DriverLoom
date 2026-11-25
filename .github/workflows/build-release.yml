@@ -83,6 +83,23 @@ jobs:
             Write-Host "Release $rel already exists — uploading MSVC binary (--clobber)..."
             gh release upload $rel "$exe#DriverLoom.exe" --clobber
             if ($LASTEXITCODE -ne 0) { throw "gh release upload failed" }
+
+            $existingBody = gh release view $rel --json body --jq '.body'
+            if ($LASTEXITCODE -eq 0) {
+              if ($existingBody -match '[0-9a-fA-F]{64}\s+\*DriverLoom\.exe') {
+                $updatedBody = [regex]::Replace(
+                  $existingBody,
+                  '[0-9a-fA-F]{64}\s+\*DriverLoom\.exe',
+                  "$hash *DriverLoom.exe"
+                )
+              } else {
+                $updatedBody = ($existingBody.TrimEnd() + "`n`n### Checksum (SHA-256)`n``````text`n$hash *DriverLoom.exe`n``````")
+              }
+              $notesFile = Join-Path $env:RUNNER_TEMP "release_notes.md"
+              [IO.File]::WriteAllText($notesFile, $updatedBody, (New-Object System.Text.UTF8Encoding($false)))
+              gh release edit $rel --notes-file $notesFile
+              if ($LASTEXITCODE -ne 0) { throw "gh release edit failed" }
+            }
           } else {
             Write-Host "Creating Release $rel with MSVC binary..."
             $notes = @(
