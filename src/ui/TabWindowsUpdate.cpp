@@ -108,8 +108,12 @@ void DriverLoomApp::RenderWindowsUpdateTab() {
                        : hdm::Tr("Проверка обновлений драйверов Microsoft", "Перевірка оновлень драйверів Microsoft", "Check for Official Microsoft Updates"));
         PushFontSafe(g_fontSecondaryHeader);
         const float hw = ImGui::CalcTextSize(heading).x;
-        if (hw < innerW) ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (innerW - hw) * 0.5f);
-        ImGui::TextUnformatted(heading);
+        if (hw < innerW) {
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (innerW - hw) * 0.5f);
+            ImGui::TextUnformatted(heading);
+        } else {
+            ImGui::TextWrapped("%s", heading);
+        }
         PopFontSafe(g_fontSecondaryHeader);
 
         ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
@@ -320,9 +324,12 @@ void DriverLoomApp::RenderWindowsUpdateTab() {
 
     const ImGuiStyle& style = ImGui::GetStyle();
     const char* selHdr = hdm::Tr("Выбор", "Вибір", "Select");
+    PushFontSafe(g_fontSecondaryHeader);
+    const float selHdrW = ImGui::CalcTextSize(selHdr).x;
+    PopFontSafe(g_fontSecondaryHeader);
     const float selColW = std::max(
         74.0f * uiScale,
-        ImGui::CalcTextSize(selHdr).x + style.CellPadding.x * 2.0f + std::round(8.0f * uiScale));
+        selHdrW + style.CellPadding.x * 2.0f + std::round(8.0f * uiScale));
 
     if (ImGui::BeginTable("##WuTable", 5, kTableFlags, ImVec2(0.0f, tableH))) {
         ImGui::TableSetupScrollFreeze(0, 1);
@@ -480,15 +487,16 @@ void DriverLoomApp::RenderWindowsUpdateTab() {
         ImGui::PopStyleColor();
         ImGui::TextWrapped("%s", sel.description.empty() ? sel.title.c_str() : sel.description.c_str());
         PushFontSafe(g_fontSmall);
+        ImGui::PushStyleColor(ImGuiCol_Text, MutedTextColor());
         if (g_isAdvancedMode) {
-            ImGui::TextDisabled(
+            ImGui::TextWrapped(
                 "Hardware ID: %s   |   %s: %s   |   Update ID: %s",
                 sel.driverHardwareId.empty() ? "—" : sel.driverHardwareId.c_str(),
                 hdm::Tr("Дата", "Дата", "Date"),
                 sel.driverVerDate.empty() ? "—" : sel.driverVerDate.c_str(),
                 sel.updateId.c_str());
         } else {
-            ImGui::TextDisabled(
+            ImGui::TextWrapped(
                 hdm::Tr(
                     "Производитель: %s   •   Модель: %s   •   Дата: %s",
                     "Виробник: %s   •   Модель: %s   •   Дата: %s",
@@ -497,6 +505,7 @@ void DriverLoomApp::RenderWindowsUpdateTab() {
                 sel.driverModel.empty() ? "—" : sel.driverModel.c_str(),
                 sel.driverVerDate.empty() ? "—" : sel.driverVerDate.c_str());
         }
+        ImGui::PopStyleColor();
         PopFontSafe(g_fontSmall);
         ImGui::EndChild();
     }

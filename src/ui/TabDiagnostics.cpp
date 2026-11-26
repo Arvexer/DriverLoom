@@ -49,7 +49,11 @@ void DriverLoomApp::RenderDiagnosticsTab() {
                     if (picked && !path.empty()) {
                         localInstaller_.ExportDriverStoreBackupAsync(path, true, MakeLogger(), nullptr);
                     }
-                });
+                },
+                hdm::Utf8ToWide(hdm::Tr(
+                    "Выберите папку для сохранения бэкапа драйверов",
+                    "Виберіть папку для збереження бекапу драйверів",
+                    "Select folder to save driver backup")));
         }
         ImGui::EndDisabled();
         if (isAppForeground &&
@@ -101,9 +105,11 @@ void DriverLoomApp::RenderDiagnosticsTab() {
         }
         const std::string phase = hdm::TrDyn(diagnostics_.ActionPhase());
         if (!phase.empty()) {
-            ImGui::SameLine(0.0f, 12.0f);
+            SameLineWrapIfNeeded((std::min)(240.0f * uiScale, ImGui::CalcTextSize(phase.c_str()).x + 12.0f));
             ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(WarningTextColor(), "%s", phase.c_str());
+            ImGui::PushStyleColor(ImGuiCol_Text, WarningTextColor());
+            ImGui::TextWrapped("%s", phase.c_str());
+            ImGui::PopStyleColor();
         }
     } else if (compInstalling) {
         SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Отмена", "Скасувати", "Cancel")));
@@ -112,9 +118,11 @@ void DriverLoomApp::RenderDiagnosticsTab() {
         }
         const std::string phase = hdm::TrDyn(componentsScanner_.PhaseMessage());
         if (!phase.empty()) {
-            ImGui::SameLine(0.0f, 12.0f);
+            SameLineWrapIfNeeded((std::min)(240.0f * uiScale, ImGui::CalcTextSize(phase.c_str()).x + 12.0f));
             ImGui::AlignTextToFramePadding();
-            ImGui::TextColored(WarningTextColor(), "%s", phase.c_str());
+            ImGui::PushStyleColor(ImGuiCol_Text, WarningTextColor());
+            ImGui::TextWrapped("%s", phase.c_str());
+            ImGui::PopStyleColor();
         }
     }
 

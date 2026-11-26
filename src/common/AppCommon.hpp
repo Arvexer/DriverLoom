@@ -746,6 +746,22 @@ inline ElevatedRunResult ExecuteElevatedSelf(
     return result;
 }
 
+inline std::vector<std::vector<std::string>> ChunkStrings(
+    const std::vector<std::string>& items,
+    size_t maxPerChunk) {
+    std::vector<std::vector<std::string>> chunks;
+    if (items.empty() || maxPerChunk == 0) {
+        return chunks;
+    }
+    for (size_t i = 0; i < items.size(); i += maxPerChunk) {
+        const size_t end = (std::min)(items.size(), i + maxPerChunk);
+        chunks.emplace_back(
+            items.begin() + static_cast<std::ptrdiff_t>(i),
+            items.begin() + static_cast<std::ptrdiff_t>(end));
+    }
+    return chunks;
+}
+
 std::filesystem::path CreateTempLogPath(const wchar_t* prefix);
 
 } // namespace hdm

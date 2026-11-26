@@ -159,7 +159,8 @@ std::vector<InfFileEntry> LocalDriverInstaller::GetInfFilesSnapshot() const {
 void LocalDriverInstaller::PickFolderAsync(
     HWND ownerWindow,
     LogCallback onLog,
-    FolderPickedCallback onPicked) {
+    FolderPickedCallback onPicked,
+    std::wstring dialogTitle) {
     (void)ownerWindow;
     std::thread oldThread;
     {
@@ -182,7 +183,10 @@ void LocalDriverInstaller::PickFolderAsync(
         return;
     }
 
-    pickThread_ = std::thread([this, log = std::move(onLog), picked = std::move(onPicked)]() {
+    pickThread_ = std::thread([this,
+                               log = std::move(onLog),
+                               picked = std::move(onPicked),
+                               title = std::move(dialogTitle)]() {
         struct PickThreadGuard {
             std::atomic<bool>& flag;
             std::atomic<unsigned long>& tid;
@@ -221,10 +225,14 @@ void LocalDriverInstaller::PickFolderAsync(
                 dialog->GetOptions(&options);
                 dialog->SetOptions(
                     options | FOS_PICKFOLDERS | FOS_PATHMUSTEXIST | FOS_FORCEFILESYSTEM);
-                dialog->SetTitle(Utf8ToWide(hdm::Tr(
-                    "Выберите папку с распакованными драйверами (.inf)",
-                    "Виберіть папку з розпакованими драйверами (.inf)",
-                    "Select folder containing extracted .inf drivers")).c_str());
+                dialog->SetTitle(
+                    title.empty()
+                        ? Utf8ToWide(hdm::Tr(
+                                         "Выберите папку с распакованными драйверами (.inf)",
+                                         "Виберіть папку з розпакованими драйверами (.inf)",
+                                         "Select folder containing extracted .inf drivers"))
+                              .c_str()
+                        : title.c_str());
 
                 // Pass nullptr owner across threads so UI thread teardown cannot deadlock in join()
                 hr = dialog->Show(nullptr);
@@ -1192,62 +1200,78 @@ void LocalDriverInstaller::RemoveDriverStorePackagesAsync(
                 log(LogLevel::Info,
                     "Запрос прав администратора (UAC) для очистки пакетов DriverStore...");
             }
-            std::string joined;
-            for (size_t i = 0; i < names.size(); ++i) {
-                if (i > 0) joined += ",";
-                joined += names[i];
-            }
-            const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_rm_inf");
-            std::wstring args = L"--cli-remove-oem-infs " + QuoteWin32Arg(Utf8ToWide(joined));
-            if (createRestorePoint) {
-                args += L" --restore-before";
-            }
-            if (!tempLog.empty()) {
-                args += L" --log " + QuoteWin32Arg(tempLog.wstring());
-            }
-
-            progress_.store(0.35f);
-            bool gotSummary = false;
-            auto onControlLine = [&](const std::string& ctrl) {
-                if (ctrl.rfind("RM_SUMMARY ", 0) == 0) {
-                    std::istringstream iss(ctrl.substr(11));
-                    size_t rem = 0;
-                    size_t fail = 0;
-                    int reb = 0;
-                    if (iss >> rem >> fail >> reb) {
-                        removedCount = rem;
-                        failedCount = fail;
-                        rebootReq = (reb != 0);
-                        gotSummary = true;
-                    }
+            const auto chunks = ChunkStrings(names, 100);
+            for (size_t cIdx = 0; cIdx < chunks.size() && !shuttingDown_.load(); ++cIdx) {
+                const auto& chunk = chunks[cIdx];
+                std::string joined;
+                for (size_t i = 0; i < chunk.size(); ++i) {
+                    if (i > 0) joined += ",";
+                    joined += chunk[i];
                 }
-            };
-            const ElevatedRunResult run = ExecuteElevatedSelf(
-                args, true, tempLog.empty() ? nullptr : &tempLog, log, onControlLine, &shuttingDown_);
-            std::error_code ec;
-            if (!tempLog.empty()) {
-                std::filesystem::remove(tempLog, ec);
-            }
-
-            if (!run.launched) {
-                failedCount = names.size();
-                if (!shuttingDown_.load() && log) {
-                    if (run.launchError == ERROR_CANCELLED) {
-                        log(LogLevel::Warning, "Очистка DriverStore отменена в окне UAC.");
-                    } else {
-                        log(LogLevel::Error,
-                            "Ошибка запуска ShellExecuteExW: " + FormatWin32Error(run.launchError));
-                    }
+                const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_rm_inf");
+                std::wstring args = L"--cli-remove-oem-infs " + QuoteWin32Arg(Utf8ToWide(joined));
+                if (createRestorePoint && cIdx == 0) {
+                    args += L" --restore-before";
                 }
-            } else if (!gotSummary) {
-                if (run.exitCode == 2) {
-                    removedCount = names.size();
-                    rebootReq = true;
-                } else if (run.exitCode == 0) {
-                    removedCount = names.size();
+                if (!tempLog.empty()) {
+                    args += L" --log " + QuoteWin32Arg(tempLog.wstring());
+                }
+
+                size_t chunkRemoved = 0;
+                size_t chunkFailed = 0;
+                bool chunkReboot = false;
+                bool gotSummary = false;
+                auto onControlLine = [&](const std::string& ctrl) {
+                    if (ctrl.rfind("RM_SUMMARY ", 0) == 0) {
+                        std::istringstream iss(ctrl.substr(11));
+                        size_t rem = 0;
+                        size_t fail = 0;
+                        int reb = 0;
+                        if (iss >> rem >> fail >> reb) {
+                            chunkRemoved = rem;
+                            chunkFailed = fail;
+                            chunkReboot = (reb != 0);
+                            gotSummary = true;
+                        }
+                    }
+                };
+                const ElevatedRunResult run = ExecuteElevatedSelf(
+                    args, true, tempLog.empty() ? nullptr : &tempLog, log, onControlLine, &shuttingDown_);
+                std::error_code ec;
+                if (!tempLog.empty()) {
+                    std::filesystem::remove(tempLog, ec);
+                }
+
+                if (!run.launched) {
+                    for (size_t remIdx = cIdx; remIdx < chunks.size(); ++remIdx) {
+                        failedCount += chunks[remIdx].size();
+                    }
+                    if (!shuttingDown_.load() && log) {
+                        if (run.launchError == ERROR_CANCELLED) {
+                            log(LogLevel::Warning, "Очистка DriverStore отменена в окне UAC.");
+                        } else {
+                            log(LogLevel::Error,
+                                "Ошибка запуска ShellExecuteExW: " + FormatWin32Error(run.launchError));
+                        }
+                    }
+                    break;
+                }
+                if (gotSummary) {
+                    removedCount += chunkRemoved;
+                    failedCount += chunkFailed;
+                    if (chunkReboot) rebootReq = true;
                 } else {
-                    failedCount = names.size();
+                    if (run.exitCode == 2) {
+                        removedCount += chunk.size();
+                        rebootReq = true;
+                    } else if (run.exitCode == 0) {
+                        removedCount += chunk.size();
+                    } else {
+                        failedCount += chunk.size();
+                    }
                 }
+                progress_.store(
+                    0.15f + 0.80f * static_cast<float>(cIdx + 1) / static_cast<float>(chunks.size()));
             }
             progress_.store(1.0f);
         }

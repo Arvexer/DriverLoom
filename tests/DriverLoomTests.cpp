@@ -1180,6 +1180,25 @@ void TestSafeZipExtractor() {
     }
 }
 
+void TestChunkStrings() {
+    Check(hdm::ChunkStrings({}, 100).empty(), "ChunkStrings: empty input gives 0 chunks");
+    Check(hdm::ChunkStrings({"a", "b"}, 0).empty(), "ChunkStrings: maxPerChunk=0 returns empty");
+
+    const auto single = hdm::ChunkStrings({"oem1.inf", "oem2.inf"}, 100);
+    Check(single.size() == 1 && single[0].size() == 2 && single[0][1] == "oem2.inf",
+          "ChunkStrings: <100 keeps 1 chunk");
+
+    std::vector<std::string> many;
+    many.reserve(250);
+    for (int i = 0; i < 250; ++i) {
+        many.push_back("oem" + std::to_string(i) + ".inf");
+    }
+    const auto split = hdm::ChunkStrings(many, 100);
+    Check(split.size() == 3 && split[0].size() == 100 && split[1].size() == 100 && split[2].size() == 50 &&
+              split[0][0] == "oem0.inf" && split[1][0] == "oem100.inf" && split[2][49] == "oem249.inf",
+          "ChunkStrings: 250 items split into 100+100+50 preserving order");
+}
+
 } // namespace
 
 int main() {
@@ -1198,6 +1217,7 @@ int main() {
     TestTrustedTempAndCliValidation();
     TestBoundedCopyAndPackageStaging();
     TestSafeZipExtractor();
+    TestChunkStrings();
 
     std::cout << "\nSummary: " << g_passed << " passed, " << g_failed << " failed.\n";
     return g_failed == 0 ? 0 : 1;

@@ -1568,7 +1568,13 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
 
     const float baseProg = 0.10f;
     const float spanPerItem = 0.90f / static_cast<float>(targets.size());
-    auto markRemaining = [&](size_t startIndex, bool rebootReqFlag, const std::string& status) {
+    auto markRemaining = [&](size_t startIndex,
+                             bool rebootReqFlag,
+                             const std::string& status,
+                             bool countAsFailed = false) {
+        if (countAsFailed && startIndex < targets.size()) {
+            summary.failedCount += (targets.size() - startIndex);
+        }
         if (!onItemUpdate) return;
         for (size_t r = startIndex; r < targets.size(); ++r) {
             onItemUpdate(targets[r].id, false, rebootReqFlag, status);
@@ -1949,7 +1955,12 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
                 }
                 ++summary.failedCount;
                 if (onItemUpdate) onItemUpdate(target.id, false, false, statusMsg);
-                markRemaining(idx + 1, false, instWait == JobWaitOutcome::Cancelled ? "Отменено" : "Пропущено");
+                const bool skippedByTimeout = (instWait != JobWaitOutcome::Cancelled);
+                markRemaining(
+                    idx + 1,
+                    false,
+                    skippedByTimeout ? "Пропущено" : "Отменено",
+                    skippedByTimeout);
                 break;
             }
 

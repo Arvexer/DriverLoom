@@ -1769,6 +1769,11 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         } else if (run.cancelled || run.exitCode == 3) {
             launched = false;
             launchErr = ERROR_CANCELLED;
+        } else if (run.exitCode == 0 || run.exitCode == 2) {
+            // Over-The-Shoulder UAC runs under another admin account whose LocalAppData rejects the user's --log;
+            // rely on process exit code (0 = success, 2 = reboot required) when [META] PKG_EXIT was not streamed.
+            launched = true;
+            exitCode = (run.exitCode == 2) ? 3010u : 0u;
         } else {
             launched = false;
             errorAlreadyLogged = !tempLog.empty();

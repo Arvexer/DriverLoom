@@ -337,7 +337,7 @@ void DriverLoomApp::RenderOverviewTab() {
     // =========================================================================
     // 2. FOUR SUMMARY TILES (2x2 Grid)
     // =========================================================================
-    const float tileW = std::max(220.0f, (fullW - gap) * 0.5f);
+    const float tileW = std::min(fullW, std::max(std::round(220.0f * uiScale), (fullW - gap) * 0.5f));
     const float extraTileLine = (tileW < 430.0f * uiScale) ? ImGui::GetTextLineHeightWithSpacing() : 0.0f;
     const float tileH = std::max(
         std::round(112.0f * uiScale),
@@ -744,7 +744,7 @@ void DriverLoomApp::RenderOverviewTab() {
                     "Посмотреть все обновления...###QMore",
                     "Переглянути всі оновлення...###QMore",
                     "View All Updates...###QMore"))) {
-                NavigateTo(PageComponents);
+                NavigateTo(batchTargets.empty() && attnCtrls > 0 ? PageDiagnostics : PageComponents);
             }
         }
 

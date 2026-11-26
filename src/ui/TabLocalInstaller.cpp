@@ -108,7 +108,11 @@ void DriverLoomApp::RenderDriverStoreSection() {
                             }
                         });
                 }
-            });
+            },
+            hdm::Utf8ToWide(hdm::Tr(
+                "Выберите папку для сохранения бэкапа драйверов",
+                "Виберіть папку для збереження бекапу драйверів",
+                "Select folder to save driver backup")));
     }
     if (isAppForeground &&
         ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
@@ -356,9 +360,12 @@ void DriverLoomApp::RenderDriverStoreSection() {
     const float actionColW = rmBtnW + style.CellPadding.x * 2.0f + std::round(6.0f * uiScale);
 
     const char* selHdr = hdm::Tr("Выбор", "Вибір", "Select");
+    PushFontSafe(g_fontSecondaryHeader);
+    const float selHdrW = ImGui::CalcTextSize(selHdr).x;
+    PopFontSafe(g_fontSecondaryHeader);
     const float selColW = std::max(
         74.0f * uiScale,
-        ImGui::CalcTextSize(selHdr).x + style.CellPadding.x * 2.0f + std::round(8.0f * uiScale));
+        selHdrW + style.CellPadding.x * 2.0f + std::round(8.0f * uiScale));
 
     if (ImGui::BeginTable("##DriverStoreTable", 9, kTableFlags, ImGui::GetContentRegionAvail())) {
         ImGui::TableSetupScrollFreeze(0, 1);

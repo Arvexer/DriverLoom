@@ -66,7 +66,11 @@ public:
     LocalDriverInstaller(const LocalDriverInstaller&) = delete;
     LocalDriverInstaller& operator=(const LocalDriverInstaller&) = delete;
 
-    void PickFolderAsync(HWND ownerWindow, LogCallback onLog, FolderPickedCallback onPicked);
+    void PickFolderAsync(
+        HWND ownerWindow,
+        LogCallback onLog,
+        FolderPickedCallback onPicked,
+        std::wstring dialogTitle = {});
     void ScanInfFilesAsync(const std::wstring& folderPath, LogCallback onLog);
     void InstallFromFolderAsync(
         const std::wstring& folderPath,

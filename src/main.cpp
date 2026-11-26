@@ -695,9 +695,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     hdm::SetMainWindowHandle(hwnd);
 
     g_dpiScale = ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd);
-    if (g_dpiScale > 0.5f) {
-        int initW = static_cast<int>(std::round(1280.0f * g_dpiScale));
-        int initH = static_cast<int>(std::round(820.0f * g_dpiScale));
+    const float initScale = EffectiveUiScale();
+    if (initScale > 0.5f) {
+        int initW = static_cast<int>(std::round(1280.0f * initScale));
+        int initH = static_cast<int>(std::round(820.0f * initScale));
         HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
         MONITORINFO mi{};
         mi.cbSize = sizeof(mi);

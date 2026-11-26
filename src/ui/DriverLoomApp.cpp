@@ -367,7 +367,7 @@ void DriverLoomApp::RenderSidebar() {
     const ImGuiStyle& sbStyle = ImGui::GetStyle();
     const float footerItemH = std::round(38.0f * uiScale);
     const float quickRowH = std::round(32.0f * uiScale);
-    const float bottomMargin = std::round(16.0f * uiScale);
+    const float bottomMargin = std::round(4.0f * uiScale);
     const float footerTotalH =
         1.0f + sbStyle.ItemSpacing.y +
         std::round(4.0f * uiScale) + sbStyle.ItemSpacing.y +
