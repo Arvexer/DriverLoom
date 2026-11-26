@@ -64,8 +64,9 @@
 - **Zero Runtime Dependencies**: statically linked CRT (`/MT` on MSVC, `-static -static-libgcc -static-libstdc++` on MinGW-w64) — ships as a single portable executable.
 - **Instant `EN / RU / UA` Localization**: auto-detects Windows UI language on first launch and switches live from **Settings**.
 - **Dark & Light Themes**: toggles in one click from the sidebar footer or Settings together with the native Windows DWM title bar.
+- **Adaptive UI Scaling (`90%–150%`) & Per-Monitor DPI**: switchable interface scale presets (`90% / 100% / 110% / 125% / 150%`) with `PerMonitorV2` DPI awareness and live font/layout reload.
 - **Simple vs Expert UI Modes**: keeps everyday driver and runtime updates effortless for casual users while unlocking full low-level PnP and `DriverStore` controls in **Expert** mode.
-- **Persistent Preferences**: UI mode, theme, language, update auto-check, and driver baseline snapshots persist cleanly in `HKEY_CURRENT_USER\Software\DriverLoom`.
+- **Persistent Preferences**: UI mode, theme, language, UI scale, update auto-check, and driver baseline snapshots persist cleanly in `HKEY_CURRENT_USER\Software\DriverLoom`.
 - **Non-Blocking Multithreaded UI**: hardware enumeration, WinHTTP version checks, downloads, and WUA/INF installations run strictly in background worker threads with progress bars and cancellation support.
 
 ---
@@ -78,7 +79,7 @@
   - **Mode Toggle**: switches between `Simple` and `Expert`.
   - **Theme Toggle**: switches between Dark and Light themes (with matching native Windows title bar).
   - **About & Release Checker (`ⓘ`)**: opens the *About DriverLoom* modal with author links, e-mail contact, support link, and non-blocking GitHub Releases checking via WinHTTP.
-- **Settings Page**: language selector (`EN / RU / UA`), Dark/Light theme, `Simple / Expert` mode, quick `Restart as Administrator` (`UAC`), one-click Restore Point creation, and startup update-check preferences.
+- **Settings Page**: language selector (`EN / RU / UA`), Dark/Light theme, interface scale (`90% / 100% / 110% / 125% / 150%`), `Simple / Expert` mode, quick `Restart as Administrator` (`UAC`), one-click Restore Point creation, and startup update-check preferences.
 - **Bottom Status Bar & Collapsible Log (`Ctrl+L`)**: shows the current operation status and expands a live color-coded log drawer on demand.
 
 ### Simple (Safe) vs Expert Mode
@@ -105,7 +106,7 @@
 - **Gaming & System Runtimes**: `Visual C++ Redistributable (2010–2022)`, `DirectX End-User Runtime`, `.NET Desktop Runtime 8 / 9 / 10`, `.NET Framework 4.8.1`, `Edge WebView2`, `Vulkan Runtime`, and `OpenAL`.
 - **Drivers & GPU / Chipset**: detects NVIDIA, AMD, Intel GPUs, AMD/Intel chipsets, onboard audio, LAN, Wi-Fi, and Bluetooth adapters and resolves WHQL/vendor updates.
 - **Optional Third-Party Software (`Optional Apps`)**: detects connected peripherals (mice, keyboards), motherboards (e.g., ASUS Armoury Crate), and monitor companion tools, clearly marking them **Optional** and excluding them from recommended automatic batch installs.
-- **Verified Installation**: card-based layout with `All`, `Gaming`, `Drivers & GPU`, and `Optional Apps` filters, Authenticode (`WinVerifyTrust`) checks before launch, and automatic Restore Point protection.
+- **Verified Installation**: card-based layout with `All`, `Gaming`, `Drivers & GPU`, and `Optional Apps` filters, `InstallerSha256` manifest verification, Authenticode (`WinVerifyTrust`) trust-chain & expected publisher checks before launch, and automatic Restore Point protection.
 
 ### Page 3 — Windows Update
 - **Windows Update Agent (WUA COM API)**: welcoming scan prompt on entry, asynchronous driver and optional Windows system update discovery (`IUpdateSession`), download, and installation with live progress (`BeginDownload` / `BeginInstall`).
@@ -116,7 +117,7 @@
 - **Monitor Inspection (EDID + GDI)**: extracts the physical monitor model, manufacturer, diagonal screen size, and native resolution from EDID alongside the active display mode (`Resolution @ Hz`) and connected GPU.
 - **GPU Dedicated VRAM (DXGI)**: displays dedicated video memory per graphics adapter.
 - **Filters & Instant Search (`Ctrl+F`)**: `All`, `Attention`, `Monitors`, `Peripherals`, `GPU & Chipset`.
-- **One-Click Microsoft Update Catalog Install**: searches WHQL `.cab` packages by `Hardware ID` (`SUBSYS` first, then `VEN/DEV`), verifies Authenticode signature, extracts cleanly, and installs via `DiInstallDriverW`.
+- **One-Click Microsoft Update Catalog Install**: searches WHQL `.cab` packages by `Hardware ID` (`SUBSYS` first, then `VEN/DEV`), verifies Authenticode signature and Microsoft publisher, extracts cleanly with hardened archive limits, and installs via `DiInstallDriverW`.
 - **Device Details Card**: displays human-friendly device explanations and quick actions (and full PnP context menu + `oem*.inf` jump in Expert mode).
 
 ### Page 5 — System & Protection
@@ -151,9 +152,11 @@
 ## Security & Anti-Cheat Compatibility
 
 - **Least Privilege (`asInvoker`)**: [`resources/app.manifest`](resources/app.manifest) avoids forced startup elevation; UAC (`ShellExecuteExW` with `"runas"`) is requested on demand only for actual driver installation, `DriverStore` cleanup, or system repair actions.
-- **Complete PE Metadata**: [`resources/version.rc`](resources/version.rc) provides full `VERSIONINFO` metadata (`DriverLoom v1.2.0.0`, publisher `Arvexer`).
-- **Authenticode Verification**: downloaded `.cab` packages and vendor installers are verified using Windows `WinVerifyTrust` before execution.
-- **Clean Native Code**: prioritizes Win32/COM APIs (`DiInstallDriverW`), uses strict RAII guards for `HDEVINFO` and COM interfaces, safely quotes elevated worker CLI arguments, and uses no executable packers (no UPX or similar).
+- **DLL Search-Order Hijacking Protection**: calls `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)` at the very start of `WinMain`, enables `/DEPENDENTLOADFLAG:0x800` in MSVC builds, and restricts dynamic `LoadLibraryExW` calls exclusively to `System32` (`LOAD_LIBRARY_SEARCH_SYSTEM32`).
+- **SHA-256 & Authenticode Publisher Verification**: validates `InstallerSha256` checksums from WinGet manifests before extraction/launch, verifies downloaded `.cab` packages and vendor installers via Windows `WinVerifyTrust` against expected publishers (`Subject CN/O`), holds open file locks against TOCTOU tampering, and verifies companion binaries inside extracted archives (`DXSETUP.exe`, `DSETUP.dll`, `dsetup32.dll`).
+- **Hardened Downloads, Archives & DriverStore Safety**: enforces HTTPS with TLS 1.2/1.3 (`WinHTTP`) and download host allowlists, bounds archive extraction (total size, file count, path traversal, NTFS ADS `:`, and reparse-point checks), safely removes unused `DriverStore` packages via `SetupUninstallOEMInfW` (without forced deletion), and validates canonical `%TEMP%` paths for elevated `CliWorker` logs and cancel files.
+- **PE Hardening & Complete Metadata**: [`resources/version.rc`](resources/version.rc) provides full `VERSIONINFO` metadata (`DriverLoom v1.2.0.0`, publisher `Arvexer`); MSVC Release builds enable static CRT (`/MT`), Control Flow Guard (`/GUARD:CF`), ASLR (`/DYNAMICBASE`, `/HIGHENTROPYVA`), DEP (`/NXCOMPAT`), and Shadow Stack (`/CETCOMPAT`) — verified automatically in GitHub Actions CI.
+- **Clean Native Code**: prioritizes Win32/COM APIs (`DiInstallDriverW`), uses strict RAII guards for `HDEVINFO` and COM interfaces, safely quotes elevated worker CLI arguments, uses zero telemetry, and uses no executable packers (no UPX or similar).
 
 ---
 
@@ -216,6 +219,7 @@ Standalone output binary: `build/DriverLoom.exe`.
 --lang ru|uk|en
 --mode standard|advanced
 --theme dark|light
+--scale 90|100|110|125|150
 --start-tab 0..6
 --diag-section 0..4
 --local-section 0..1
