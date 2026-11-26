@@ -550,7 +550,7 @@ void DriverLoomApp::RenderOverviewTab() {
 
         // Anchor action button consistently with equal bottom padding across all 4 tiles
         const float btnY = tileH - tilePadY - ImGui::GetFrameHeight();
-        ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY() + std::round(6.0f * uiScale), btnY));
+        ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY(), btnY));
         if (RenderSecondaryButton(actionLabel)) {
             onAction();
         }

@@ -450,7 +450,7 @@ MonitorBrandInfo GetMonitorBrandSupport(const std::string& pnpOrBrand, const std
                 "m/MSI/GamingIntelligence",
                 "https://download.msi.com/uti_exe/monitor/Gaming-Intelligence-x64.zip",
                 "setup.exe",
-                "/S /v /qn"};
+                "/S"};
     }
     if (pnpOrBrand == "GSM" || pnpOrBrand == "LGD" || pnpOrBrand == "LG" ||
         ContainsCaseInsensitive(model, "LG")) {
@@ -761,7 +761,7 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                 256 * 1024,
                 nullptr,
                 {},
-                {"dotnetcli.blob.core.windows.net", "microsoft.com", "azureedge.net"});
+                {"dotnetcli.blob.core.windows.net", "microsoft.com", "dotnetcli.azureedge.net"});
             const auto markUnavailable = [&](const std::string& compId) {
                 updateItem(compId, [](SystemComponentItem& item) {
                     item.latestVersion = "Недоступно";
@@ -1204,7 +1204,7 @@ std::vector<std::string_view> GetAllowedDownloadHostsForItem(
         item.id == "rt_vc2013" || item.id == "rt_vc2012" || item.id == "rt_vc2010" ||
         item.id == "rt_dx_legacy" || item.id == "rt_dotnet8" || item.id == "rt_dotnet9" ||
         item.id == "rt_dotnet10" || item.id == "rt_netfx48" || item.id == "rt_webview2") {
-        return {"microsoft.com", "aka.ms", "windowsupdate.com", "azureedge.net", "msecnd.net"};
+        return {"microsoft.com", "aka.ms", "windowsupdate.com", "dotnetcli.azureedge.net", "msecnd.net"};
     }
     if (item.id == "rt_vulkan") {
         return {"lunarg.com"};
@@ -1237,7 +1237,7 @@ std::vector<std::string_view> GetAllowedDownloadHostsForItem(
         return {"asus.com"};
     }
     if (item.id == "sw_epos") {
-        return {"eposaudio.com", "epos.com", "sennheiser.com", "azureedge.net"};
+        return {"eposaudio.com", "epos.com", "sennheiser.com", "epos.azureedge.net"};
     }
     if (item.id == "sw_elgato") {
         return {"elgato.com", "corsair.com"};

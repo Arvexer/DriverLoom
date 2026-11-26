@@ -37,7 +37,7 @@ void DriverLoomApp::RebuildComponentsViewCache(ImGuiTableSortSpecs* sortSpecs) {
                 const bool isOpt = IsOptionalComponent(x);
                 const bool isMuted = IsComponentNotificationMuted(x.id);
                 if (isMuted) {
-                    return 5;
+                    return (x.installed && !x.updateAvailable) ? 6 : 5;
                 }
                 if (!isOpt) {
                     if (!x.installed && !x.directInstallerUrl.empty()) return 0;
@@ -227,7 +227,11 @@ void DriverLoomApp::RenderComponentsTab() {
             if (newlyMuted > 0) {
                 MakeLogger()(
                     hdm::LogLevel::Info,
-                    "Скрыты уведомления для выбранных компонентов: " + std::to_string(newlyMuted) + ".");
+                    std::string(hdm::Tr(
+                        "Скрыты уведомления для выбранных компонентов: ",
+                        "Приховано сповіщення для вибраних компонентів: ",
+                        "Notifications muted for selected components: ")) +
+                        std::to_string(newlyMuted) + ".");
             }
         }
         ImGui::EndDisabled();
@@ -281,7 +285,11 @@ void DriverLoomApp::RenderComponentsTab() {
                 if (restored > 0) {
                     MakeLogger()(
                         hdm::LogLevel::Info,
-                        "Восстановлены уведомления для компонентов: " + std::to_string(restored) + ".");
+                        std::string(hdm::Tr(
+                            "Восстановлены уведомления для компонентов: ",
+                            "Відновлено сповіщення для компонентів: ",
+                            "Notifications restored for components: ")) +
+                            std::to_string(restored) + ".");
                 }
             }
             ImGui::EndDisabled();
@@ -433,8 +441,10 @@ void DriverLoomApp::RenderComponentsTab() {
         const std::string nameShown = hdm::TrDyn(item.name);
         const char* shortBadge = hdm::Tr("Установлен", "Встановлено", "Installed");
         ImVec4 badgeCol = HealthyColor();
-        if (isMuted && (!item.installed || item.updateAvailable)) {
-            shortBadge = hdm::Tr("Уведомления скрыты", "Сповіщення приховано", "Notifications muted");
+        if (isMuted) {
+            shortBadge = (item.installed && !item.updateAvailable)
+                             ? hdm::Tr("Установлен (скрыто)", "Встановлено (приховано)", "Installed (muted)")
+                             : hdm::Tr("Уведомления скрыты", "Сповіщення приховано", "Notifications muted");
             badgeCol = MutedTextColor();
         } else if (optionalInstall) {
             shortBadge = hdm::Tr("По желанию", "За бажанням", "Optional");

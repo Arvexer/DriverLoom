@@ -19,6 +19,7 @@ struct HttpRequestRegistry {
     std::mutex mtx;
     bool aborted{false};
     bool shutdown{false};
+    std::atomic<bool> abortedAtomic{false};
     std::unordered_set<HINTERNET> handles;
 
     bool Register(HINTERNET h);
@@ -26,6 +27,9 @@ struct HttpRequestRegistry {
     void AbortAll() noexcept;
     void Shutdown() noexcept;
     void Reset() noexcept;
+    [[nodiscard]] bool IsAborted() const noexcept {
+        return abortedAtomic.load(std::memory_order_acquire);
+    }
 };
 
 /// Binds an HttpRequestRegistry to the current worker thread so WinHTTP requests become cancellable.

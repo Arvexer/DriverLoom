@@ -61,18 +61,19 @@ hdm::HandleGuard OpenValidatedTempLogFile(const std::wstring& rawPath) {
         return hdm::HandleGuard{};
     }
 
-    const DWORD attrs = GetFileAttributesW(rawPath.c_str());
-    if (attrs != INVALID_FILE_ATTRIBUTES &&
+    const std::wstring safePath = canonicalTemp + L"\\" + fileName;
+    const DWORD attrs = GetFileAttributesW(safePath.c_str());
+    if (attrs == INVALID_FILE_ATTRIBUTES ||
         (attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
         return hdm::HandleGuard{};
     }
 
     hdm::HandleGuard handle(CreateFileW(
-        rawPath.c_str(),
+        safePath.c_str(),
         GENERIC_WRITE | FILE_READ_ATTRIBUTES,
         FILE_SHARE_READ,
         nullptr,
-        OPEN_ALWAYS,
+        OPEN_EXISTING,
         FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
         nullptr));
     if (!handle.IsValid()) {
@@ -86,9 +87,8 @@ hdm::HandleGuard OpenValidatedTempLogFile(const std::wstring& rawPath) {
         return hdm::HandleGuard{};
     }
 
-    const std::wstring expectedFinal = canonicalTemp + L"\\" + fileName;
     const std::wstring actualFinal = GetFinalPathString(handle.Get());
-    if (!EqualsIgnoreCaseWide(actualFinal, expectedFinal)) {
+    if (!EqualsIgnoreCaseWide(actualFinal, safePath)) {
         return hdm::HandleGuard{};
     }
 
@@ -290,9 +290,10 @@ int RunCliModeIfRequested() {
             std::wstring canonicalTemp;
             std::wstring fileName;
             if (hdm::ValidateWorkerTempPath(path, L".log.cancel", canonicalTemp, fileName)) {
-                watcher = std::thread([path, this]() {
+                const std::wstring safePath = canonicalTemp + L"\\" + fileName;
+                watcher = std::thread([safePath, this]() {
                     while (!stop.load()) {
-                        const DWORD attrs = GetFileAttributesW(path.c_str());
+                        const DWORD attrs = GetFileAttributesW(safePath.c_str());
                         if (attrs != INVALID_FILE_ATTRIBUTES &&
                             (attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0) {
                             cancel.store(true);

@@ -701,7 +701,6 @@ void DriverLoomApp::RenderSettingsTab() {
 
             curY += titleH + std::round(8.0f * uiScale);
             PushFontSafe(g_fontSmall);
-            const float wrapW = halfW - cardPad * 2.0f;
             dl->AddText(
                 g_fontSmall,
                 g_fontSmall != nullptr ? g_fontSmall->LegacySize : ImGui::GetFontSize(),

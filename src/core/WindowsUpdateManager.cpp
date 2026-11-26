@@ -1757,7 +1757,8 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
                     markRemaining(
                         idx + 1,
                         false,
-                        dlWait == JobWaitOutcome::Cancelled ? "Отменено" : "Пропущено");
+                        dlWait == JobWaitOutcome::Cancelled ? "Отменено" : "Пропущено",
+                        dlWait != JobWaitOutcome::Cancelled);
                     break;
                 }
 

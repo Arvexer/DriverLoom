@@ -90,6 +90,12 @@ bool VerifyAndLockAuthenticodeFile(
 /// Returns the canonical Authenticode publisher allowlist for WHQL CAB driver packages.
 [[nodiscard]] const std::vector<std::string_view>& DefaultCabPublishers();
 
+/// Returns the static canonical allowlist of trusted vendor publishers permitted for staged packages.
+[[nodiscard]] const std::vector<std::string_view>& KnownAllowedPackagePublishers();
+
+/// Checks whether a publisher token exactly matches the canonical elevated-side allowlist.
+[[nodiscard]] bool IsKnownAllowedPublisher(std::string_view token);
+
 /// Checks Authenticode Subject/CN/Organization fields against an allowlist using whole-token boundaries.
 [[nodiscard]] bool MatchesAllowedPublisher(
     std::string_view subject,
@@ -159,7 +165,8 @@ StagedPackageResult RunStagedPackageInAdminDir(
     const std::atomic<bool>* cancelFlag = nullptr,
     const std::atomic<bool>* stopFlag = nullptr);
 
-/// Launches a verified installer via ShellExecuteExW and waits with cancellation support.
+/// Launches a verified installer via CreateProcessW when elevated or ShellExecuteExW ("runas") when unelevated,
+/// waiting with cancellation support.
 bool LaunchAndWaitProcess(
     const std::filesystem::path& exePath,
     const std::wstring& args,

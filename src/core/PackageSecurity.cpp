@@ -15,7 +15,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <cwchar>
 #include <fstream>
 #include <sstream>
@@ -101,7 +103,7 @@ std::wstring ResolveTrustedLocalTempDirFromBase(const std::filesystem::path& loc
 std::wstring ResolveTrustedLocalTempDir() {
     CoTaskMemGuard<wchar_t> localAppRaw;
     if (FAILED(SHGetKnownFolderPath(
-            FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, localAppRaw.Put())) ||
+            FOLDERID_LocalAppData, KF_FLAG_DEFAULT_PATH, nullptr, localAppRaw.Put())) ||
         localAppRaw.Get() == nullptr) {
         return {};
     }
@@ -986,6 +988,141 @@ const std::vector<std::string_view>& DefaultCabPublishers() {
     return kCabPublishers;
 }
 
+const std::vector<std::string_view>& KnownAllowedPackagePublishers() {
+    static const std::vector<std::string_view> kKnownPublishers{
+        "Microsoft Corporation",
+        "Microsoft Windows",
+        "Intel Corporation",
+        "Realtek Semiconductor",
+        "Advanced Micro Devices",
+        "NVIDIA Corporation",
+        "Broadcom",
+        "Qualcomm",
+        "MediaTek",
+        "ASUSTeK Computer",
+        "ASUS",
+        "LunarG",
+        "Khronos",
+        "Creative",
+        "OpenAL",
+        "Razer",
+        "Logitech",
+        "SteelSeries",
+        "Corsair",
+        "EPOS",
+        "Sennheiser",
+        "DSEA",
+        "Elgato",
+        "Dell Inc",
+        "Dell Technologies",
+        "Micro-Star",
+        "Samsung Electronics",
+        "Philips",
+        "MMD",
+        "TPV",
+        "Portrait Displays",
+        "ViewSonic",
+        "LG Electronics",
+        "BenQ",
+        "AOC",
+        "Gigabyte",
+        "Lenovo",
+        "Acer",
+        "HP Inc",
+        "Hewlett-Packard",
+        "Hewlett Packard",
+    };
+    return kKnownPublishers;
+}
+
+bool IsKnownAllowedPublisher(std::string_view token) {
+    for (std::string_view allowed : KnownAllowedPackagePublishers()) {
+        if (token == allowed) {
+            return true;
+        }
+    }
+    return false;
+}
+
+namespace {
+
+bool HasPeBinaryHeader(const std::filesystem::path& filePath) {
+    HandleGuard file(CreateFileW(
+        filePath.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr));
+    if (!file.IsValid()) {
+        return false;
+    }
+    BY_HANDLE_FILE_INFORMATION fi{};
+    if (!GetFileInformationByHandle(file.Get(), &fi) ||
+        (fi.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) != 0) {
+        return false;
+    }
+    const uint64_t fileSize =
+        (static_cast<uint64_t>(fi.nFileSizeHigh) << 32) |
+        static_cast<uint64_t>(fi.nFileSizeLow);
+    if (fileSize < 64ULL) {
+        return false;
+    }
+    BYTE dosHdr[64]{};
+    DWORD readBytes = 0;
+    if (!ReadFile(file.Get(), dosHdr, sizeof(dosHdr), &readBytes, nullptr) || readBytes != sizeof(dosHdr)) {
+        return false;
+    }
+    if (dosHdr[0] != 'M' || dosHdr[1] != 'Z') {
+        return false;
+    }
+    uint32_t eLfanew = 0;
+    std::memcpy(&eLfanew, dosHdr + 0x3C, sizeof(eLfanew));
+    if (eLfanew < 64ULL || static_cast<uint64_t>(eLfanew) > fileSize - 4ULL) {
+        return false;
+    }
+    LARGE_INTEGER offset{};
+    offset.QuadPart = static_cast<LONGLONG>(eLfanew);
+    if (!SetFilePointerEx(file.Get(), offset, nullptr, FILE_BEGIN)) {
+        return false;
+    }
+    BYTE peSig[4]{};
+    readBytes = 0;
+    if (!ReadFile(file.Get(), peSig, sizeof(peSig), &readBytes, nullptr) || readBytes != sizeof(peSig)) {
+        return false;
+    }
+    return peSig[0] == 'P' && peSig[1] == 'E' && peSig[2] == 0 && peSig[3] == 0;
+}
+
+bool IsForbiddenScriptOrRedirectExtension(std::string_view ext) {
+    static constexpr std::string_view kBlockedExts[] = {
+        ".bat", ".cmd", ".ps1", ".vbs", ".vbe", ".js", ".jse",
+        ".wsf", ".wsh", ".hta", ".lnk", ".reg", ".local", ".config",
+    };
+    for (std::string_view b : kBlockedExts) {
+        if (ext == b) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool IsBinaryVerificationExtension(std::string_view ext) {
+    static constexpr std::string_view kBinaryExts[] = {
+        ".exe", ".dll", ".sys", ".msi", ".cab", ".ocx", ".cpl",
+        ".msp", ".mst", ".scr", ".drv", ".ax", ".com", ".pyd", ".mui",
+    };
+    for (std::string_view b : kBinaryExts) {
+        if (ext == b) {
+            return true;
+        }
+    }
+    return false;
+}
+
+} // namespace
+
 bool VerifyExtractedDirectoryBinaries(
     const std::filesystem::path& dir,
     const std::vector<std::string_view>& allowedPublishers,
@@ -1012,9 +1149,14 @@ bool VerifyExtractedDirectoryBinaries(
             continue;
         }
         const std::string ext = ToLowerAscii(WideToUtf8(it->path().extension().wstring()));
-        if (ext == ".exe" || ext == ".dll" || ext == ".sys" || ext == ".msi" ||
-            ext == ".cab" || ext == ".ocx" || ext == ".cpl" || ext == ".msp" ||
-            ext == ".mst" || ext == ".scr") {
+        if (IsForbiddenScriptOrRedirectExtension(ext)) {
+            if (outReason != nullptr) {
+                *outReason = "Обнаружен запрещённый файл сценария или перенаправления загрузчика: " +
+                             WideToUtf8(it->path().filename().wstring());
+            }
+            return false;
+        }
+        if (IsBinaryVerificationExtension(ext) || HasPeBinaryHeader(it->path())) {
             std::string reason;
             HandleGuard fileLock;
             if (!VerifyAndLockAuthenticodeFile(
@@ -1049,26 +1191,59 @@ bool LaunchAndWaitProcess(
     if (outProcessStillRunning != nullptr) {
         *outProcessStillRunning = false;
     }
-    CoInitGuard comInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-
-    SHELLEXECUTEINFOW sei{};
-    sei.cbSize = sizeof(sei);
-    sei.fMask = SEE_MASK_NOCLOSEPROCESS;
-    sei.hwnd = GetMainWindowHandle();
-    sei.lpVerb = IsProcessElevated() ? L"open" : L"runas";
     const std::wstring wFile = exePath.wstring();
     const std::wstring wDir = exePath.parent_path().wstring();
-    sei.lpFile = wFile.c_str();
-    sei.lpParameters = args.empty() ? nullptr : args.c_str();
-    sei.lpDirectory = wDir.empty() ? nullptr : wDir.c_str();
-    sei.nShow = SW_SHOWNORMAL;
+    HandleGuard proc;
 
-    if (!ShellExecuteExW(&sei)) {
-        if (outLaunchErr) *outLaunchErr = GetLastError();
-        return false;
+    if (IsProcessElevated()) {
+        std::wstring cmdLine = QuoteWin32Arg(wFile);
+        if (!args.empty()) {
+            cmdLine += L" ";
+            cmdLine += args;
+        }
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_SHOWNORMAL;
+        PROCESS_INFORMATION pi{};
+        if (!CreateProcessW(
+                wFile.c_str(),
+                cmdLine.data(),
+                nullptr,
+                nullptr,
+                FALSE,
+                0,
+                nullptr,
+                wDir.empty() ? nullptr : wDir.c_str(),
+                &si,
+                &pi)) {
+            if (outLaunchErr) *outLaunchErr = GetLastError();
+            return false;
+        }
+        HandleGuard threadGuard(pi.hThread);
+        proc.Reset(pi.hProcess);
+    } else {
+        CoInitGuard comInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+        SHELLEXECUTEINFOW sei{};
+        sei.cbSize = sizeof(sei);
+        sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+        sei.hwnd = GetMainWindowHandle();
+        sei.lpVerb = L"runas";
+        sei.lpFile = wFile.c_str();
+        sei.lpParameters = args.empty() ? nullptr : args.c_str();
+        sei.lpDirectory = wDir.empty() ? nullptr : wDir.c_str();
+        sei.nShow = SW_SHOWNORMAL;
+
+        if (!ShellExecuteExW(&sei)) {
+            if (outLaunchErr) *outLaunchErr = GetLastError();
+            return false;
+        }
+        if (sei.hProcess != nullptr) {
+            proc.Reset(sei.hProcess);
+        }
     }
-    if (sei.hProcess != nullptr) {
-        HandleGuard proc(sei.hProcess);
+
+    if (proc.IsValid()) {
         for (;;) {
             const DWORD wait = WaitForSingleObject(proc.Get(), 200);
             if (wait == WAIT_OBJECT_0) {
@@ -1168,6 +1343,10 @@ bool ParsePipeSeparatedPublishers(
                 outPublishers.clear();
                 return false;
             }
+        }
+        if (!IsKnownAllowedPublisher(token)) {
+            outPublishers.clear();
+            return false;
         }
         outPublishers.push_back(token);
         if (sep == std::string_view::npos) {
@@ -1364,6 +1543,10 @@ bool StageAndVerifyPackageIntoDir(
     pubViews.reserve(opts.allowedPublishers.size());
     for (const auto& p : opts.allowedPublishers) {
         if (!p.empty()) {
+            if (!IsKnownAllowedPublisher(p)) {
+                outError = "Указан недоверенный издатель установки.";
+                return false;
+            }
             pubViews.push_back(p);
         }
     }

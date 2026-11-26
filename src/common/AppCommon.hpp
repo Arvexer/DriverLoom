@@ -772,7 +772,8 @@ inline bool IsSafeIdToken(std::string_view tok) noexcept {
     }
     for (unsigned char ch : tok) {
         const bool ok = (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') ||
-                        (ch >= 'a' && ch <= 'z') || ch == '_' || ch == '-' || ch == '.';
+                        (ch >= 'a' && ch <= 'z') || ch == '_' || ch == '-' ||
+                        ch == '.' || ch == '&' || ch == '\\';
         if (!ok) {
             return false;
         }
@@ -793,8 +794,13 @@ inline std::string SerializeIdSet(const std::unordered_set<std::string>& ids) {
     }
     std::sort(sorted.begin(), sorted.end());
     std::string out;
+    constexpr size_t kMaxSerializedChars = 16380;
     for (size_t i = 0; i < sorted.size(); ++i) {
-        if (i > 0) {
+        const size_t addLen = (out.empty() ? 0u : 1u) + sorted[i].size();
+        if (out.size() + addLen > kMaxSerializedChars) {
+            break;
+        }
+        if (!out.empty()) {
             out.push_back('|');
         }
         out += sorted[i];

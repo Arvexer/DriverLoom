@@ -170,6 +170,9 @@ public:
 
     [[nodiscard]] HINTERNET Get() const noexcept { return handle_; }
     [[nodiscard]] bool IsValid() const noexcept { return handle_ != nullptr; }
+    [[nodiscard]] bool IsAborted() const noexcept {
+        return registry_ != nullptr && registry_->IsAborted();
+    }
 
 private:
     HttpRequestRegistry* registry_{nullptr};
@@ -209,6 +212,7 @@ void HttpRequestRegistry::AbortAll() noexcept {
     {
         std::lock_guard<std::mutex> lock(mtx);
         aborted = true;
+        abortedAtomic.store(true, std::memory_order_release);
         toClose = std::move(handles);
         handles.clear();
     }
@@ -225,6 +229,7 @@ void HttpRequestRegistry::Shutdown() noexcept {
         std::lock_guard<std::mutex> lock(mtx);
         shutdown = true;
         aborted = true;
+        abortedAtomic.store(true, std::memory_order_release);
         toClose = std::move(handles);
         handles.clear();
     }
@@ -239,6 +244,7 @@ void HttpRequestRegistry::Reset() noexcept {
     std::lock_guard<std::mutex> lock(mtx);
     if (!shutdown) {
         aborted = false;
+        abortedAtomic.store(false, std::memory_order_release);
     }
 }
 
@@ -441,14 +447,19 @@ HttpResponse WinHttpRequest(
                              ? WINHTTP_NO_REQUEST_DATA
                              : const_cast<char*>(currentBody.data());
         const DWORD bodyLen = static_cast<DWORD>(currentBody.size());
-        if (!WinHttpSendRequest(request.Get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+        if (request.IsAborted() ||
+            !WinHttpSendRequest(request.Get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                                 bodyPtr, bodyLen, bodyLen, 0) ||
+            request.IsAborted() ||
             !WinHttpReceiveResponse(request.Get(), nullptr)) {
             return res;
         }
 
         status = 0;
         DWORD statusLen = sizeof(status);
+        if (request.IsAborted()) {
+            return res;
+        }
         WinHttpQueryHeaders(
             request.Get(),
             WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
@@ -504,7 +515,7 @@ HttpResponse WinHttpRequest(
     if (currentMethod != L"HEAD" && res.ok) {
         DWORD avail = 0;
         for (;;) {
-            if (!WinHttpQueryDataAvailable(request.Get(), &avail)) {
+            if (request.IsAborted() || !WinHttpQueryDataAvailable(request.Get(), &avail)) {
                 res.ok = false;
                 break;
             }
@@ -518,7 +529,8 @@ HttpResponse WinHttpRequest(
             const size_t toRead = std::min<size_t>(avail, maxBytes - res.body.size());
             std::string chunk(toRead, '\0');
             DWORD readBytes = 0;
-            if (!WinHttpReadData(request.Get(), chunk.data(), static_cast<DWORD>(toRead), &readBytes)) {
+            if (request.IsAborted() ||
+                !WinHttpReadData(request.Get(), chunk.data(), static_cast<DWORD>(toRead), &readBytes)) {
                 res.ok = false;
                 break;
             }
@@ -618,8 +630,10 @@ bool DownloadFileViaWinHttp(
                 WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
         }
 
-        if (!WinHttpSendRequest(request.Get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+        if (request.IsAborted() ||
+            !WinHttpSendRequest(request.Get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0,
                                 WINHTTP_NO_REQUEST_DATA, 0, 0, 0) ||
+            request.IsAborted() ||
             !WinHttpReceiveResponse(request.Get(), nullptr)) {
             if (outError) *outError = "Ошибка HTTP-запроса: " + FormatWin32Error(GetLastError());
             return false;
@@ -627,6 +641,10 @@ bool DownloadFileViaWinHttp(
 
         status = 0;
         DWORD statusLen = sizeof(status);
+        if (request.IsAborted()) {
+            if (outError) *outError = "Отменено пользователем.";
+            return false;
+        }
         WinHttpQueryHeaders(
             request.Get(),
             WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
@@ -705,7 +723,7 @@ bool DownloadFileViaWinHttp(
     DWORD avail = 0;
     std::vector<char> buf(65536);
     for (;;) {
-        if (cancelFlag != nullptr && cancelFlag->load()) {
+        if ((cancelFlag != nullptr && cancelFlag->load()) || request.IsAborted()) {
             outFile.Reset();
             std::error_code rmEc;
             std::filesystem::remove(destPath, rmEc);
@@ -723,7 +741,7 @@ bool DownloadFileViaWinHttp(
         }
         const DWORD chunkCap = std::min<DWORD>(avail, static_cast<DWORD>(buf.size()));
         DWORD readBytes = 0;
-        if (!WinHttpReadData(request.Get(), buf.data(), chunkCap, &readBytes)) {
+        if (request.IsAborted() || !WinHttpReadData(request.Get(), buf.data(), chunkCap, &readBytes)) {
             ioError = true;
             ioErrMsg = "Ошибка загрузки данных: " + FormatWin32Error(GetLastError());
             break;

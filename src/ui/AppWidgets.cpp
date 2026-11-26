@@ -432,15 +432,17 @@ void LoadUserPreferences() noexcept {
     DWORD muteType = 0;
     DWORD muteBytes = 0;
     if (RegQueryValueExW(key.Get(), L"MutedComponentIds", nullptr, &muteType, nullptr, &muteBytes) == ERROR_SUCCESS &&
-        muteBytes > 0 && muteBytes <= 32768u && muteType == REG_SZ) {
+        muteBytes > 0 && muteBytes <= 66560u && muteType == REG_SZ) {
         std::wstring buf(muteBytes / sizeof(wchar_t) + 2, L'\0');
+        DWORD readType = 0;
         if (RegQueryValueExW(
                 key.Get(),
                 L"MutedComponentIds",
                 nullptr,
-                &muteType,
+                &readType,
                 reinterpret_cast<LPBYTE>(buf.data()),
-                &muteBytes) == ERROR_SUCCESS) {
+                &muteBytes) == ERROR_SUCCESS &&
+            readType == REG_SZ) {
             g_mutedComponentIds = hdm::ParseIdSet(hdm::WideToUtf8(buf.c_str()));
         }
     }

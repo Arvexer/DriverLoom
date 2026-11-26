@@ -234,6 +234,12 @@ void TestSilentArgsAndPaths() {
         hdm::SanitizeWingetSilentArgs("/S /norestart") == "/S /norestart",
         "SilentArgs: allows /S /norestart");
     Check(
+        hdm::SanitizeWingetSilentArgs("/S") == "/S",
+        "SilentArgs: allows /S");
+    Check(
+        hdm::SanitizeWingetSilentArgs("/S /v /qn").empty(),
+        "SilentArgs: rejects /S /v /qn (InstallShield /v passthrough remains blocked)");
+    Check(
         hdm::SanitizeWingetSilentArgs("/S & calc.exe").empty(),
         "SilentArgs: rejects shell metacharacters");
     Check(
@@ -605,7 +611,8 @@ void TestTrustedTempAndCliValidation() {
     if (!logPath.empty()) {
         std::wstring canon;
         std::wstring fname;
-        Check(hdm::ValidateWorkerTempPath(logPath.wstring(), L".log", canon, fname),
+        Check(hdm::ValidateWorkerTempPath(logPath.wstring(), L".log", canon, fname) &&
+                  fname == logPath.filename().wstring(),
               "CliTemp: CreateTempLogPath output passes ValidateWorkerTempPath");
         std::error_code rmEc;
         std::filesystem::remove(logPath, rmEc);
@@ -738,10 +745,19 @@ void TestBoundedCopyAndPackageStaging() {
               parsedPubs.size() == 2 && parsedPubs[0] == "Microsoft Corporation" &&
               parsedPubs[1] == "Microsoft Windows",
           "Publishers: parses valid pipe-separated allowlist");
+    Check(hdm::ParsePipeSeparatedPublishers("NVIDIA Corporation|ASUSTeK Computer|ASUS", parsedPubs) &&
+              parsedPubs.size() == 3,
+          "Publishers: accepts known hardware vendor publishers");
     Check(!hdm::ParsePipeSeparatedPublishers("", parsedPubs), "Publishers: rejects empty string");
     Check(!hdm::ParsePipeSeparatedPublishers("Microsoft|", parsedPubs), "Publishers: rejects trailing pipe");
     Check(!hdm::ParsePipeSeparatedPublishers("A", parsedPubs), "Publishers: rejects 1-char token");
     Check(!hdm::ParsePipeSeparatedPublishers("Bad\nPub", parsedPubs), "Publishers: rejects control char");
+    Check(!hdm::ParsePipeSeparatedPublishers("Inc", parsedPubs), "Publishers: rejects weak token 'Inc'");
+    Check(!hdm::ParsePipeSeparatedPublishers("Co", parsedPubs), "Publishers: rejects weak token 'Co'");
+    Check(!hdm::ParsePipeSeparatedPublishers("LLC", parsedPubs), "Publishers: rejects weak token 'LLC'");
+    Check(!hdm::ParsePipeSeparatedPublishers("Microsoft", parsedPubs), "Publishers: rejects ambiguous 'Microsoft'");
+    Check(!hdm::ParsePipeSeparatedPublishers("Microsoft Corporation|Evil Corp", parsedPubs),
+          "Publishers: rejects mixed known + unknown publisher");
 
     std::string src64Sha;
     Check(hdm::ComputeFileSha256Hex(src64, src64Sha, &err), "Staging: hash src64", err);
@@ -758,6 +774,10 @@ void TestBoundedCopyAndPackageStaging() {
     hdm::StagedPackageOptions optNoPub;
     optNoPub.sourcePackagePath = src64;
     Check(!runStage(L"s_nopub", optNoPub, err), "Staging: rejects empty allowedPublishers");
+
+    hdm::StagedPackageOptions optWeakPub = optNoPub;
+    optWeakPub.allowedPublishers = {"Inc"};
+    Check(!runStage(L"s_weakpub", optWeakPub, err), "Staging: rejects weak unallowlisted publisher");
 
     hdm::StagedPackageOptions optBadSha = optNoPub;
     optBadSha.allowedPublishers = {"Microsoft Corporation"};
@@ -808,7 +828,46 @@ void TestBoundedCopyAndPackageStaging() {
     optZipUnsigned.expectedSha256 = zipSha;
     optZipUnsigned.allowedPublishers = {"Microsoft Corporation"};
     Check(!runStage(L"s_zip_unsigned", optZipUnsigned, err),
-          "Staging: rejects ZIP with unsigned setup.exe even when ZIP SHA-256 matches", err);
+          "Staging: rejects ZIP with unsigned setup.exe even when SHA-256 matches", err);
+
+    // Extracted directory security hardening checks (scripts, redirects, renamed PE, .drv)
+    auto verifySub = [&](const std::wstring& subName,
+                         const std::wstring& fileName,
+                         const std::vector<uint8_t>& bytes,
+                         std::string& outWhy) {
+        const std::filesystem::path sub = dir / subName;
+        std::filesystem::create_directories(sub, ec);
+        {
+            std::ofstream ofs(sub / fileName, std::ios::binary);
+            ofs.write(reinterpret_cast<const char*>(bytes.data()),
+                      static_cast<std::streamsize>(bytes.size()));
+        }
+        std::vector<hdm::HandleGuard> subLocks;
+        return hdm::VerifyExtractedDirectoryBinaries(
+            sub, {"Microsoft Corporation"}, &outWhy, &subLocks);
+    };
+    const std::vector<uint8_t> dummyTxt{'h', 'e', 'l', 'l', 'o'};
+    Check(!verifySub(L"v_bat", L"evil.bat", dummyTxt, err),
+          "ExtractVerify: rejects .bat script", err);
+    Check(!verifySub(L"v_ps1", L"evil.ps1", dummyTxt, err),
+          "ExtractVerify: rejects .ps1 script", err);
+    Check(!verifySub(L"v_cfg", L"setup.exe.config", dummyTxt, err),
+          "ExtractVerify: rejects .config CLR redirection", err);
+    Check(!verifySub(L"v_local", L"setup.exe.local", dummyTxt, err),
+          "ExtractVerify: rejects .local DLL redirection", err);
+    Check(!verifySub(L"v_drv", L"unsigned.drv", dummyTxt, err),
+          "ExtractVerify: rejects unsigned .drv binary extension", err);
+
+    std::vector<uint8_t> peBlob(72, 0);
+    peBlob[0] = 'M'; peBlob[1] = 'Z';
+    peBlob[0x3C] = 0x40; // e_lfanew = 64
+    peBlob[0x40] = 'P'; peBlob[0x41] = 'E'; peBlob[0x42] = 0; peBlob[0x43] = 0;
+    Check(!verifySub(L"v_pe_dat", L"payload.dat", peBlob, err),
+          "ExtractVerify: rejects renamed unsigned PE binary (.dat)", err);
+
+    const std::vector<uint8_t> safeMzTxt{'M', 'Z', ' ', 'n', 'o', 't', '_', 'p', 'e'};
+    Check(verifySub(L"v_txt_mz", L"readme.txt", safeMzTxt, err),
+          "ExtractVerify: allows harmless .txt starting with 'MZ ' without PE signature", err);
 }
 
 struct ZipTestEntry {
@@ -1242,12 +1301,37 @@ void TestComponentIdSetSerialization() {
     const std::string tooLong(130, 'a');
     Check(hdm::ParseIdSet(tooLong).empty(), "IdSet: rejects token >128 chars");
 
+    const std::unordered_set<std::string> hwIds{
+        "drv_wifi_VEN_8086&DEV_2725",
+        "drv_lan_VEN_10EC&DEV_8125",
+        "drv_bt_VID_8087&PID_0029",
+        "drv_audio_HDAUDIO\\FUNC_01&VEN_10EC&DEV_0897",
+    };
+    const std::string hwSer = hdm::SerializeIdSet(hwIds);
+    const auto hwParsed = hdm::ParseIdSet(hwSer);
+    Check(hwParsed.size() == 4 &&
+              hwParsed.count("drv_wifi_VEN_8086&DEV_2725") == 1 &&
+              hwParsed.count("drv_lan_VEN_10EC&DEV_8125") == 1 &&
+              hwParsed.count("drv_bt_VID_8087&PID_0029") == 1 &&
+              hwParsed.count("drv_audio_HDAUDIO\\FUNC_01&VEN_10EC&DEV_0897") == 1,
+          "IdSet: hardware driver IDs with & and \\ round-trip cleanly", hwSer);
+
     std::unordered_set<std::string> many;
     for (int i = 0; i < 300; ++i) {
         many.insert("id_" + std::to_string(i));
     }
     const auto capped = hdm::ParseIdSet(hdm::SerializeIdSet(many));
     Check(capped.size() == 256, "IdSet: caps serialized/parsed set at 256 entries");
+
+    std::unordered_set<std::string> hugeSet;
+    for (int i = 0; i < 256; ++i) {
+        std::string s = "drv_long_" + std::to_string(i) + "_";
+        s.resize(120, 'X');
+        hugeSet.insert(s);
+    }
+    const std::string hugeSer = hdm::SerializeIdSet(hugeSet);
+    Check(hugeSer.size() <= 16380u && !hugeSer.empty() && hdm::ParseIdSet(hugeSer).size() > 100,
+          "IdSet: caps serialized char length <= 16380 to stay within Registry read limit");
 }
 
 } // namespace
