@@ -338,12 +338,133 @@ void DriverLoomApp::RenderOverviewTab() {
     // 2. FOUR SUMMARY TILES (2x2 Grid)
     // =========================================================================
     const float tileW = std::min(fullW, std::max(std::round(220.0f * uiScale), (fullW - gap) * 0.5f));
-    const float extraTileLine = (tileW < 430.0f * uiScale) ? ImGui::GetTextLineHeightWithSpacing() : 0.0f;
+    const float tilePadX = std::round(14.0f * uiScale);
+    const float tilePadY = std::round(12.0f * uiScale);
+    const float tileInnerW = std::max(80.0f, tileW - tilePadX * 2.0f);
+
+    char compStat[64];
+    ImVec4 compCol = HealthyColor();
+    if (actionableComponentsCount_ > 0) {
+        std::snprintf(
+            compStat,
+            sizeof(compStat),
+            hdm::Tr("Доступно: %zu", "Доступно: %zu", "%zu available"),
+            actionableComponentsCount_);
+        compCol = WarningColor();
+    } else {
+        std::snprintf(compStat, sizeof(compStat), "%s", hdm::Tr("Актуально", "Актуально", "Up to date"));
+    }
+    const char* appsDesc = hdm::Tr(
+        "DirectX, Visual C++, .NET, драйверы видеокарты и фирменное ПО для вашей периферии.",
+        "DirectX, Visual C++, .NET, драйвери відеокарти та фірмове ПЗ для вашої периферії.",
+        "DirectX, Visual C++, .NET, graphics drivers, and official software for your peripherals.");
+
+    char wuStat[64];
+    ImVec4 wuCol = MutedTextColor();
+    if (wuManager_.IsSearching()) {
+        std::snprintf(wuStat, sizeof(wuStat), "%s", hdm::Tr("Поиск...", "Пошук...", "Checking..."));
+        wuCol = InfoAccentColor();
+    } else if (wuCount > 0) {
+        std::snprintf(
+            wuStat,
+            sizeof(wuStat),
+            hdm::Tr("Найдено: %zu", "Знайдено: %zu", "%zu found"),
+            wuCount);
+        wuCol = InfoAccentColor();
+    } else if (wuHasSearchedOnce_) {
+        std::snprintf(wuStat, sizeof(wuStat), "%s", hdm::Tr("Всё установлено", "Усе встановлено", "Up to date"));
+        wuCol = HealthyColor();
+    } else {
+        std::snprintf(wuStat, sizeof(wuStat), "%s", hdm::Tr("Не проверялось", "Не перевірялось", "Not checked"));
+    }
+    const char* wuDesc = hdm::Tr(
+        "Официальные драйверы и системные обновления напрямую с серверов Microsoft.",
+        "Офіційні драйвери та системні оновлення напряму з серверів Microsoft.",
+        "Official hardware drivers and system updates directly from Microsoft servers.");
+
+    char devStat[64];
+    ImVec4 devCol = HealthyColor();
+    if (userRelevantIssueCount_ > 0) {
+        std::snprintf(
+            devStat,
+            sizeof(devStat),
+            hdm::Tr("Внимание: %zu", "Увага: %zu", "%zu need attention"),
+            userRelevantIssueCount_);
+        devCol = WarningColor();
+    } else {
+        std::snprintf(devStat, sizeof(devStat), "%s", hdm::Tr("Всё работает", "Усе працює", "All working"));
+    }
+    char devDesc[192];
+    std::snprintf(
+        devDesc,
+        sizeof(devDesc),
+        hdm::Tr(
+            "Подключено устройств: %zu  •  Мониторы: %zu  •  Периферия: %zu.",
+            "Підключено пристроїв: %zu  •  Монітори: %zu  •  Периферія: %zu.",
+            "Connected devices: %zu  •  Monitors: %zu  •  Peripherals: %zu."),
+        totalDevicesCount_,
+        monitorDevicesCount_,
+        peripheralDevicesCount_);
+
+    const bool srOk = diagCache_.valid && diagCache_.readiness.systemRestoreEnabled &&
+                      !diagCache_.readiness.systemRestorePolicyDisabled;
+    const char* protStat =
+        !diagCache_.valid
+            ? hdm::Tr("Проверка...", "Перевірка...", "Checking...")
+            : (srOk ? hdm::Tr("Защита активна", "Захист активний", "Protected")
+                    : hdm::Tr("Защита выкл.", "Захист вимкн.", "Protection off"));
+    const ImVec4 protCol = !diagCache_.valid ? MutedTextColor() : (srOk ? HealthyColor() : WarningColor());
+
+    std::string boardSummary;
+    if (diagCache_.valid) {
+        const auto& mb = diagCache_.motherboard;
+        if (!mb.product.empty() && mb.product != "—") {
+            boardSummary = mb.product;
+        } else if (!mb.systemProduct.empty() && mb.systemProduct != "—") {
+            boardSummary = mb.systemProduct;
+        }
+    }
+    char protDesc[220];
+    if (!boardSummary.empty()) {
+        std::snprintf(
+            protDesc,
+            sizeof(protDesc),
+            hdm::Tr(
+                "Плата: %s  •  Точек восстановления: %zu.",
+                "Плата: %s  •  Точок відновлення: %zu.",
+                "Board: %s  •  Restore points: %zu."),
+            boardSummary.c_str(),
+            diagCache_.restorePoints.size());
+    } else {
+        std::snprintf(
+            protDesc,
+            sizeof(protDesc),
+            "%s",
+            hdm::Tr(
+                "Точки восстановления, резервная копия драйверов и диагностика системы.",
+                "Точки відновлення, резервна копія драйверів і діагностика системи.",
+                "Restore points, driver backup export, and motherboard diagnostics."));
+    }
+
+    PushFontSafe(g_fontSecondaryHeader);
+    const float measuredTitleH = ImGui::GetTextLineHeight();
+    PopFontSafe(g_fontSecondaryHeader);
+
+    PushFontSafe(g_fontSmall);
+    float maxDescH = ImGui::GetTextLineHeight();
+    const char* tileDescs[4] = {appsDesc, wuDesc, devDesc, protDesc};
+    for (const char* d : tileDescs) {
+        maxDescH = std::max(maxDescH, ImGui::CalcTextSize(d, nullptr, false, tileInnerW).y);
+    }
+    PopFontSafe(g_fontSmall);
+
+    const float topToDescGap = std::round(6.0f * uiScale);
+    const float descToBtnGap = std::round(12.0f * uiScale);
     const float tileH = std::max(
-        std::round(112.0f * uiScale),
-        ImGui::GetTextLineHeightWithSpacing() * 2.8f + ImGui::GetFrameHeight() +
-            std::round(22.0f * uiScale) + extraTileLine);
-    const float tilePad = std::round(14.0f * uiScale);
+        std::round(122.0f * uiScale),
+        std::ceil(
+            tilePadY + measuredTitleH + topToDescGap + maxDescH + descToBtnGap +
+            ImGui::GetFrameHeight() + tilePadY));
 
     auto renderSummaryTile = [&](const char* id,
                                  AppIcon icon,
@@ -353,7 +474,7 @@ void DriverLoomApp::RenderOverviewTab() {
                                  const char* desc,
                                  const char* actionLabel,
                                  auto&& onAction) {
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(tilePad, std::round(11.0f * uiScale)));
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(tilePadX, tilePadY));
         ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
         ImGui::BeginChild(
             id,
@@ -420,18 +541,16 @@ void DriverLoomApp::RenderOverviewTab() {
             PopFontSafe(g_fontSmall);
         }
 
-        ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
+        ImGui::SetCursorPosY(tilePadY + titleH + topToDescGap);
         PushFontSafe(g_fontSmall);
         ImGui::PushStyleColor(ImGuiCol_Text, MutedTextColor());
         ImGui::TextWrapped("%s", desc);
         ImGui::PopStyleColor();
         PopFontSafe(g_fontSmall);
 
-        // Anchor action button to bottom of card
-        const float btnY = tileH - std::round(11.0f * uiScale) - ImGui::GetFrameHeight();
-        if (ImGui::GetCursorPosY() < btnY) {
-            ImGui::SetCursorPosY(btnY);
-        }
+        // Anchor action button consistently with equal bottom padding across all 4 tiles
+        const float btnY = tileH - tilePadY - ImGui::GetFrameHeight();
+        ImGui::SetCursorPosY(std::max(ImGui::GetCursorPosY() + std::round(6.0f * uiScale), btnY));
         if (RenderSecondaryButton(actionLabel)) {
             onAction();
         }
@@ -441,178 +560,69 @@ void DriverLoomApp::RenderOverviewTab() {
     };
 
     // Row 1: Games & Software | Windows Update
-    {
-        char compStat[64];
-        ImVec4 compCol = HealthyColor();
-        if (actionableComponentsCount_ > 0) {
-            std::snprintf(
-                compStat,
-                sizeof(compStat),
-                hdm::Tr("Доступно: %zu", "Доступно: %zu", "%zu available"),
-                actionableComponentsCount_);
-            compCol = WarningColor();
-        } else {
-            std::snprintf(compStat, sizeof(compStat), "%s", hdm::Tr("Актуально", "Актуально", "Up to date"));
-        }
-        renderSummaryTile(
-            "##TileApps",
-            AppIcon::Apps,
-            hdm::Tr("Игры и программы", "Ігри та ПЗ", "Games & Software"),
-            compStat,
-            compCol,
-            hdm::Tr(
-                "DirectX, Visual C++, .NET, драйверы видеокарты и фирменное ПО для вашей периферии.",
-                "DirectX, Visual C++, .NET, драйвери відеокарти та фірмове ПЗ для вашої периферії.",
-                "DirectX, Visual C++, .NET, graphics drivers, and official software for your peripherals."),
-            hdm::Tr("Открыть список###TileAppsBtn", "Відкрити список###TileAppsBtn", "Open List###TileAppsBtn"),
-            [&]() { NavigateTo(PageComponents); });
-    }
+    renderSummaryTile(
+        "##TileApps",
+        AppIcon::Apps,
+        hdm::Tr("Игры и программы", "Ігри та ПЗ", "Games & Software"),
+        compStat,
+        compCol,
+        appsDesc,
+        hdm::Tr("Открыть список###TileAppsBtn", "Відкрити список###TileAppsBtn", "Open List###TileAppsBtn"),
+        [&]() { NavigateTo(PageComponents); });
 
     ImGui::SameLine(0.0f, gap);
 
-    {
-        char wuStat[64];
-        ImVec4 wuCol = MutedTextColor();
-        if (wuManager_.IsSearching()) {
-            std::snprintf(wuStat, sizeof(wuStat), "%s", hdm::Tr("Поиск...", "Пошук...", "Checking..."));
-            wuCol = InfoAccentColor();
-        } else if (wuCount > 0) {
-            std::snprintf(
-                wuStat,
-                sizeof(wuStat),
-                hdm::Tr("Найдено: %zu", "Знайдено: %zu", "%zu found"),
-                wuCount);
-            wuCol = InfoAccentColor();
-        } else if (wuHasSearchedOnce_) {
-            std::snprintf(wuStat, sizeof(wuStat), "%s", hdm::Tr("Всё установлено", "Усе встановлено", "Up to date"));
-            wuCol = HealthyColor();
-        } else {
-            std::snprintf(wuStat, sizeof(wuStat), "%s", hdm::Tr("Не проверялось", "Не перевірялось", "Not checked"));
-        }
-        renderSummaryTile(
-            "##TileWu",
-            AppIcon::Updates,
-            hdm::Tr("Обновления Windows", "Оновлення Windows", "Windows Update"),
-            wuStat,
-            wuCol,
-            hdm::Tr(
-                "Официальные драйверы и системные обновления напрямую с серверов Microsoft.",
-                "Офіційні драйвери та системні оновлення напряму з серверів Microsoft.",
-                "Official hardware drivers and system updates directly from Microsoft servers."),
-            wuHasSearchedOnce_
-                ? hdm::Tr("Открыть###TileWuBtn", "Відкрити###TileWuBtn", "Open###TileWuBtn")
-                : hdm::Tr("Проверить сейчас###TileWuBtn", "Перевірити зараз###TileWuBtn", "Check Now###TileWuBtn"),
-            [&]() {
-                if (!wuHasSearchedOnce_ && !wuManager_.IsBusy()) {
-                    wuHasSearchedOnce_ = true;
-                    selectedWuIndex_ = -1;
-                    wuManager_.StartSearchAsync(MakeLogger(), !wuIncludeSystemUpdates_);
-                }
-                NavigateTo(PageWindowsUpdate);
-            });
-    }
+    renderSummaryTile(
+        "##TileWu",
+        AppIcon::Updates,
+        hdm::Tr("Обновления Windows", "Оновлення Windows", "Windows Update"),
+        wuStat,
+        wuCol,
+        wuDesc,
+        wuHasSearchedOnce_
+            ? hdm::Tr("Открыть###TileWuBtn", "Відкрити###TileWuBtn", "Open###TileWuBtn")
+            : hdm::Tr("Проверить сейчас###TileWuBtn", "Перевірити зараз###TileWuBtn", "Check Now###TileWuBtn"),
+        [&]() {
+            if (!wuHasSearchedOnce_ && !wuManager_.IsBusy()) {
+                wuHasSearchedOnce_ = true;
+                selectedWuIndex_ = -1;
+                wuManager_.StartSearchAsync(MakeLogger(), !wuIncludeSystemUpdates_);
+            }
+            NavigateTo(PageWindowsUpdate);
+        });
 
     ImGui::Dummy(ImVec2(0.0f, gap));
 
     // Row 2: Devices & Monitors | Protection & System
-    {
-        char devStat[64];
-        ImVec4 devCol = HealthyColor();
-        if (userRelevantIssueCount_ > 0) {
-            std::snprintf(
-                devStat,
-                sizeof(devStat),
-                hdm::Tr("Внимание: %zu", "Увага: %zu", "%zu need attention"),
-                userRelevantIssueCount_);
-            devCol = WarningColor();
-        } else {
-            std::snprintf(devStat, sizeof(devStat), "%s", hdm::Tr("Всё работает", "Усе працює", "All working"));
-        }
-
-        char devDesc[192];
-        std::snprintf(
-            devDesc,
-            sizeof(devDesc),
-            hdm::Tr(
-                "Подключено устройств: %zu  •  Мониторы: %zu  •  Периферия: %zu.",
-                "Підключено пристроїв: %zu  •  Монітори: %zu  •  Периферія: %zu.",
-                "Connected devices: %zu  •  Monitors: %zu  •  Peripherals: %zu."),
-            totalDevicesCount_,
-            monitorDevicesCount_,
-            peripheralDevicesCount_);
-
-        renderSummaryTile(
-            "##TileDev",
-            AppIcon::Devices,
-            hdm::Tr("Устройства и мониторы", "Пристрої та монітори", "Devices & Monitors"),
-            devStat,
-            devCol,
-            devDesc,
-            userRelevantIssueCount_ > 0
-                ? hdm::Tr("Показать проблемы###TileDevBtn", "Показати проблеми###TileDevBtn", "View Issues###TileDevBtn")
-                : hdm::Tr("Все устройства###TileDevBtn", "Усі пристрої###TileDevBtn", "Browse Devices###TileDevBtn"),
-            [&]() {
-                if (userRelevantIssueCount_ > 0) {
-                    deviceFilterMode_ = DeviceFilterMode::ProblemOnly;
-                    deviceViewDirty_ = true;
-                }
-                NavigateTo(PageDevices);
-            });
-    }
+    renderSummaryTile(
+        "##TileDev",
+        AppIcon::Devices,
+        hdm::Tr("Устройства и мониторы", "Пристрої та монітори", "Devices & Monitors"),
+        devStat,
+        devCol,
+        devDesc,
+        userRelevantIssueCount_ > 0
+            ? hdm::Tr("Показать проблемы###TileDevBtn", "Показати проблеми###TileDevBtn", "View Issues###TileDevBtn")
+            : hdm::Tr("Все устройства###TileDevBtn", "Усі пристрої###TileDevBtn", "Browse Devices###TileDevBtn"),
+        [&]() {
+            if (userRelevantIssueCount_ > 0) {
+                deviceFilterMode_ = DeviceFilterMode::ProblemOnly;
+                deviceViewDirty_ = true;
+            }
+            NavigateTo(PageDevices);
+        });
 
     ImGui::SameLine(0.0f, gap);
 
-    {
-        const bool srOk = diagCache_.valid && diagCache_.readiness.systemRestoreEnabled &&
-                          !diagCache_.readiness.systemRestorePolicyDisabled;
-        const char* protStat =
-            !diagCache_.valid
-                ? hdm::Tr("Проверка...", "Перевірка...", "Checking...")
-                : (srOk ? hdm::Tr("Защита активна", "Захист активний", "Protected")
-                        : hdm::Tr("Защита выкл.", "Захист вимкн.", "Protection off"));
-        const ImVec4 protCol = !diagCache_.valid ? MutedTextColor() : (srOk ? HealthyColor() : WarningColor());
-
-        std::string boardSummary;
-        if (diagCache_.valid) {
-            const auto& mb = diagCache_.motherboard;
-            if (!mb.product.empty() && mb.product != "—") {
-                boardSummary = mb.product;
-            } else if (!mb.systemProduct.empty() && mb.systemProduct != "—") {
-                boardSummary = mb.systemProduct;
-            }
-        }
-        char protDesc[220];
-        if (!boardSummary.empty()) {
-            std::snprintf(
-                protDesc,
-                sizeof(protDesc),
-                hdm::Tr(
-                    "Плата: %s  •  Точек восстановления: %zu.",
-                    "Плата: %s  •  Точок відновлення: %zu.",
-                    "Board: %s  •  Restore points: %zu."),
-                boardSummary.c_str(),
-                diagCache_.restorePoints.size());
-        } else {
-            std::snprintf(
-                protDesc,
-                sizeof(protDesc),
-                "%s",
-                hdm::Tr(
-                    "Точки восстановления, резервная копия драйверов и диагностика системы.",
-                    "Точки відновлення, резервна копія драйверів і діагностика системи.",
-                    "Restore points, driver backup export, and motherboard diagnostics."));
-        }
-
-        renderSummaryTile(
-            "##TileProt",
-            AppIcon::Shield,
-            hdm::Tr("Защита и система", "Захист і система", "Protection & System"),
-            protStat,
-            protCol,
-            protDesc,
-            hdm::Tr("Открыть диагностику###TileProtBtn", "Відкрити діагностику###TileProtBtn", "Open Diagnostics###TileProtBtn"),
-            [&]() { NavigateTo(PageDiagnostics); });
-    }
+    renderSummaryTile(
+        "##TileProt",
+        AppIcon::Shield,
+        hdm::Tr("Защита и система", "Захист і система", "Protection & System"),
+        protStat,
+        protCol,
+        protDesc,
+        hdm::Tr("Открыть диагностику###TileProtBtn", "Відкрити діагностику###TileProtBtn", "Open Diagnostics###TileProtBtn"),
+        [&]() { NavigateTo(PageDiagnostics); });
 
     ImGui::Dummy(ImVec2(0.0f, gap));
 

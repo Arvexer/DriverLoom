@@ -15,6 +15,7 @@
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -1223,6 +1224,32 @@ void TestChunkStrings() {
           "ChunkStrings: 250 items split into 100+100+50 preserving order");
 }
 
+void TestComponentIdSetSerialization() {
+    Check(hdm::SerializeIdSet({}).empty(), "IdSet: empty set serializes to empty string");
+    Check(hdm::ParseIdSet("").empty(), "IdSet: empty string parses to empty set");
+
+    const std::unordered_set<std::string> ids{"sw_asus", "rt_dotnet8", "rt_dotnet10"};
+    const std::string ser = hdm::SerializeIdSet(ids);
+    Check(ser == "rt_dotnet10|rt_dotnet8|sw_asus", "IdSet: deterministic sorted serialization", ser);
+
+    const auto parsed = hdm::ParseIdSet(" rt_dotnet8 || sw_asus | rt_dotnet10 | bad/id | bad:id | bad\nid | ");
+    Check(parsed.size() == 3 &&
+              parsed.count("rt_dotnet8") == 1 &&
+              parsed.count("rt_dotnet10") == 1 &&
+              parsed.count("sw_asus") == 1,
+          "IdSet: parses valid IDs and filters invalid/empty tokens");
+
+    const std::string tooLong(130, 'a');
+    Check(hdm::ParseIdSet(tooLong).empty(), "IdSet: rejects token >128 chars");
+
+    std::unordered_set<std::string> many;
+    for (int i = 0; i < 300; ++i) {
+        many.insert("id_" + std::to_string(i));
+    }
+    const auto capped = hdm::ParseIdSet(hdm::SerializeIdSet(many));
+    Check(capped.size() == 256, "IdSet: caps serialized/parsed set at 256 entries");
+}
+
 } // namespace
 
 int main() {
@@ -1242,6 +1269,7 @@ int main() {
     TestBoundedCopyAndPackageStaging();
     TestSafeZipExtractor();
     TestChunkStrings();
+    TestComponentIdSetSerialization();
 
     std::cout << "\nSummary: " << g_passed << " passed, " << g_failed << " failed.\n";
     return g_failed == 0 ? 0 : 1;

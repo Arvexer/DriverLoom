@@ -84,7 +84,9 @@ private:
     static bool IsOptionalVendorSoftware(const hdm::SystemComponentItem& item);
     static bool IsOptionalLegacyRuntime(const hdm::SystemComponentItem& item);
     static bool IsOptionalComponent(const hdm::SystemComponentItem& item);
+    static bool IsComponentNotificationMuted(const std::string& id);
     static bool IsComponentRecommendedAction(const hdm::SystemComponentItem& item);
+    void RecomputeComponentCounters();
 
     void LoadBaselineSnapshot();
     void CaptureCurrentAsBaseline(bool logNotification);
@@ -173,6 +175,7 @@ private:
     std::unordered_set<std::string> selectedComponentIds_;
     uint64_t lastComponentsGen_{0};
     size_t actionableComponentsCount_{0};
+    size_t mutedComponentsCount_{0};
     size_t gamingComponentsCount_{0};
     size_t peripheralComponentsCount_{0};
     size_t gpuMonitorComponentsCount_{0};

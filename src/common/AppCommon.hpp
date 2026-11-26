@@ -26,6 +26,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -763,6 +764,76 @@ inline std::vector<std::vector<std::string>> ChunkStrings(
             items.begin() + static_cast<std::ptrdiff_t>(end));
     }
     return chunks;
+}
+
+inline bool IsSafeIdToken(std::string_view tok) noexcept {
+    if (tok.empty() || tok.size() > 128) {
+        return false;
+    }
+    for (unsigned char ch : tok) {
+        const bool ok = (ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z') ||
+                        (ch >= 'a' && ch <= 'z') || ch == '_' || ch == '-' || ch == '.';
+        if (!ok) {
+            return false;
+        }
+    }
+    return true;
+}
+
+inline std::string SerializeIdSet(const std::unordered_set<std::string>& ids) {
+    std::vector<std::string> sorted;
+    sorted.reserve((std::min)(ids.size(), size_t{256}));
+    for (const auto& id : ids) {
+        if (IsSafeIdToken(id)) {
+            sorted.push_back(id);
+            if (sorted.size() >= 256) {
+                break;
+            }
+        }
+    }
+    std::sort(sorted.begin(), sorted.end());
+    std::string out;
+    for (size_t i = 0; i < sorted.size(); ++i) {
+        if (i > 0) {
+            out.push_back('|');
+        }
+        out += sorted[i];
+    }
+    return out;
+}
+
+inline std::unordered_set<std::string> ParseIdSet(std::string_view raw) {
+    std::unordered_set<std::string> out;
+    if (raw.empty()) {
+        return out;
+    }
+    size_t start = 0;
+    while (start <= raw.size()) {
+        const size_t sep = raw.find('|', start);
+        std::string_view part =
+            (sep == std::string_view::npos) ? raw.substr(start) : raw.substr(start, sep - start);
+        while (!part.empty() &&
+               (part.front() == ' ' || part.front() == '\t' ||
+                part.front() == '\r' || part.front() == '\n')) {
+            part.remove_prefix(1);
+        }
+        while (!part.empty() &&
+               (part.back() == ' ' || part.back() == '\t' ||
+                part.back() == '\r' || part.back() == '\n')) {
+            part.remove_suffix(1);
+        }
+        if (IsSafeIdToken(part)) {
+            out.emplace(part);
+            if (out.size() >= 256) {
+                break;
+            }
+        }
+        if (sep == std::string_view::npos) {
+            break;
+        }
+        start = sep + 1;
+    }
+    return out;
 }
 
 std::filesystem::path CreateTempLogPath(const wchar_t* prefix);

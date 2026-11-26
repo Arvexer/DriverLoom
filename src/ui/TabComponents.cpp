@@ -35,6 +35,10 @@ void DriverLoomApp::RebuildComponentsViewCache(ImGuiTableSortSpecs* sortSpecs) {
             const auto& b = componentsCache_[ib];
             auto rank = [](const hdm::SystemComponentItem& x) {
                 const bool isOpt = IsOptionalComponent(x);
+                const bool isMuted = IsComponentNotificationMuted(x.id);
+                if (isMuted) {
+                    return 5;
+                }
                 if (!isOpt) {
                     if (!x.installed && !x.directInstallerUrl.empty()) return 0;
                     if (x.updateAvailable && !x.directInstallerUrl.empty()) return 1;
@@ -73,12 +77,21 @@ void DriverLoomApp::RenderComponentsTab() {
 
     std::vector<hdm::SystemComponentItem> batchTargets;
     std::vector<hdm::SystemComponentItem> selectedTargets;
+    size_t selectedUnmutedCount = 0;
+    size_t selectedMutedCount = 0;
     for (const auto& comp : componentsCache_) {
         if (IsComponentRecommendedAction(comp)) {
             batchTargets.push_back(comp);
         }
-        if (!comp.directInstallerUrl.empty() && selectedComponentIds_.count(comp.id) > 0) {
-            selectedTargets.push_back(comp);
+        if (selectedComponentIds_.count(comp.id) > 0) {
+            if (!comp.directInstallerUrl.empty()) {
+                selectedTargets.push_back(comp);
+            }
+            if (IsComponentNotificationMuted(comp.id)) {
+                ++selectedMutedCount;
+            } else {
+                ++selectedUnmutedCount;
+            }
         }
     }
 
@@ -117,7 +130,7 @@ void DriverLoomApp::RenderComponentsTab() {
     }
 
     // Right-aligned primary CTA + Check button
-    const bool useSelectedBatch = g_isAdvancedMode && !selectedTargets.empty();
+    const bool useSelectedBatch = !selectedTargets.empty();
     char mainActLbl[128];
     if (useSelectedBatch) {
         std::snprintf(
@@ -169,18 +182,14 @@ void DriverLoomApp::RenderComponentsTab() {
     }
     ImGui::EndDisabled();
 
-    // Expert-only batch selection controls & restore checkbox
-    if (g_isAdvancedMode) {
+    // Selection & notification muting controls (+ restore point checkbox in Expert mode)
+    {
         ImGui::Dummy(ImVec2(0.0f, std::round(2.0f * uiScale)));
         PushFontSafe(g_fontSmall);
         const char* selAvailLbl = hdm::Tr("Выбрать доступные###CompSelAvail", "Вибрати доступні###CompSelAvail", "Select Available###CompSelAvail");
         const char* clrSelLbl = hdm::Tr("Снять выбор###CompClrSel", "Зняти вибір###CompClrSel", "Clear Selection###CompClrSel");
-        const char* rpCbLbl = hdm::Tr("Точка восстановления перед установкой###CompRpCb", "Точка відновлення перед встановленням###CompRpCb", "Create restore point before installing###CompRpCb");
-        const float clrSelW = CalcButtonWidth(clrSelLbl);
-        const char* rpCbVisible = hdm::Tr("Точка восстановления перед установкой", "Точка відновлення перед встановленням", "Create restore point before installing");
-        const float rpCbW =
-            ImGui::CalcTextSize(rpCbVisible).x + ImGui::GetFrameHeight() +
-            style.ItemInnerSpacing.x + std::round(8.0f * uiScale);
+        const char* clrSelVis = hdm::Tr("Снять выбор", "Зняти вибір", "Clear Selection");
+        const float clrSelW = CalcButtonWidth(clrSelVis);
 
         ImGui::BeginDisabled(busy || batchTargets.empty());
         if (RenderSecondaryButton(selAvailLbl)) {
@@ -189,14 +198,110 @@ void DriverLoomApp::RenderComponentsTab() {
             }
         }
         ImGui::EndDisabled();
+
         SameLineWrapIfNeeded(clrSelW);
         ImGui::BeginDisabled(busy || selectedComponentIds_.empty());
         if (RenderSecondaryButton(clrSelLbl)) {
             selectedComponentIds_.clear();
         }
         ImGui::EndDisabled();
-        SameLineWrapIfNeeded(rpCbW);
-        ImGui::Checkbox(rpCbLbl, &compRestoreBefore_);
+
+        const char* muteLbl = hdm::Tr(
+            "Скрыть уведомления###CompMuteSel",
+            "Приховати сповіщення###CompMuteSel",
+            "Mute Notifications###CompMuteSel");
+        const char* muteVis = hdm::Tr("Скрыть уведомления", "Приховати сповіщення", "Mute Notifications");
+        const float muteW = CalcButtonWidth(muteVis);
+        SameLineWrapIfNeeded(muteW);
+        ImGui::BeginDisabled(busy || selectedUnmutedCount == 0);
+        if (RenderSecondaryButton(muteLbl)) {
+            size_t newlyMuted = 0;
+            for (const auto& sid : selectedComponentIds_) {
+                if (g_mutedComponentIds.insert(sid).second) {
+                    ++newlyMuted;
+                }
+            }
+            selectedComponentIds_.clear();
+            SaveUserPreferences();
+            RecomputeComponentCounters();
+            if (newlyMuted > 0) {
+                MakeLogger()(
+                    hdm::LogLevel::Info,
+                    "Скрыты уведомления для выбранных компонентов: " + std::to_string(newlyMuted) + ".");
+            }
+        }
+        ImGui::EndDisabled();
+        if (isAppForeground &&
+            ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+            ImGui::SetTooltip(
+                "%s",
+                hdm::Tr(
+                    "Не показывать выбранные компоненты в рекомендациях и бейджах (отметьте галочками справа).",
+                    "Не показувати вибрані компоненти в рекомендаціях і бейджах (позначте прапорцями праворуч).",
+                    "Hide selected components from recommendations and badges (check boxes on the right)."));
+        }
+
+        if (mutedComponentsCount_ > 0) {
+            char unmuteLbl[128];
+            if (selectedMutedCount > 0) {
+                std::snprintf(
+                    unmuteLbl,
+                    sizeof(unmuteLbl),
+                    hdm::Tr(
+                        "Вернуть уведомления (%zu)###CompUnmuteBtn",
+                        "Повернути сповіщення (%zu)###CompUnmuteBtn",
+                        "Unmute (%zu)###CompUnmuteBtn"),
+                    selectedMutedCount);
+            } else {
+                std::snprintf(
+                    unmuteLbl,
+                    sizeof(unmuteLbl),
+                    hdm::Tr(
+                        "Вернуть все уведомления (%zu)###CompUnmuteBtn",
+                        "Повернути всі сповіщення (%zu)###CompUnmuteBtn",
+                        "Restore All Notifications (%zu)###CompUnmuteBtn"),
+                    mutedComponentsCount_);
+            }
+            const float unmuteW = CalcButtonWidth(unmuteLbl);
+            SameLineWrapIfNeeded(unmuteW);
+            ImGui::BeginDisabled(busy);
+            if (RenderSecondaryButton(unmuteLbl)) {
+                size_t restored = 0;
+                if (selectedMutedCount > 0) {
+                    for (const auto& sid : selectedComponentIds_) {
+                        restored += g_mutedComponentIds.erase(sid);
+                    }
+                    selectedComponentIds_.clear();
+                } else {
+                    restored = mutedComponentsCount_;
+                    g_mutedComponentIds.clear();
+                }
+                SaveUserPreferences();
+                RecomputeComponentCounters();
+                if (restored > 0) {
+                    MakeLogger()(
+                        hdm::LogLevel::Info,
+                        "Восстановлены уведомления для компонентов: " + std::to_string(restored) + ".");
+                }
+            }
+            ImGui::EndDisabled();
+        }
+
+        if (g_isAdvancedMode) {
+            const char* rpCbLbl = hdm::Tr(
+                "Точка восстановления перед установкой###CompRpCb",
+                "Точка відновлення перед встановленням###CompRpCb",
+                "Create restore point before installing###CompRpCb");
+            const char* rpCbVisible = hdm::Tr(
+                "Точка восстановления перед установкой",
+                "Точка відновлення перед встановленням",
+                "Create restore point before installing");
+            const float rpCbW =
+                ImGui::CalcTextSize(rpCbVisible).x + ImGui::GetFrameHeight() +
+                style.ItemInnerSpacing.x + std::round(8.0f * uiScale);
+            SameLineWrapIfNeeded(rpCbW);
+            ImGui::Checkbox(rpCbLbl, &compRestoreBefore_);
+        }
         PopFontSafe(g_fontSmall);
     }
 
@@ -260,7 +365,7 @@ void DriverLoomApp::RenderComponentsTab() {
         6.0f * uiScale;
     const float siteW = CalcButtonWidth(hdm::Tr("Сайт", "Сайт", "Site")) + 2.0f * uiScale;
     const float openSiteW = primaryW + style.ItemSpacing.x + siteW;
-    const float checkBoxReserve = g_isAdvancedMode ? (ImGui::GetFrameHeight() + style.ItemSpacing.x) : 0.0f;
+    const float checkBoxReserve = ImGui::GetFrameHeight() + style.ItemSpacing.x;
     const float actionsBlockW = openSiteW + checkBoxReserve;
     const float line1EstH =
         (g_fontSecondaryHeader != nullptr ? g_fontSecondaryHeader->LegacySize : ImGui::GetTextLineHeight()) +
@@ -277,10 +382,11 @@ void DriverLoomApp::RenderComponentsTab() {
         const auto& item = componentsCache_[origIdx];
         const bool canInstallDirectly = !item.directInstallerUrl.empty();
         const bool isOptional = IsOptionalComponent(item);
-        const bool needAction = !isOptional && (!item.installed || item.updateAvailable);
-        const bool optionalUpdate = isOptional && item.installed && item.updateAvailable;
+        const bool isMuted = IsComponentNotificationMuted(item.id);
+        const bool needAction = !isOptional && !isMuted && (!item.installed || item.updateAvailable);
+        const bool optionalUpdate = isOptional && !isMuted && item.installed && item.updateAvailable;
         const bool optionalInstall = isOptional && !item.installed;
-        bool isSelected = canInstallDirectly && selectedComponentIds_.count(item.id) > 0;
+        bool isSelected = selectedComponentIds_.count(item.id) > 0;
 
         ImGui::PushID(static_cast<int>(origIdx));
 
@@ -327,7 +433,10 @@ void DriverLoomApp::RenderComponentsTab() {
         const std::string nameShown = hdm::TrDyn(item.name);
         const char* shortBadge = hdm::Tr("Установлен", "Встановлено", "Installed");
         ImVec4 badgeCol = HealthyColor();
-        if (optionalInstall) {
+        if (isMuted && (!item.installed || item.updateAvailable)) {
+            shortBadge = hdm::Tr("Уведомления скрыты", "Сповіщення приховано", "Notifications muted");
+            badgeCol = MutedTextColor();
+        } else if (optionalInstall) {
             shortBadge = hdm::Tr("По желанию", "За бажанням", "Optional");
             badgeCol = MutedTextColor();
         } else if (optionalUpdate) {
@@ -449,6 +558,24 @@ void DriverLoomApp::RenderComponentsTab() {
         ImGui::SetCursorPos(ImVec2(rightStartX, btnOffsetY));
         ImGui::BeginGroup();
 
+        auto renderSelectBox = [&]() {
+            ImGui::BeginDisabled(busy);
+            if (ImGui::Checkbox("##compSel", &isSelected)) {
+                if (isSelected) selectedComponentIds_.insert(item.id);
+                else selectedComponentIds_.erase(item.id);
+            }
+            ImGui::EndDisabled();
+            if (isAppForeground &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_DelayShort | ImGuiHoveredFlags_AllowWhenDisabled)) {
+                ImGui::SetTooltip(
+                    "%s",
+                    hdm::Tr(
+                        "Выбрать для установки или скрытия уведомлений",
+                        "Вибрати для встановлення або приховування сповіщень",
+                        "Select for batch install or muting notifications"));
+            }
+        };
+
         if (canInstallDirectly) {
             const char* btnLbl =
                 !item.installed
@@ -466,21 +593,19 @@ void DriverLoomApp::RenderComponentsTab() {
             if (RenderSecondaryButton(hdm::Tr("Сайт###CSite", "Сайт###CSite", "Site###CSite"), ImVec2(siteW, 0.0f))) {
                 OpenUrlInBrowser(item.officialPageUrl);
             }
-            if (g_isAdvancedMode) {
-                ImGui::SameLine();
-                ImGui::BeginDisabled(busy);
-                if (ImGui::Checkbox("##compSel", &isSelected)) {
-                    if (isSelected) selectedComponentIds_.insert(item.id);
-                    else selectedComponentIds_.erase(item.id);
-                }
-                ImGui::EndDisabled();
-            }
+            ImGui::SameLine();
+            renderSelectBox();
         } else if (!item.officialPageUrl.empty()) {
             if (RenderSecondaryButton(
                     hdm::Tr("Открыть сайт###COpenSite", "Відкрити сайт###COpenSite", "Open Website###COpenSite"),
                     ImVec2(openSiteW, 0.0f))) {
                 OpenUrlInBrowser(item.officialPageUrl);
             }
+            ImGui::SameLine();
+            renderSelectBox();
+        } else {
+            ImGui::SetCursorPosX(rightStartX + openSiteW + style.ItemSpacing.x);
+            renderSelectBox();
         }
         ImGui::EndGroup();
 

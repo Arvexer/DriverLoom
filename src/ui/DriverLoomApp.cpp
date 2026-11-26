@@ -90,11 +90,39 @@ bool DriverLoomApp::IsOptionalComponent(const hdm::SystemComponentItem& item) {
     return IsOptionalVendorSoftware(item) || IsOptionalLegacyRuntime(item);
 }
 
+bool DriverLoomApp::IsComponentNotificationMuted(const std::string& id) {
+    return !id.empty() && g_mutedComponentIds.count(id) > 0;
+}
+
 bool DriverLoomApp::IsComponentRecommendedAction(const hdm::SystemComponentItem& item) {
-    if (IsOptionalComponent(item)) {
+    if (IsOptionalComponent(item) || IsComponentNotificationMuted(item.id)) {
         return false;
     }
     return (!item.installed || item.updateAvailable) && !item.directInstallerUrl.empty();
+}
+
+void DriverLoomApp::RecomputeComponentCounters() {
+    actionableComponentsCount_ = 0;
+    mutedComponentsCount_ = 0;
+    gamingComponentsCount_ = 0;
+    peripheralComponentsCount_ = 0;
+    gpuMonitorComponentsCount_ = 0;
+    for (const auto& c : componentsCache_) {
+        if (IsComponentNotificationMuted(c.id)) {
+            ++mutedComponentsCount_;
+        }
+        if (IsComponentRecommendedAction(c)) {
+            ++actionableComponentsCount_;
+        }
+        if (c.category == hdm::ComponentCategory::GamingRuntime) {
+            ++gamingComponentsCount_;
+        } else if (IsOptionalVendorSoftware(c)) {
+            ++peripheralComponentsCount_;
+        } else {
+            ++gpuMonitorComponentsCount_;
+        }
+    }
+    compViewDirty_ = true;
 }
 
 bool DriverLoomApp::IsUserRelevantDeviceIssue(const hdm::DeviceInfo& d) {
@@ -1292,23 +1320,7 @@ void DriverLoomApp::SyncScannerSnapshots() {
     if (compGen != lastComponentsGen_) {
         componentsCache_ = componentsScanner_.GetItemsSnapshot();
         lastComponentsGen_ = compGen;
-        actionableComponentsCount_ = 0;
-        gamingComponentsCount_ = 0;
-        peripheralComponentsCount_ = 0;
-        gpuMonitorComponentsCount_ = 0;
-        for (const auto& c : componentsCache_) {
-            if (IsComponentRecommendedAction(c)) {
-                ++actionableComponentsCount_;
-            }
-            if (c.category == hdm::ComponentCategory::GamingRuntime) {
-                ++gamingComponentsCount_;
-            } else if (IsOptionalVendorSoftware(c)) {
-                ++peripheralComponentsCount_;
-            } else {
-                ++gpuMonitorComponentsCount_;
-            }
-        }
-        compViewDirty_ = true;
+        RecomputeComponentCounters();
     }
 
     const uint64_t diagGen = diagnostics_.Generation();

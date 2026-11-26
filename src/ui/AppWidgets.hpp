@@ -6,6 +6,7 @@
 #include <atomic>
 #include <cstddef>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 extern std::atomic<bool> g_windowRegainedFocus;
@@ -21,6 +22,7 @@ extern bool g_cliOverrideAdvancedMode;
 extern bool g_cliOverrideLightTheme;
 extern bool g_cliOverrideUiScale;
 extern bool g_cliOverrideLanguage;
+extern std::unordered_set<std::string> g_mutedComponentIds;
 float EffectiveUiScale() noexcept;
 
 extern ImFont* g_fontSmall;

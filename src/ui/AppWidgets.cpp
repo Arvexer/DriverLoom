@@ -23,6 +23,7 @@ bool g_cliOverrideAdvancedMode = false;
 bool g_cliOverrideLightTheme = false;
 bool g_cliOverrideUiScale = false;
 bool g_cliOverrideLanguage = false;
+std::unordered_set<std::string> g_mutedComponentIds;
 
 float EffectiveUiScale() noexcept {
     const float dpi = (g_dpiScale > 0.5f ? g_dpiScale : 1.0f);
@@ -427,6 +428,22 @@ void LoadUserPreferences() noexcept {
             hdm::SetLang(hdm::Lang::En);
         }
     }
+
+    DWORD muteType = 0;
+    DWORD muteBytes = 0;
+    if (RegQueryValueExW(key.Get(), L"MutedComponentIds", nullptr, &muteType, nullptr, &muteBytes) == ERROR_SUCCESS &&
+        muteBytes > 0 && muteBytes <= 32768u && muteType == REG_SZ) {
+        std::wstring buf(muteBytes / sizeof(wchar_t) + 2, L'\0');
+        if (RegQueryValueExW(
+                key.Get(),
+                L"MutedComponentIds",
+                nullptr,
+                &muteType,
+                reinterpret_cast<LPBYTE>(buf.data()),
+                &muteBytes) == ERROR_SUCCESS) {
+            g_mutedComponentIds = hdm::ParseIdSet(hdm::WideToUtf8(buf.c_str()));
+        }
+    }
 }
 
 void SaveUserPreferences() noexcept {
@@ -469,6 +486,15 @@ void SaveUserPreferences() noexcept {
     if (!g_cliOverrideLanguage) {
         writeDword(L"Language", static_cast<DWORD>(hdm::GetLang()));
     }
+
+    const std::wstring mutedW = hdm::Utf8ToWide(hdm::SerializeIdSet(g_mutedComponentIds));
+    RegSetValueExW(
+        key.Get(),
+        L"MutedComponentIds",
+        0,
+        REG_SZ,
+        reinterpret_cast<const BYTE*>(mutedW.c_str()),
+        static_cast<DWORD>((mutedW.size() + 1) * sizeof(wchar_t)));
 }
 
 constexpr wchar_t kSnapshotRegSubKey[] = L"Software\\DriverLoom\\BaselineSnapshot";
