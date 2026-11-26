@@ -52,7 +52,7 @@ jobs:
               $rawSize = [BitConverter]::ToUInt32($bytes, $secOff + 16)
               $rawPtr = [BitConverter]::ToUInt32($bytes, $secOff + 20)
               $span = [Math]::Max($vSize, $rawSize)
-              if ($rva -ge $vAddr -and $rva -lt ($vAddr + $span)) {
+              if ($rawPtr -gt 0 -and $rva -ge $vAddr -and $rva -lt ($vAddr + $span) -and ($rva - $vAddr) -lt $rawSize) {
                 return [int]($rawPtr + ($rva - $vAddr))
               }
             }
@@ -83,8 +83,11 @@ jobs:
           $lcSize = [BitConverter]::ToUInt32($bytes, $ddBase + 10 * 8 + 4)
           $depLoadFlags = 0
           $lcOff = & $rvaToOffset $lcRva
-          if ($lcOff -gt 0 -and $lcSize -ge 0x50 -and ($lcOff + 0x50) -le $bytes.Length) {
-            $depLoadFlags = [BitConverter]::ToUInt16($bytes, $lcOff + 0x4E)
+          if ($lcOff -gt 0 -and $lcSize -ge 4 -and ($lcOff + 0x50) -le $bytes.Length) {
+            $lcStructSize = [BitConverter]::ToUInt32($bytes, $lcOff)
+            if ($lcStructSize -ge 0x50) {
+              $depLoadFlags = [BitConverter]::ToUInt16($bytes, $lcOff + 0x4E)
+            }
           }
 
           $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
@@ -100,8 +103,9 @@ jobs:
           if (-not $nxCompat) { throw "DEP (NX_COMPAT) is not enabled!" }
           if (-not $highEntropy) { throw "64-bit High Entropy ASLR (HIGH_ENTROPY_VA) is not enabled!" }
           if (($depLoadFlags -band 0x800) -eq 0) { throw "DependentLoadFlags missing LOAD_LIBRARY_SEARCH_SYSTEM32 (0x800)!" }
+          if ($imports.Count -eq 0) { throw "Import table is empty or failed to parse!" }
           foreach ($imp in $imports) {
-            if ($imp -match '^(VCRUNTIME|MSVCP|CONCRT|UCRTBASE)') {
+            if ($imp -match '^(VCRUNTIME|MSVCP|MSVCR|CONCRT|UCRTBASE|api-ms-win-crt-)') {
               throw "Unexpected dynamic CRT dependency: $imp (expected static /MT!)"
             }
           }
@@ -140,20 +144,29 @@ jobs:
           $hash = (Get-FileHash $exe -Algorithm SHA256).Hash.ToLowerInvariant()
           $rel = $env:TAG_NAME
 
+          $prevEap = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
           $null = gh release view $rel 2>&1
-          if ($LASTEXITCODE -eq 0) {
+          $relExists = ($LASTEXITCODE -eq 0)
+          $ErrorActionPreference = $prevEap
+
+          if ($relExists) {
             Write-Host "Release $rel already exists — uploading MSVC binary (--clobber)..."
             gh release upload $rel "$exe#DriverLoom.exe" --clobber
             if ($LASTEXITCODE -ne 0) { throw "gh release upload failed" }
 
-            $existingBody = gh release view $rel --json body --jq '.body'
+            $existingLines = @(gh release view $rel --json body --jq '.body')
             if ($LASTEXITCODE -eq 0) {
+              $existingBody = ($existingLines -join "`n")
+              if ($null -eq $existingBody) { $existingBody = "" }
               if ($existingBody -match '[0-9a-fA-F]{64}\s+\*DriverLoom\.exe') {
                 $updatedBody = [regex]::Replace(
                   $existingBody,
                   '[0-9a-fA-F]{64}\s+\*DriverLoom\.exe',
                   "$hash *DriverLoom.exe"
                 )
+              } elseif ([string]::IsNullOrWhiteSpace($existingBody)) {
+                $updatedBody = "### Checksum (SHA-256)`n``````text`n$hash *DriverLoom.exe`n``````"
               } else {
                 $updatedBody = ($existingBody.TrimEnd() + "`n`n### Checksum (SHA-256)`n``````text`n$hash *DriverLoom.exe`n``````")
               }

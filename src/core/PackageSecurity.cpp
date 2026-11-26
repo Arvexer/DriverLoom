@@ -4,6 +4,7 @@
 #include <bcrypt.h>
 #include <objbase.h>
 #include <oleauto.h>
+#include <sddl.h>
 #include <setupapi.h>
 #include <shldisp.h>
 #include <softpub.h>
@@ -94,6 +95,105 @@ bool CreateUniqueTempWorkDir(std::filesystem::path& outDir, std::string* outErro
 
     if (outError) {
         *outError = "Не удалось создать уникальный временный каталог: " +
+                    FormatWin32Error(GetLastError());
+    }
+    return false;
+}
+
+bool CreateAdminOnlyTempWorkDir(std::filesystem::path& outDir, std::string* outError) {
+    outDir.clear();
+    wchar_t winDir[MAX_PATH]{};
+    const UINT winLen = GetSystemWindowsDirectoryW(winDir, MAX_PATH);
+    if (winLen == 0 || winLen >= MAX_PATH) {
+        if (outError) *outError = "Не удалось определить системный каталог Windows.";
+        return false;
+    }
+
+    const std::filesystem::path sysTempRoot = std::filesystem::path(winDir) / L"Temp";
+    std::error_code ec;
+    std::filesystem::create_directories(sysTempRoot, ec);
+    {
+        HandleGuard rootHandle(CreateFileW(
+            sysTempRoot.c_str(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            nullptr));
+        BY_HANDLE_FILE_INFORMATION fi{};
+        if (!rootHandle.IsValid() || !GetFileInformationByHandle(rootHandle.Get(), &fi) ||
+            (fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+            (fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            if (outError) *outError = "Системный каталог Temp недоступен или является точкой повторного анализа.";
+            return false;
+        }
+    }
+
+    PSECURITY_DESCRIPTOR rawSd = nullptr;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            L"D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;BA)",
+            SDDL_REVISION_1,
+            &rawSd,
+            nullptr) ||
+        rawSd == nullptr) {
+        if (outError) {
+            *outError = "Не удалось подготовить ACL защищённого каталога: " +
+                        FormatWin32Error(GetLastError());
+        }
+        return false;
+    }
+    LocalFreeGuard sdGuard(rawSd);
+
+    SECURITY_ATTRIBUTES sa{};
+    sa.nLength = sizeof(sa);
+    sa.lpSecurityDescriptor = rawSd;
+    sa.bInheritHandle = FALSE;
+
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        GUID guid{};
+        if (FAILED(CoCreateGuid(&guid))) {
+            continue;
+        }
+        wchar_t suffix[64]{};
+        const int suffixLen = std::swprintf(
+            suffix,
+            std::size(suffix),
+            L"DriverLoom_Admin_%08lx%04x%04x%02x%02x%02x%02x%02x%02x%02x%02x",
+            static_cast<unsigned long>(guid.Data1),
+            guid.Data2,
+            guid.Data3,
+            guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
+            guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
+        if (suffixLen <= 0 || suffixLen >= static_cast<int>(std::size(suffix))) {
+            continue;
+        }
+        const std::filesystem::path candidate = sysTempRoot / suffix;
+        if (CreateDirectoryW(candidate.c_str(), &sa)) {
+            HandleGuard dirHandle(CreateFileW(
+                candidate.c_str(),
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+                nullptr));
+            BY_HANDLE_FILE_INFORMATION fi{};
+            if (dirHandle.IsValid() && GetFileInformationByHandle(dirHandle.Get(), &fi) &&
+                (fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
+                (fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+                outDir = candidate;
+                return true;
+            }
+            dirHandle.Reset();
+            RemoveDirectoryW(candidate.c_str());
+            if (outError) *outError = "Защищённый каталог является точкой повторного анализа.";
+            return false;
+        }
+    }
+
+    if (outError) {
+        *outError = "Не удалось создать защищённый временный каталог: " +
                     FormatWin32Error(GetLastError());
     }
     return false;
@@ -297,36 +397,81 @@ bool ExtractZipViaShellCom(
         return false;
     }
 
+    auto validateZipFolderEntries = [&](auto& self,
+                                      Folder* folder,
+                                      size_t& totalEntries,
+                                      size_t maxEntries,
+                                      int depth) -> bool {
+        if (folder == nullptr || depth > 16) {
+            return false;
+        }
+        ComPtr<FolderItems> subItems;
+        if (FAILED(folder->Items(subItems.Put())) || !subItems) {
+            return false;
+        }
+        long count = 0;
+        if (FAILED(subItems->get_Count(&count)) || count < 0) {
+            return false;
+        }
+        if (depth == 0 && count == 0) {
+            return false;
+        }
+        for (long idx = 0; idx < count; ++idx) {
+            if (totalEntries >= maxEntries) {
+                return false;
+            }
+            ++totalEntries;
+            VARIANT vIdx;
+            VariantInit(&vIdx);
+            vIdx.vt = VT_I4;
+            vIdx.lVal = idx;
+            ComPtr<FolderItem> itemObj;
+            if (FAILED(subItems->Item(vIdx, itemObj.Put())) || !itemObj) {
+                return false;
+            }
+            BSTR rawName = nullptr;
+            if (FAILED(itemObj->get_Name(&rawName)) || rawName == nullptr) {
+                if (rawName != nullptr) SysFreeString(rawName);
+                return false;
+            }
+            const std::wstring entryName(rawName);
+            SysFreeString(rawName);
+            if (entryName.empty() || entryName == L"." || entryName == L".." ||
+                entryName.find(L':') != std::wstring::npos ||
+                entryName.find(L"..") != std::wstring::npos ||
+                entryName.find(L'/') != std::wstring::npos ||
+                entryName.find(L'\\') != std::wstring::npos) {
+                return false;
+            }
+            VARIANT_BOOL isFolder = VARIANT_FALSE;
+            if (SUCCEEDED(itemObj->get_IsFolder(&isFolder)) && isFolder == VARIANT_TRUE) {
+                ComPtr<IDispatch> subDisp;
+                if (FAILED(itemObj->get_GetFolder(subDisp.Put())) || !subDisp) {
+                    return false;
+                }
+                ComPtr<Folder> subFolder;
+                if (FAILED(subDisp->QueryInterface(
+                        IID_Folder, reinterpret_cast<void**>(subFolder.Put()))) ||
+                    !subFolder) {
+                    return false;
+                }
+                if (!self(self, subFolder.Get(), totalEntries, maxEntries, depth + 1)) {
+                    return false;
+                }
+            }
+        }
+        return true;
+    };
+
     ComPtr<FolderItems> items;
     if (FAILED(zipFolder->Items(items.Put())) || !items) {
         return false;
     }
-    long itemCount = 0;
-    if (FAILED(items->get_Count(&itemCount)) || itemCount <= 0 ||
-        static_cast<size_t>(itemCount) > kMaxArchiveFiles) {
+    size_t totalPrecheckedEntries = 0;
+    if (!validateZipFolderEntries(
+            validateZipFolderEntries, zipFolder.Get(), totalPrecheckedEntries, kMaxArchiveFiles, 0) ||
+        totalPrecheckedEntries == 0) {
         return false;
-    }
-    for (long idx = 0; idx < itemCount; ++idx) {
-        VARIANT vIdx;
-        VariantInit(&vIdx);
-        vIdx.vt = VT_I4;
-        vIdx.lVal = idx;
-        ComPtr<FolderItem> itemObj;
-        if (FAILED(items->Item(vIdx, itemObj.Put())) || !itemObj) {
-            return false;
-        }
-        BSTR rawName = nullptr;
-        if (FAILED(itemObj->get_Name(&rawName)) || rawName == nullptr) {
-            if (rawName != nullptr) SysFreeString(rawName);
-            return false;
-        }
-        const std::wstring entryName(rawName);
-        SysFreeString(rawName);
-        if (entryName.empty() || entryName == L"." || entryName == L".." ||
-            entryName.find(L':') != std::wstring::npos ||
-            entryName.find(L"..") != std::wstring::npos) {
-            return false;
-        }
     }
 
     VARIANT vItems;
@@ -344,20 +489,26 @@ bool ExtractZipViaShellCom(
         return false;
     }
 
-    // Folder::CopyHere can finalize asynchronously; poll until file tree settles and stays within limits.
+    // Folder::CopyHere can finalize asynchronously; pump STA messages and poll until settled.
     size_t prevFiles = 0;
     uint64_t prevBytes = 0;
     int stableTicks = 0;
     for (int poll = 0; poll < 100; ++poll) {
+        MSG msg{};
+        while (PeekMessageW(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
         if (cancelFlag != nullptr && cancelFlag->load()) {
             return false;
         }
         size_t curFiles = 0;
         uint64_t curBytes = 0;
+        bool allReadable = true;
         std::error_code scanEc;
         for (std::filesystem::recursive_directory_iterator it(
                  destDir,
-                 std::filesystem::directory_options::skip_permission_denied,
+                 std::filesystem::directory_options::none,
                  scanEc);
              !scanEc && it != std::filesystem::recursive_directory_iterator();
              it.increment(scanEc)) {
@@ -369,24 +520,35 @@ bool ExtractZipViaShellCom(
                 continue;
             }
             ++curFiles;
+            if (curFiles > kMaxArchiveFiles) {
+                return false;
+            }
             std::error_code szEc;
             const uint64_t fz = it->file_size(szEc);
             if (!szEc) {
-                if (curBytes > kMaxExtractedBytes - fz) {
+                if (fz > kMaxExtractedBytes || curBytes > kMaxExtractedBytes - fz) {
                     return false;
                 }
                 curBytes += fz;
             }
-            if (curFiles > kMaxArchiveFiles) {
-                return false;
+            HandleGuard probeRead(CreateFileW(
+                it->path().c_str(),
+                GENERIC_READ,
+                FILE_SHARE_READ,
+                nullptr,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT,
+                nullptr));
+            if (!probeRead.IsValid()) {
+                allReadable = false;
             }
         }
         if (scanEc) {
             return false;
         }
-        if (curFiles > 0 && curFiles == prevFiles && curBytes == prevBytes) {
+        if (allReadable && curFiles > 0 && curFiles == prevFiles && curBytes == prevBytes) {
             ++stableTicks;
-            if (stableTicks >= 2) {
+            if (stableTicks >= 4) {
                 return true;
             }
         } else {
@@ -396,7 +558,7 @@ bool ExtractZipViaShellCom(
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
     }
-    return prevFiles > 0;
+    return false;
 }
 
 UINT CALLBACK CabExtractCallback(PVOID ctx, UINT notification, UINT_PTR param1, UINT_PTR param2) {
@@ -439,11 +601,6 @@ UINT CALLBACK CabExtractCallback(PVOID ctx, UINT notification, UINT_PTR param1, 
             SetLastError(ERROR_FILENAME_EXCED_RANGE);
             return FILEOP_ABORT;
         }
-        std::error_code ec;
-        std::filesystem::create_directories(dest.parent_path(), ec);
-        if (ec) {
-            return FILEOP_ABORT;
-        }
 
         auto getCanonDir = [](const std::filesystem::path& p) -> std::wstring {
             HandleGuard h(CreateFileW(
@@ -472,13 +629,33 @@ UINT CALLBACK CabExtractCallback(PVOID ctx, UINT notification, UINT_PTR param1, 
             return buf;
         };
         const std::wstring baseCanon = getCanonDir(cabCtx->baseDir);
-        const std::wstring parentCanon = getCanonDir(dest.parent_path());
-        if (baseCanon.empty() || parentCanon.empty() ||
-            parentCanon.size() < baseCanon.size() ||
-            _wcsnicmp(parentCanon.c_str(), baseCanon.c_str(), baseCanon.size()) != 0 ||
-            (parentCanon.size() > baseCanon.size() && parentCanon[baseCanon.size()] != L'\\')) {
+        if (baseCanon.empty()) {
             SetLastError(ERROR_ACCESS_DENIED);
             return FILEOP_ABORT;
+        }
+        auto isWithinBase = [&](const std::wstring& dirCanon) -> bool {
+            if (dirCanon.empty() || dirCanon.size() < baseCanon.size() ||
+                _wcsnicmp(dirCanon.c_str(), baseCanon.c_str(), baseCanon.size()) != 0) {
+                return false;
+            }
+            return dirCanon.size() == baseCanon.size() || dirCanon[baseCanon.size()] == L'\\';
+        };
+        std::filesystem::path curDir = cabCtx->baseDir;
+        for (const auto& part : rel.parent_path()) {
+            if (part.empty() || part == L".") {
+                continue;
+            }
+            curDir /= part;
+            if (!CreateDirectoryW(curDir.c_str(), nullptr)) {
+                const DWORD dirErr = GetLastError();
+                if (dirErr != ERROR_ALREADY_EXISTS) {
+                    return FILEOP_ABORT;
+                }
+            }
+            if (!isWithinBase(getCanonDir(curDir))) {
+                SetLastError(ERROR_ACCESS_DENIED);
+                return FILEOP_ABORT;
+            }
         }
 
         ++cabCtx->fileCount;
@@ -507,6 +684,27 @@ std::string ReadCertFieldUtf8(PCCERT_CONTEXT cert, DWORD type, void* typePara) {
     return WideToUtf8(buf.c_str());
 }
 
+bool ContainsWholeTokenSequence(std::string_view haystack, std::string_view token) {
+    if (token.empty() || haystack.size() < token.size()) {
+        return false;
+    }
+    auto isWordChar = [](unsigned char c) noexcept {
+        return std::isalnum(c) != 0;
+    };
+    size_t pos = 0;
+    while ((pos = haystack.find(token, pos)) != std::string_view::npos) {
+        const bool leftOk = (pos == 0) || !isWordChar(static_cast<unsigned char>(haystack[pos - 1]));
+        const size_t endPos = pos + token.size();
+        const bool rightOk =
+            (endPos == haystack.size()) || !isWordChar(static_cast<unsigned char>(haystack[endPos]));
+        if (leftOk && rightOk) {
+            return true;
+        }
+        ++pos;
+    }
+    return false;
+}
+
 bool MatchesAnyPublisher(
     const std::string& subjectLower,
     const std::string& cnLower,
@@ -520,9 +718,9 @@ bool MatchesAnyPublisher(
         if (token.empty()) {
             continue;
         }
-        if (cnLower.find(token) != std::string::npos ||
-            orgLower.find(token) != std::string::npos ||
-            subjectLower.find(token) != std::string::npos) {
+        if (ContainsWholeTokenSequence(cnLower, token) ||
+            ContainsWholeTokenSequence(orgLower, token) ||
+            ContainsWholeTokenSequence(subjectLower, token)) {
             return true;
         }
     }
@@ -577,13 +775,13 @@ bool ComputeFileSha256Hex(
         return false;
     }
 
+    std::vector<UCHAR> hashObj(hashObjSize);
     struct BcryptHashGuard {
         BCRYPT_HASH_HANDLE h{nullptr};
         ~BcryptHashGuard() {
             if (h != nullptr) BCryptDestroyHash(h);
         }
     } hash;
-    std::vector<UCHAR> hashObj(hashObjSize);
     if (BCryptCreateHash(alg.h, &hash.h, hashObj.data(), hashObjSize, nullptr, 0, 0) < 0) {
         if (outReason != nullptr) *outReason = "Не удалось создать контекст SHA-256.";
         return false;
@@ -741,14 +939,34 @@ bool VerifyAndLockAuthenticodeFile(
     return false;
 }
 
+const std::vector<std::string_view>& DefaultCabPublishers() {
+    static const std::vector<std::string_view> kCabPublishers{
+        "Microsoft Corporation",
+        "Microsoft Windows",
+        "Intel Corporation",
+        "Realtek Semiconductor",
+        "Advanced Micro Devices",
+        "NVIDIA Corporation",
+        "Broadcom",
+        "Qualcomm",
+        "MediaTek",
+        "ASUSTeK Computer",
+    };
+    return kCabPublishers;
+}
+
 bool VerifyExtractedDirectoryBinaries(
     const std::filesystem::path& dir,
     const std::vector<std::string_view>& allowedPublishers,
-    std::string* outReason) {
+    std::string* outReason,
+    std::vector<HandleGuard>* outLocks) {
+    if (outLocks != nullptr) {
+        outLocks->clear();
+    }
     std::error_code ec;
     for (std::filesystem::recursive_directory_iterator it(
              dir,
-             std::filesystem::directory_options::skip_permission_denied,
+             std::filesystem::directory_options::none,
              ec);
          !ec && it != std::filesystem::recursive_directory_iterator();
          it.increment(ec)) {
@@ -763,15 +981,28 @@ bool VerifyExtractedDirectoryBinaries(
             continue;
         }
         const std::string ext = ToLowerAscii(WideToUtf8(it->path().extension().wstring()));
-        if (ext == ".exe" || ext == ".dll" || ext == ".sys" || ext == ".msi" || ext == ".cab") {
+        if (ext == ".exe" || ext == ".dll" || ext == ".sys" || ext == ".msi" ||
+            ext == ".cab" || ext == ".ocx" || ext == ".cpl" || ext == ".msp" ||
+            ext == ".mst" || ext == ".scr") {
             std::string reason;
-            if (!VerifyAndLockAuthenticodeFile(it->path(), nullptr, &reason, allowedPublishers)) {
+            HandleGuard fileLock;
+            if (!VerifyAndLockAuthenticodeFile(
+                    it->path(),
+                    outLocks != nullptr ? &fileLock : nullptr,
+                    &reason,
+                    allowedPublishers)) {
                 if (outReason != nullptr) {
                     *outReason = WideToUtf8(it->path().filename().wstring()) + ": " + reason;
                 }
                 return false;
             }
+            if (outLocks != nullptr && fileLock.IsValid()) {
+                outLocks->push_back(std::move(fileLock));
+            }
         }
+    }
+    if (ec && outReason != nullptr && outReason->empty()) {
+        *outReason = "Ошибка обхода распакованного каталога.";
     }
     return !ec;
 }
@@ -813,8 +1044,13 @@ bool LaunchAndWaitProcess(
             }
             if ((stopFlag != nullptr && stopFlag->load()) ||
                 (cancelFlag != nullptr && cancelFlag->load())) {
-                TerminateProcess(proc.Get(), ERROR_CANCELLED);
-                const DWORD waitTerm = WaitForSingleObject(proc.Get(), 2000);
+                DWORD waitTerm = WAIT_TIMEOUT;
+                if (TerminateProcess(proc.Get(), ERROR_CANCELLED)) {
+                    waitTerm = WaitForSingleObject(proc.Get(), 2000);
+                } else {
+                    const DWORD termErr = GetLastError();
+                    waitTerm = WaitForSingleObject(proc.Get(), termErr == ERROR_ACCESS_DENIED ? 0 : 500);
+                }
                 if (outProcessStillRunning != nullptr && waitTerm != WAIT_OBJECT_0) {
                     *outProcessStillRunning = true;
                 }

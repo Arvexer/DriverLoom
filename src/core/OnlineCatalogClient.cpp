@@ -808,6 +808,8 @@ WingetManifestInfo ParseWingetInstallerYaml(
     bool inInstallers = false;
     bool inNestedFiles = false;
     size_t nestedIndent = std::string::npos;
+    bool inIgnoredSubBlock = false;
+    size_t ignoredSubBlockIndent = std::string::npos;
     size_t installersItemIndent = std::string::npos;
     std::string topType;
     std::string topSha256;
@@ -841,41 +843,57 @@ WingetManifestInfo ParseWingetInstallerYaml(
             ++indent;
         }
 
-        if (trimmed == "Installers:") {
-            inInstallers = true;
-            inNestedFiles = false;
-            nestedIndent = std::string::npos;
-            installersItemIndent = std::string::npos;
-            continue;
-        }
-        if (inNestedFiles && indent <= nestedIndent) {
+        const bool isListItem = (trimmed.rfind("- ", 0) == 0);
+        if (inNestedFiles && (indent < nestedIndent || (indent == nestedIndent && !isListItem))) {
             inNestedFiles = false;
             nestedIndent = std::string::npos;
         }
-        if (!rawLine.empty() && rawLine[0] != ' ' && rawLine[0] != '-' &&
-            trimmed != "NestedInstallerFiles:") {
-            inNestedFiles = false;
-            nestedIndent = std::string::npos;
-            if (trimmed.rfind("ManifestType:", 0) == 0 ||
-                trimmed.rfind("ManifestVersion:", 0) == 0) {
-                if (inInstallers && !current.url.empty()) {
+        if (inIgnoredSubBlock &&
+            (indent < ignoredSubBlockIndent || (indent == ignoredSubBlockIndent && !isListItem))) {
+            inIgnoredSubBlock = false;
+            ignoredSubBlockIndent = std::string::npos;
+        }
+
+        if (indent == 0 && !isListItem) {
+            if (trimmed == "Installers:") {
+                inInstallers = true;
+                inNestedFiles = false;
+                nestedIndent = std::string::npos;
+                inIgnoredSubBlock = false;
+                ignoredSubBlockIndent = std::string::npos;
+                installersItemIndent = std::string::npos;
+                continue;
+            }
+            if (inInstallers) {
+                if (!current.url.empty()) {
                     entries.push_back(current);
-                    current = Entry{};
                 }
+                current = Entry{};
                 inInstallers = false;
                 installersItemIndent = std::string::npos;
             }
         }
+
         if (trimmed == "NestedInstallerFiles:") {
             inNestedFiles = true;
             nestedIndent = indent;
+            inIgnoredSubBlock = false;
+            ignoredSubBlockIndent = std::string::npos;
+            continue;
+        }
+        if (trimmed == "AppsAndFeaturesEntries:" || trimmed == "Dependencies:" ||
+            trimmed == "Capabilities:" || trimmed == "Markets:" ||
+            trimmed == "ReturnCodes:" || trimmed == "ExpectedReturnCodes:") {
+            inIgnoredSubBlock = true;
+            ignoredSubBlockIndent = indent;
+            continue;
+        }
+        if (inIgnoredSubBlock) {
             continue;
         }
 
         std::string keyPart = trimmed;
-        bool isListItem = false;
-        if (keyPart.rfind("- ", 0) == 0) {
-            isListItem = true;
+        if (isListItem) {
             keyPart = TrimCopy(keyPart.substr(2));
         }
 
@@ -907,12 +925,11 @@ WingetManifestInfo ParseWingetInstallerYaml(
         if (isListItem && !inNestedFiles) {
             if (installersItemIndent == std::string::npos) {
                 installersItemIndent = indent;
-            }
-            if (indent <= installersItemIndent) {
+            } else if (indent <= installersItemIndent) {
                 if (!current.url.empty()) {
                     entries.push_back(current);
-                    current = Entry{};
                 }
+                current = Entry{};
             }
         }
 
@@ -989,9 +1006,9 @@ WingetManifestInfo ParseWingetInstallerYaml(
         return info;
     }
 
-    info.ok = !info.version.empty() && !chosen->url.empty();
     info.url = chosen->url;
     info.sha256 = !chosen->sha256.empty() ? chosen->sha256 : topSha256;
+    info.ok = !info.version.empty() && !info.url.empty() && !info.sha256.empty();
     const std::string& rawNested = !chosen->nestedPath.empty() ? chosen->nestedPath : topNestedPath;
     if (IsSafeRelativeInstallerPath(rawNested)) {
         info.nestedRelativePath = TrimCopy(rawNested);

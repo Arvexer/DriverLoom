@@ -3,11 +3,15 @@
 #include "common/AppCommon.hpp"
 #include "core/DeviceScanner.hpp"
 #include "core/LocalDriverInstaller.hpp"
+#include "core/PackageSecurity.hpp"
 #include "core/SystemDiagnostics.hpp"
 #include "core/SystemRestore.hpp"
 #include "core/WindowsUpdateManager.hpp"
 
+#include <knownfolders.h>
+#include <setupapi.h>
 #include <shellapi.h>
+#include <shlobj.h>
 
 #include <algorithm>
 #include <atomic>
@@ -60,6 +64,38 @@ std::wstring GetFinalPathString(HANDLE handle) {
 }
 
 std::wstring ResolveCanonicalTempDir() {
+    auto openVerifiedTempDir = [](const std::filesystem::path& dirPath) -> std::wstring {
+        hdm::HandleGuard dirHandle(CreateFileW(
+            dirPath.c_str(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            nullptr));
+        BY_HANDLE_FILE_INFORMATION fi{};
+        if (!dirHandle.IsValid() || !GetFileInformationByHandle(dirHandle.Get(), &fi) ||
+            (fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+            (fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+            return {};
+        }
+        return StripTrailingSeparators(GetFinalPathString(dirHandle.Get()));
+    };
+
+    hdm::CoTaskMemGuard<wchar_t> localAppRaw;
+    if (SUCCEEDED(SHGetKnownFolderPath(
+            FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, localAppRaw.Put())) &&
+        localAppRaw.Get() != nullptr) {
+        const std::wstring localAppCanon = openVerifiedTempDir(std::filesystem::path(localAppRaw.Get()));
+        if (!localAppCanon.empty()) {
+            const std::wstring knownTempCanon =
+                openVerifiedTempDir(std::filesystem::path(localAppCanon) / L"Temp");
+            if (!knownTempCanon.empty()) {
+                return knownTempCanon;
+            }
+        }
+    }
+
     const DWORD needed = GetTempPathW(0, nullptr);
     if (needed == 0) {
         return {};
@@ -70,18 +106,7 @@ std::wstring ResolveCanonicalTempDir() {
         return {};
     }
     tempBuf.resize(len);
-    hdm::HandleGuard tempDirHandle(CreateFileW(
-        tempBuf.c_str(),
-        FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS,
-        nullptr));
-    if (!tempDirHandle.IsValid()) {
-        return {};
-    }
-    return StripTrailingSeparators(GetFinalPathString(tempDirHandle.Get()));
+    return openVerifiedTempDir(std::filesystem::path(tempBuf));
 }
 
 bool ValidateWorkerTempPath(
@@ -220,6 +245,7 @@ int RunCliModeIfRequested() {
         None,
         RestorePoint,
         InstallInf,
+        InstallCab,
         RemoveOemInfs,
         WuInstall,
         WuHide,
@@ -256,6 +282,9 @@ int RunCliModeIfRequested() {
             targetArg = argv[++i];
         } else if (arg == L"--cli-install-inf" && i + 1 < argc) {
             setMode(Mode::InstallInf);
+            targetArg = argv[++i];
+        } else if (arg == L"--cli-install-cab" && i + 1 < argc) {
+            setMode(Mode::InstallCab);
             targetArg = argv[++i];
         } else if (arg == L"--cli-remove-oem-infs" && i + 1 < argc) {
             setMode(Mode::RemoveOemInfs);
@@ -354,6 +383,110 @@ int RunCliModeIfRequested() {
                      std::to_string(summary.failedCount) + " " +
                      (summary.rebootRequired ? "1" : "0"));
         if (summary.totalFiles == 0 || summary.failedCount > 0) {
+            return 1;
+        }
+        return summary.rebootRequired ? 2 : 0;
+    }
+
+    if (mode == Mode::InstallCab) {
+        std::filesystem::path adminRoot;
+        std::string dirErr;
+        if (!hdm::CreateAdminOnlyTempWorkDir(adminRoot, &dirErr)) {
+            fileLogger(hdm::LogLevel::Error,
+                       dirErr.empty() ? "Не удалось создать защищённый каталог установки." : dirErr);
+            return 1;
+        }
+        hdm::TempWorkDirGuard adminDir;
+        adminDir.Set(adminRoot);
+
+        hdm::HandleGuard srcHandle(CreateFileW(
+            targetArg.c_str(),
+            GENERIC_READ,
+            FILE_SHARE_READ,
+            nullptr,
+            OPEN_EXISTING,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr));
+        BY_HANDLE_FILE_INFORMATION srcInfo{};
+        if (!srcHandle.IsValid() || !GetFileInformationByHandle(srcHandle.Get(), &srcInfo) ||
+            (srcInfo.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+            fileLogger(hdm::LogLevel::Error, "Недоступен или небезопасен исходный CAB-файл.");
+            return 1;
+        }
+
+        const std::filesystem::path stagedCab = adminDir.Path() / L"driver.cab";
+        hdm::HandleGuard dstHandle(CreateFileW(
+            stagedCab.c_str(),
+            GENERIC_WRITE,
+            0,
+            nullptr,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
+            nullptr));
+        if (!dstHandle.IsValid()) {
+            fileLogger(hdm::LogLevel::Error, "Не удалось скопировать CAB-пакет в защищённый каталог.");
+            return 1;
+        }
+        std::vector<char> copyBuf(65536);
+        bool copyOk = true;
+        for (;;) {
+            DWORD readBytes = 0;
+            if (!ReadFile(srcHandle.Get(), copyBuf.data(), static_cast<DWORD>(copyBuf.size()), &readBytes, nullptr)) {
+                copyOk = false;
+                break;
+            }
+            if (readBytes == 0) {
+                break;
+            }
+            DWORD offset = 0;
+            while (offset < readBytes) {
+                DWORD written = 0;
+                if (!WriteFile(dstHandle.Get(), copyBuf.data() + offset, readBytes - offset, &written, nullptr) ||
+                    written == 0) {
+                    copyOk = false;
+                    break;
+                }
+                offset += written;
+            }
+            if (!copyOk) {
+                break;
+            }
+        }
+        dstHandle.Reset();
+        srcHandle.Reset();
+        if (!copyOk) {
+            fileLogger(hdm::LogLevel::Error, "Ошибка копирования CAB-пакета в защищённый каталог.");
+            return 1;
+        }
+
+        hdm::HandleGuard cabLock;
+        std::string sigErr;
+        if (!hdm::VerifyAndLockAuthenticodeFile(
+                stagedCab, &cabLock, &sigErr, hdm::DefaultCabPublishers())) {
+            fileLogger(hdm::LogLevel::Error,
+                       "Цифровая подпись CAB-пакета не прошла проверку (" + sigErr + ").");
+            return 1;
+        }
+
+        const std::filesystem::path cabExtractDir = adminDir.Path() / L"cab_extract";
+        if (!CreateDirectoryW(cabExtractDir.c_str(), nullptr)) {
+            fileLogger(hdm::LogLevel::Error, "Не удалось создать каталог распаковки CAB.");
+            return 1;
+        }
+        hdm::CabExtractContext cabCtx{};
+        cabCtx.baseDir = cabExtractDir;
+        if (!SetupIterateCabinetW(stagedCab.c_str(), 0, hdm::CabExtractCallback, &cabCtx)) {
+            cabLock.Reset();
+            fileLogger(hdm::LogLevel::Error,
+                       "Ошибка распаковки CAB-архива: " + hdm::FormatWin32Error(GetLastError()));
+            return 1;
+        }
+        cabLock.Reset();
+
+        const hdm::LocalInstallSummary summary =
+            hdm::LocalDriverInstaller::InstallFromFolderSync(
+                cabExtractDir.wstring(), false, false, fileLogger);
+        if (summary.failedCount > 0 || (summary.installedCount == 0 && summary.stagedOnlyCount == 0)) {
             return 1;
         }
         return summary.rebootRequired ? 2 : 0;

@@ -18,6 +18,7 @@
 #include <limits>
 #include <map>
 #include <set>
+#include <unordered_map>
 #include <utility>
 
 namespace hdm {
@@ -556,7 +557,8 @@ MonitorBrandInfo GetMonitorBrandSupport(const std::string& pnpOrBrand, const std
                 ""};
     }
     return {"Официальная поддержка монитора",
-            "https://www.catalog.update.microsoft.com/Search.aspx?q=" + model, nullptr};
+            "https://www.catalog.update.microsoft.com/Search.aspx?q=" + UrlEncodeCatalogParam(model),
+            nullptr};
 }
 
 } // namespace
@@ -776,11 +778,11 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
             }
         }
 
-        // Group 1: .NET Desktop Runtime 8.0 & 9.0
+        // Group 1: .NET Desktop Runtime 8.0, 9.0 & 10.0
         auto fDotnet = std::async(std::launch::async, [&]() {
             ScopedHttpRegistry onlineScope(onlineHttpRegistry_.get());
             const auto checkDotnet = [&](const std::string& compId, const std::wstring& metaUrl) {
-                const HttpResponse resp = WinHttpRequest(metaUrl, L"GET", true);
+                const HttpResponse resp = WinHttpRequest(metaUrl, L"GET", true, 4 * 1024 * 1024);
                 if (!resp.ok || resp.truncated || resp.body.empty()) {
                     updateItem(compId, [](SystemComponentItem& item) {
                         item.latestVersion = "Недоступно";
@@ -830,7 +832,7 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                     L"https://edgeupdates.microsoft.com/api/products?view=enterprise",
                     L"GET",
                     true,
-                    512 * 1024);
+                    2 * 1024 * 1024);
                 std::string latestWv2;
                 if (resp.ok && !resp.truncated && !resp.body.empty()) {
                     const size_t stablePos = resp.body.find("\"Product\":\"Stable\"");
@@ -1154,26 +1156,9 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
 
 namespace {
 
-std::string ExtractRegistrableDomain(std::string_view host) {
-    if (host.empty()) {
-        return {};
-    }
-    const size_t lastDot = host.rfind('.');
-    if (lastDot == std::string_view::npos || lastDot == 0) {
-        return std::string(host);
-    }
-    const size_t prevDot = host.rfind('.', lastDot - 1);
-    if (prevDot == std::string_view::npos) {
-        return std::string(host);
-    }
-    return std::string(host.substr(prevDot + 1));
-}
-
 std::vector<std::string_view> GetAllowedDownloadHostsForItem(
     const SystemComponentItem& item,
-    bool isCabPackage,
-    std::string& scratchDomainStorage) {
-    scratchDomainStorage.clear();
+    bool isCabPackage) {
     if (isCabPackage || item.id == "catalog_autoinstall" ||
         item.id.rfind("catalog_", 0) == 0) {
         return {"download.windowsupdate.com", "windowsupdate.com"};
@@ -1199,30 +1184,47 @@ std::vector<std::string_view> GetAllowedDownloadHostsForItem(
     if (item.id == "intel_dsa") {
         return {"intel.com", "aka.ms"};
     }
+    if (item.id == "sw_razer") {
+        return {"rzr.to", "razer.com", "razerzone.com"};
+    }
     if (item.id == "sw_steelseries") {
-        return {"steelseries.com", "steelseriescdn.com", "github.com", "githubusercontent.com"};
+        return {"steelseries.com", "steelseriescdn.com"};
     }
     if (item.id == "sw_logitech") {
-        return {"logi.com", "logitech.com", "logitechg.com", "github.com", "githubusercontent.com"};
+        return {"logi.com", "logitech.com", "logitechg.com"};
     }
     if (item.id == "sw_corsair") {
-        return {"corsair.com", "github.com", "githubusercontent.com"};
+        return {"corsair.com"};
     }
     if (item.id == "sw_asus") {
-        return {"asus.com", "github.com", "githubusercontent.com"};
+        return {"asus.com"};
+    }
+    if (item.id == "sw_epos") {
+        return {"eposaudio.com", "epos.com", "sennheiser.com", "azureedge.net"};
+    }
+    if (item.id == "sw_elgato") {
+        return {"elgato.com", "corsair.com"};
     }
 
-    const std::string host = ExtractHttpsHost(item.directInstallerUrl);
-    scratchDomainStorage = ExtractRegistrableDomain(host);
-    std::vector<std::string_view> hosts;
-    if (!scratchDomainStorage.empty()) {
-        hosts.push_back(scratchDomainStorage);
+    const std::string brandCheck = ToLowerAscii(item.vendor + " " + item.name);
+    if (brandCheck.find("asus") != std::string::npos) return {"asus.com"};
+    if (brandCheck.find("msi") != std::string::npos) return {"msi.com"};
+    if (brandCheck.find("samsung") != std::string::npos) return {"samsung.com"};
+    if (brandCheck.find("dell") != std::string::npos) return {"dell.com"};
+    if (brandCheck.find("philips") != std::string::npos) return {"philips.com", "tpv-tech.com"};
+    if (brandCheck.find("viewsonic") != std::string::npos) return {"viewsonic.com", "viewsonicglobal.com"};
+    if (brandCheck.find("lg ") != std::string::npos || brandCheck.find("lg electronics") != std::string::npos) {
+        return {"lg.com", "lge.com"};
     }
-    hosts.push_back("github.com");
-    hosts.push_back("githubusercontent.com");
-    hosts.push_back("aka.ms");
-    hosts.push_back("microsoft.com");
-    return hosts;
+    if (brandCheck.find("benq") != std::string::npos) return {"benq.com"};
+    if (brandCheck.find("aoc") != std::string::npos) return {"aoc.com", "tpv-tech.com"};
+    if (brandCheck.find("gigabyte") != std::string::npos) return {"gigabyte.com"};
+    if (brandCheck.find("acer") != std::string::npos) return {"acer.com"};
+    if (brandCheck.find("lenovo") != std::string::npos) return {"lenovo.com"};
+    if (brandCheck.find("hp ") != std::string::npos || brandCheck.find("hewlett") != std::string::npos) {
+        return {"hp.com"};
+    }
+    return {};
 }
 
 std::vector<std::string_view> GetExpectedPublishersForItem(
@@ -1230,14 +1232,13 @@ std::vector<std::string_view> GetExpectedPublishersForItem(
     bool isCabPackage) {
     if (isCabPackage || item.id == "catalog_autoinstall" ||
         item.id.rfind("catalog_", 0) == 0) {
-        return {"Microsoft", "Intel", "Realtek", "AMD", "Advanced Micro Devices",
-                "NVIDIA", "Broadcom", "Qualcomm", "MediaTek", "ASUSTeK", "ASUS"};
+        return DefaultCabPublishers();
     }
     if (item.id == "rt_vcredist_x64" || item.id == "rt_vcredist_x86" ||
         item.id == "rt_vc2013" || item.id == "rt_vc2012" || item.id == "rt_vc2010" ||
         item.id == "rt_dx_legacy" || item.id == "rt_dotnet8" || item.id == "rt_dotnet9" ||
         item.id == "rt_dotnet10" || item.id == "rt_netfx48" || item.id == "rt_webview2") {
-        return {"Microsoft"};
+        return {"Microsoft Corporation", "Microsoft Windows"};
     }
     if (item.id == "rt_vulkan") {
         return {"LunarG", "Khronos"};
@@ -1246,13 +1247,13 @@ std::vector<std::string_view> GetExpectedPublishersForItem(
         return {"Creative", "OpenAL"};
     }
     if (item.id == "gpu_nvidia") {
-        return {"NVIDIA"};
+        return {"NVIDIA Corporation"};
     }
     if (item.id == "gpu_amd" || item.id == "chip_amd") {
-        return {"AMD", "Advanced Micro Devices"};
+        return {"Advanced Micro Devices"};
     }
     if (item.id == "intel_dsa") {
-        return {"Intel"};
+        return {"Intel Corporation"};
     }
     if (item.id == "sw_razer") {
         return {"Razer"};
@@ -1267,7 +1268,7 @@ std::vector<std::string_view> GetExpectedPublishersForItem(
         return {"Corsair"};
     }
     if (item.id == "sw_asus") {
-        return {"ASUSTeK", "ASUS"};
+        return {"ASUSTeK Computer", "ASUS"};
     }
     if (item.id == "sw_epos") {
         return {"EPOS", "Sennheiser", "DSEA"};
@@ -1277,19 +1278,22 @@ std::vector<std::string_view> GetExpectedPublishersForItem(
     }
 
     const std::string brandCheck = ToLowerAscii(item.vendor + " " + item.name);
-    if (brandCheck.find("asus") != std::string::npos) return {"ASUSTeK", "ASUS"};
-    if (brandCheck.find("dell") != std::string::npos) return {"Dell"};
-    if (brandCheck.find("msi") != std::string::npos) return {"Micro-Star", "MSI"};
-    if (brandCheck.find("samsung") != std::string::npos) return {"Samsung"};
+    if (brandCheck.find("asus") != std::string::npos) return {"ASUSTeK Computer", "ASUS"};
+    if (brandCheck.find("dell") != std::string::npos) return {"Dell Inc", "Dell Technologies"};
+    if (brandCheck.find("msi") != std::string::npos) return {"Micro-Star"};
+    if (brandCheck.find("samsung") != std::string::npos) return {"Samsung Electronics"};
     if (brandCheck.find("philips") != std::string::npos) return {"Philips", "MMD", "TPV", "Portrait Displays"};
     if (brandCheck.find("viewsonic") != std::string::npos) return {"ViewSonic"};
-    if (brandCheck.find("lg") != std::string::npos) return {"LG Electronics", "LG"};
+    if (brandCheck.find("lg ") != std::string::npos || brandCheck.find("lg electronics") != std::string::npos) {
+        return {"LG Electronics"};
+    }
     if (brandCheck.find("benq") != std::string::npos) return {"BenQ"};
     if (brandCheck.find("aoc") != std::string::npos) return {"AOC", "TPV"};
+    if (brandCheck.find("gigabyte") != std::string::npos) return {"Gigabyte"};
     if (brandCheck.find("lenovo") != std::string::npos) return {"Lenovo"};
     if (brandCheck.find("acer") != std::string::npos) return {"Acer"};
     if (brandCheck.find("hp ") != std::string::npos || brandCheck.find("hewlett") != std::string::npos) {
-        return {"HP", "Hewlett"};
+        return {"HP Inc", "Hewlett-Packard", "Hewlett Packard"};
     }
     return {};
 }
@@ -1339,11 +1343,18 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             "Загрузка официального установщика \"" + item.name + "\"...");
     }
 
-    std::string allowedDomainScratch;
     const std::vector<std::string_view> allowedHosts =
-        GetAllowedDownloadHostsForItem(item, isCabPackage, allowedDomainScratch);
+        GetAllowedDownloadHostsForItem(item, isCabPackage);
     const std::vector<std::string_view> allowedPublishers =
         GetExpectedPublishersForItem(item, isCabPackage);
+    if (allowedHosts.empty() || allowedPublishers.empty()) {
+        if (!stopRequested_.load() && log) {
+            log(LogLevel::Error,
+                "Для \"" + item.name + "\" не задан доверенный источник или издатель — автоустановка отклонена в целях безопасности.");
+        }
+        SetPhaseMessage("Источник не подтверждён");
+        return false;
+    }
 
     std::string errMsg;
     if (!DownloadFileViaWinHttp(
@@ -1397,68 +1408,80 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             return false;
         }
 
-        SetPhaseMessage("Распаковка драйвера (.cab)...");
-        std::filesystem::path cabExtractDir = workDir.Path() / L"cab_extract";
-        std::error_code ec;
-        std::filesystem::create_directories(cabExtractDir, ec);
-
-        CabExtractContext cabCtx{};
-        cabCtx.baseDir = cabExtractDir;
-        if (!SetupIterateCabinetW(destFile.c_str(), 0, CabExtractCallback, &cabCtx)) {
-            cabLock.Reset();
-            if (!stopRequested_.load() && log) {
-                log(LogLevel::Error,
-                    "Ошибка распаковки CAB-архива " + item.name + ": " +
-                        FormatWin32Error(GetLastError()));
-            }
-            SetPhaseMessage("Ошибка распаковки CAB");
-            return false;
-        }
-        cabLock.Reset();
-        std::filesystem::remove(destFile, ec);
-
-        bool hasReparsePoint = false;
-        for (std::filesystem::recursive_directory_iterator it(
-                 cabExtractDir,
-                 std::filesystem::directory_options::skip_permission_denied,
-                 ec);
-             !ec && it != std::filesystem::recursive_directory_iterator();
-             it.increment(ec)) {
-            const DWORD attrs = GetFileAttributesW(it->path().c_str());
-            if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                hasReparsePoint = true;
-                break;
-            }
-        }
-        if (ec || hasReparsePoint) {
-            if (!stopRequested_.load() && log) {
-                log(LogLevel::Error,
-                    "Обнаружена недопустимая точка повторного анализа в распакованном CAB-пакете.");
-            }
-            SetPhaseMessage("Ошибка безопасности CAB");
-            return false;
-        }
-
-        SetPhaseMessage("Установка драйвера " + item.name + "...");
-        progress_.store(std::clamp(baseProgress + progressSpan * 0.94f, 0.0f, 0.99f));
-
         bool cabOk = false;
         bool cabReboot = false;
+        std::error_code ec;
         if (IsProcessElevated()) {
+            SetPhaseMessage("Распаковка драйвера (.cab)...");
+            std::filesystem::path cabExtractDir = workDir.Path() / L"cab_extract";
+            std::filesystem::create_directories(cabExtractDir, ec);
+            if (ec) {
+                if (!stopRequested_.load() && log) {
+                    log(LogLevel::Error, "Не удалось создать каталог распаковки CAB.");
+                }
+                SetPhaseMessage("Ошибка распаковки CAB");
+                return false;
+            }
+
+            CabExtractContext cabCtx{};
+            cabCtx.baseDir = cabExtractDir;
+            if (!SetupIterateCabinetW(destFile.c_str(), 0, CabExtractCallback, &cabCtx)) {
+                cabLock.Reset();
+                if (!stopRequested_.load() && log) {
+                    log(LogLevel::Error,
+                        "Ошибка распаковки CAB-архива " + item.name + ": " +
+                            FormatWin32Error(GetLastError()));
+                }
+                SetPhaseMessage("Ошибка распаковки CAB");
+                return false;
+            }
+            cabLock.Reset();
+            std::filesystem::remove(destFile, ec);
+
+            bool hasReparsePoint = false;
+            for (std::filesystem::recursive_directory_iterator it(
+                     cabExtractDir,
+                     std::filesystem::directory_options::none,
+                     ec);
+                 !ec && it != std::filesystem::recursive_directory_iterator();
+                 it.increment(ec)) {
+                const DWORD attrs = GetFileAttributesW(it->path().c_str());
+                if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                    hasReparsePoint = true;
+                    break;
+                }
+            }
+            if (ec || hasReparsePoint) {
+                if (!stopRequested_.load() && log) {
+                    log(LogLevel::Error,
+                        "Обнаружена недопустимая точка повторного анализа в распакованном CAB-пакете.");
+                }
+                SetPhaseMessage("Ошибка безопасности CAB");
+                return false;
+            }
+
+            SetPhaseMessage("Установка драйвера " + item.name + "...");
+            progress_.store(std::clamp(baseProgress + progressSpan * 0.94f, 0.0f, 0.99f));
+
             const LocalInstallSummary sum = LocalDriverInstaller::InstallFromFolderSync(
                 cabExtractDir.wstring(), false, false, log);
             cabOk = (sum.failedCount == 0 && (sum.installedCount > 0 || sum.stagedOnlyCount > 0));
             if (sum.rebootRequired) {
                 cabReboot = true;
             }
+            std::filesystem::remove_all(cabExtractDir, ec);
         } else {
+            SetPhaseMessage("Установка драйвера " + item.name + "...");
+            progress_.store(std::clamp(baseProgress + progressSpan * 0.94f, 0.0f, 0.99f));
+
             const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_cab_inf");
-            std::wstring cliArgs = L"--cli-install-inf " + QuoteWin32Arg(cabExtractDir.wstring());
+            std::wstring cliArgs = L"--cli-install-cab " + QuoteWin32Arg(destFile.wstring());
             if (!tempLog.empty()) {
                 cliArgs += L" --log " + QuoteWin32Arg(tempLog.wstring());
             }
             const ElevatedRunResult run = ExecuteElevatedSelf(
                 cliArgs, true, tempLog.empty() ? nullptr : &tempLog, log, nullptr, &stopRequested_);
+            cabLock.Reset();
             if (!tempLog.empty()) {
                 std::filesystem::remove(tempLog, ec);
             }
@@ -1481,7 +1504,6 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         if (outRebootRequired != nullptr && cabReboot) {
             *outRebootRequired = true;
         }
-        std::filesystem::remove_all(cabExtractDir, ec);
 
         if (!stopRequested_.load()) {
             const int maxAttempts =
@@ -1569,6 +1591,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
 
     std::filesystem::path targetExe = destFile;
     std::filesystem::path extractDir;
+    std::vector<HandleGuard> extractedLocks;
 
     if (isZipPackage) {
         SetPhaseMessage("Распаковка архива...");
@@ -1592,7 +1615,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             std::filesystem::path firstExe;
             for (std::filesystem::recursive_directory_iterator it(
                      extractDir,
-                     std::filesystem::directory_options::skip_permission_denied,
+                     std::filesystem::directory_options::none,
                      ec);
                  !ec && it != std::filesystem::recursive_directory_iterator();
                  it.increment(ec)) {
@@ -1628,17 +1651,15 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             SetPhaseMessage("Установщик не найден");
             return false;
         }
-        if (item.expectedSha256.empty()) {
-            std::string dirSigErr;
-            if (!VerifyExtractedDirectoryBinaries(extractDir, allowedPublishers, &dirSigErr)) {
-                if (!stopRequested_.load() && log) {
-                    log(LogLevel::Error,
-                        "Содержимое распакованного архива не прошло проверку подписи (" +
-                            dirSigErr + "). Запуск отменён в целях безопасности.");
-                }
-                SetPhaseMessage("Подпись архива не подтверждена");
-                return false;
+        std::string dirSigErr;
+        if (!VerifyExtractedDirectoryBinaries(extractDir, allowedPublishers, &dirSigErr, &extractedLocks)) {
+            if (!stopRequested_.load() && log) {
+                log(LogLevel::Error,
+                    "Содержимое распакованного архива не прошло проверку подписи (" +
+                        dirSigErr + "). Запуск отменён в целях безопасности.");
             }
+            SetPhaseMessage("Подпись архива не подтверждена");
+            return false;
         }
     }
 
@@ -1681,71 +1702,66 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         const std::filesystem::path dxExtractDir = workDir.Path() / L"dx_extract";
         std::error_code ec;
         std::filesystem::create_directories(dxExtractDir, ec);
-        const std::wstring extractArgs = L"/Q /T:" + QuoteWin32Arg(dxExtractDir.wstring());
-        const bool extracted = LaunchAndWaitProcess(
-            targetExe,
-            extractArgs,
-            &exitCode,
-            &launchErr,
-            &cancelInstallRequested_,
-            &stopRequested_,
-            &processStillRunning);
-        targetLock.Reset();
-        if (extracted) {
-            const std::filesystem::path dxSetup = dxExtractDir / L"DXSETUP.exe";
-            if (exitCode != 0) {
-                if (!stopRequested_.load() && log) {
-                    log(LogLevel::Error,
-                        "Ошибка распаковки DirectX End-User Runtime (код " +
-                            std::to_string(exitCode) + ").");
-                }
-                errorAlreadyLogged = true;
-            } else if (std::filesystem::is_regular_file(dxSetup, ec)) {
-                HandleGuard dxSetupLock;
-                HandleGuard dsetupDllLock;
-                HandleGuard dsetup32DllLock;
+        if (ec) {
+            launchErr = static_cast<DWORD>(ec.value());
+            if (!stopRequested_.load() && log) {
+                log(LogLevel::Error, "Не удалось создать временный каталог распаковки DirectX.");
+            }
+            errorAlreadyLogged = true;
+        } else {
+            const std::wstring extractArgs = L"/Q /T:" + QuoteWin32Arg(dxExtractDir.wstring());
+            const bool extracted = LaunchAndWaitProcess(
+                targetExe,
+                extractArgs,
+                &exitCode,
+                &launchErr,
+                &cancelInstallRequested_,
+                &stopRequested_,
+                &processStillRunning);
+            targetLock.Reset();
+            if (extracted) {
+                const std::filesystem::path dxSetup = dxExtractDir / L"DXSETUP.exe";
                 const std::filesystem::path dsetupDll = dxExtractDir / L"DSETUP.dll";
-                const std::filesystem::path dsetup32Dll = dxExtractDir / L"dsetup32.dll";
-                const std::vector<std::string_view> msPub{"Microsoft"};
-                std::string dxSigErr;
-                bool companionOk = true;
-                if (std::filesystem::is_regular_file(dsetupDll, ec)) {
-                    companionOk = VerifyAndLockAuthenticodeFile(
-                        dsetupDll, &dsetupDllLock, &dxSigErr, msPub);
-                }
-                if (companionOk && std::filesystem::is_regular_file(dsetup32Dll, ec)) {
-                    companionOk = VerifyAndLockAuthenticodeFile(
-                        dsetup32Dll, &dsetup32DllLock, &dxSigErr, msPub);
-                }
-                if (!companionOk ||
-                    !VerifyAndLockAuthenticodeFile(dxSetup, &dxSetupLock, &dxSigErr, msPub)) {
+                if (exitCode != 0) {
                     if (!stopRequested_.load() && log) {
                         log(LogLevel::Error,
-                            "Цифровая подпись компонентов DirectX не прошла проверку (" + dxSigErr +
-                                "). Запуск отменён в целях безопасности.");
+                            "Ошибка распаковки DirectX End-User Runtime (код " +
+                                std::to_string(exitCode) + ").");
                     }
-                    launchErr = ERROR_INVALID_DATA;
                     errorAlreadyLogged = true;
+                } else if (std::filesystem::is_regular_file(dxSetup, ec) &&
+                           std::filesystem::is_regular_file(dsetupDll, ec)) {
+                    const std::vector<std::string_view> msPub{
+                        "Microsoft Corporation", "Microsoft Windows"};
+                    std::vector<HandleGuard> dxLocks;
+                    std::string dxSigErr;
+                    if (!VerifyExtractedDirectoryBinaries(dxExtractDir, msPub, &dxSigErr, &dxLocks)) {
+                        if (!stopRequested_.load() && log) {
+                            log(LogLevel::Error,
+                                "Цифровая подпись компонентов DirectX не прошла проверку (" + dxSigErr +
+                                    "). Запуск отменён в целях безопасности.");
+                        }
+                        launchErr = ERROR_INVALID_DATA;
+                        errorAlreadyLogged = true;
+                    } else {
+                        launched = LaunchAndWaitProcess(
+                            dxSetup,
+                            L"/silent",
+                            &exitCode,
+                            &launchErr,
+                            &cancelInstallRequested_,
+                            &stopRequested_,
+                            &processStillRunning);
+                        dxLocks.clear();
+                    }
                 } else {
-                    launched = LaunchAndWaitProcess(
-                        dxSetup,
-                        L"/silent",
-                        &exitCode,
-                        &launchErr,
-                        &cancelInstallRequested_,
-                        &stopRequested_,
-                        &processStillRunning);
-                    dxSetupLock.Reset();
-                    dsetup32DllLock.Reset();
-                    dsetupDllLock.Reset();
+                    if (!stopRequested_.load() && log) {
+                        log(LogLevel::Error,
+                            "В распакованном пакете DirectX не найдены DXSETUP.exe или DSETUP.dll.");
+                    }
+                    launchErr = ERROR_FILE_NOT_FOUND;
+                    errorAlreadyLogged = true;
                 }
-            } else {
-                if (!stopRequested_.load() && log) {
-                    log(LogLevel::Error,
-                        "В распакованном пакете DirectX не найден DXSETUP.exe.");
-                }
-                launchErr = ERROR_FILE_NOT_FOUND;
-                errorAlreadyLogged = true;
             }
         }
     } else if (EndsWithCaseInsensitive(WideToUtf8(targetExe.extension().wstring()), ".msi")) {
@@ -2700,13 +2716,40 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
 
     // 3. Monitors (via EDID) & GPUs
     {
-        std::set<std::string> seenMonitors;
+        auto makeStableMonitorId = [](std::string_view seed) {
+            std::string slug;
+            slug.reserve(seed.size());
+            bool prevUnderscore = false;
+            for (unsigned char ch : seed) {
+                if (std::isalnum(ch)) {
+                    slug.push_back(static_cast<char>(std::tolower(ch)));
+                    prevUnderscore = false;
+                } else if (!prevUnderscore && !slug.empty()) {
+                    slug.push_back('_');
+                    prevUnderscore = true;
+                }
+            }
+            while (!slug.empty() && slug.back() == '_') {
+                slug.pop_back();
+            }
+            if (slug.empty()) {
+                slug = "monitor";
+            }
+            if (slug.size() > 36) {
+                slug.resize(36);
+            }
+            return std::string("mon_") + slug;
+        };
+
+        std::set<std::string> seenMonitorDevices;
+        std::set<std::string> usedMonitorIds;
+        std::unordered_map<std::string, size_t> knownBrandItemIdx;
         for (const auto& d : devicesSnapshot) {
             if (d.category != DeviceCategory::Monitor) {
                 continue;
             }
-            const std::string key = d.edidManufacturer + "|" + d.edidModel + "|" + d.name;
-            if (!seenMonitors.insert(key).second) {
+            const std::string deviceKey = d.edidManufacturer + "|" + d.edidModel + "|" + d.name;
+            if (!seenMonitorDevices.insert(deviceKey).second) {
                 continue;
             }
             const MonitorBrandInfo brandInfo = GetMonitorBrandSupport(d.edidManufacturer, d.name);
@@ -2714,17 +2757,56 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
                                                ? FindInstalledApp(apps, {brandInfo.uninstallKeyword})
                                                : nullptr;
 
+            std::string hwDesc = d.name;
+            if (!d.driverVersion.empty() && !d.isGenericMonitorDriver) {
+                hwDesc += " [INF " + d.driverVersion + "]";
+            }
+
+            const bool isKnownBrand =
+                (brandInfo.softwareName != "Официальная поддержка монитора");
+            const std::string brandDedupeKey =
+                isKnownBrand ? (brandInfo.softwareName + "|" + brandInfo.url) : std::string();
+            if (isKnownBrand) {
+                const auto existingIt = knownBrandItemIdx.find(brandDedupeKey);
+                if (existingIt != knownBrandItemIdx.end()) {
+                    SystemComponentItem& existing = result[existingIt->second];
+                    if (existing.detectedHardware.find(hwDesc) == std::string::npos) {
+                        if (!existing.detectedHardware.empty()) {
+                            existing.detectedHardware += "; ";
+                        }
+                        existing.detectedHardware += hwDesc;
+                    }
+                    const bool thisInstalled = !d.isGenericMonitorDriver || (app != nullptr);
+                    if (!thisInstalled && app == nullptr) {
+                        existing.updateAvailable = true;
+                        existing.installed = false;
+                        existing.installedVersion = d.driverVersion + " (" + d.infName + ")";
+                        existing.compareVersions = false;
+                        existing.statusText = "Базовый драйвер (monitor.inf)";
+                    }
+                    continue;
+                }
+            }
+
             SystemComponentItem mon;
-            mon.id = "mon_" + std::to_string(seenMonitors.size());
+            const std::string idSeed =
+                isKnownBrand
+                    ? (brandInfo.wingetPath != nullptr ? std::string(brandInfo.wingetPath)
+                                                       : brandInfo.softwareName)
+                    : (d.edidManufacturer + "_" + d.edidModel + "_" + d.name);
+            std::string baseId = makeStableMonitorId(idSeed);
+            std::string uniqueId = baseId;
+            int suffixIdx = 2;
+            while (!usedMonitorIds.insert(uniqueId).second) {
+                uniqueId = baseId + "_" + std::to_string(suffixIdx++);
+            }
+            mon.id = std::move(uniqueId);
             mon.category = ComponentCategory::MonitorAndGpu;
             mon.name = brandInfo.softwareName;
             mon.vendor = d.manufacturer.empty() ? d.edidManufacturer : d.manufacturer;
             mon.purposeDescription =
                 "Фирменная утилита и INF-драйвер монитора: отвечает за точный цветовой профиль (ICC), управление яркостью/режимами OSD с ПК и поддержку высокой герцовки/HDR.";
-            mon.detectedHardware = d.name;
-            if (!d.driverVersion.empty() && !d.isGenericMonitorDriver) {
-                mon.detectedHardware += " [INF " + d.driverVersion + "]";
-            }
+            mon.detectedHardware = hwDesc;
             mon.officialPageUrl = brandInfo.url;
             if (brandInfo.fallbackDirectUrl != nullptr) {
                 mon.directInstallerUrl = brandInfo.fallbackDirectUrl;
@@ -2761,6 +2843,9 @@ std::vector<SystemComponentItem> SystemComponentsScanner::ScanLocalSynchronously
                 mon.compareVersions = false;
                 mon.updateAvailable = true;
                 mon.statusText = "Базовый драйвер (monitor.inf)";
+            }
+            if (isKnownBrand) {
+                knownBrandItemIdx[brandDedupeKey] = result.size();
             }
             result.push_back(std::move(mon));
         }

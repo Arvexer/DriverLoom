@@ -394,7 +394,7 @@ HttpResponse WinHttpRequest(
         &statusLen,
         WINHTTP_NO_HEADER_INDEX);
     res.statusCode = status;
-    res.ok = (status >= 200 && status < 400);
+    res.ok = followRedirects ? (status >= 200 && status < 300) : (status >= 200 && status < 400);
 
     if (!followRedirects) {
         wchar_t locBuf[2048]{};

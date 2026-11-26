@@ -31,6 +31,9 @@ private:
 /// Creates a unique UUID-named directory inside %TEMP% and rejects reparse points.
 bool CreateUniqueTempWorkDir(std::filesystem::path& outDir, std::string* outError);
 
+/// Creates a unique UUID-named directory inside %SystemRoot%\Temp with Admin/SYSTEM-only ACL.
+bool CreateAdminOnlyTempWorkDir(std::filesystem::path& outDir, std::string* outError);
+
 [[nodiscard]] bool IsSafeRelativeInstallerPath(std::string_view rawRel);
 [[nodiscard]] std::filesystem::path ResolveContainedInstallerPath(
     const std::filesystem::path& baseDir,
@@ -67,11 +70,15 @@ bool VerifyAndLockAuthenticodeFile(
     std::string* outReason,
     const std::vector<std::string_view>& allowedPublishers = {});
 
+/// Returns the canonical Authenticode publisher allowlist for WHQL CAB driver packages.
+[[nodiscard]] const std::vector<std::string_view>& DefaultCabPublishers();
+
 /// Verifies every executable/library binary extracted into a temporary folder.
 bool VerifyExtractedDirectoryBinaries(
     const std::filesystem::path& dir,
     const std::vector<std::string_view>& allowedPublishers,
-    std::string* outReason);
+    std::string* outReason,
+    std::vector<HandleGuard>* outLocks = nullptr);
 
 /// Launches a verified installer via ShellExecuteExW and waits with cancellation support.
 bool LaunchAndWaitProcess(

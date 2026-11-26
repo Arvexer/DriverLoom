@@ -1603,6 +1603,7 @@ bool SystemDiagnostics::RunSystemToolSync(
     siEx.StartupInfo.hStdOutput = pipeWrite.Get();
     siEx.StartupInfo.hStdError = pipeWrite.Get();
 
+    std::vector<BYTE> attrBuf;
     struct AttrListGuard {
         LPPROC_THREAD_ATTRIBUTE_LIST list{nullptr};
         ~AttrListGuard() {
@@ -1611,7 +1612,6 @@ bool SystemDiagnostics::RunSystemToolSync(
             }
         }
     } attrGuard;
-    std::vector<BYTE> attrBuf;
     HANDLE inheritHandles[2]{pipeWrite.Get(), nulIn.Get()};
     const DWORD inheritCount = nulIn.IsValid() ? 2u : 1u;
     DWORD creationFlags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
