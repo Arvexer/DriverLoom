@@ -11,6 +11,7 @@
 #include <dxgi.h>
 #include <shellapi.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>

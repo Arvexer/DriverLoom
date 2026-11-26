@@ -1178,6 +1178,30 @@ void TestSafeZipExtractor() {
             RemoveDirectoryW(juncSub.c_str());
         }
     }
+
+    // 10. ZIP64 multi-disk locator rejected even with 0xFFFF EOCD markers
+    {
+        std::vector<uint8_t> z64Bad = BuildCustomZip({MakeStoredEntry("ok.txt", "hi")});
+        if (z64Bad.size() >= 22) {
+            const size_t eocdPos = z64Bad.size() - 22;
+            // Set totalEntries (offset +8/+10) to 0xFFFF to trigger ZIP64 locator lookup
+            z64Bad[eocdPos + 8] = 0xFFu;
+            z64Bad[eocdPos + 9] = 0xFFu;
+            z64Bad[eocdPos + 10] = 0xFFu;
+            z64Bad[eocdPos + 11] = 0xFFu;
+            // Prepend a 20-byte ZIP64 EOCD Locator right before EOCD with diskWithZ64 = 1 (multi-disk)
+            std::vector<uint8_t> loc(20, 0);
+            loc[0] = 0x50u; loc[1] = 0x4Bu; loc[2] = 0x06u; loc[3] = 0x07u; // 0x07064B50
+            loc[4] = 0x01u; // diskWithZip64Eocd = 1 (forbidden)
+            loc[16] = 0x01u; // totalDisks = 1
+            z64Bad.insert(z64Bad.begin() + static_cast<std::ptrdiff_t>(eocdPos), loc.begin(), loc.end());
+            const auto zp = dir / L"z64_multidisk.zip";
+            const auto od = dir / L"out_z64_bad";
+            WriteBytesFile(zp, z64Bad);
+            Check(!hdm::ExtractZipSafely(zp, od, nullptr, &err),
+                  "SafeZip: rejects multi-disk ZIP64 locator", err);
+        }
+    }
 }
 
 void TestChunkStrings() {

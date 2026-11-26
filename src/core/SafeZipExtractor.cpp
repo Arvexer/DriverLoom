@@ -246,7 +246,7 @@ bool ParseSafeZipPath(
     }
 
     std::wstring key = rawName;
-    const DWORD mapped = LCMapStringEx(
+    const int mapped = LCMapStringEx(
         LOCALE_NAME_INVARIANT,
         LCMAP_LOWERCASE,
         rawName.data(),
@@ -256,7 +256,7 @@ bool ParseSafeZipPath(
         nullptr,
         nullptr,
         0);
-    if (mapped == 0) {
+    if (mapped <= 0) {
         return false;
     }
     outNormalizedLowerKey = std::move(key);
@@ -936,7 +936,9 @@ bool ExtractZipSafely(
         if (!ReadExactAt(zipHandle.Get(), eocdFileOffset - 20, locBuf, sizeof(locBuf), cancelFlag, outError)) {
             return false;
         }
-        if (ReadU32LE(locBuf) != kZip64LocatorSig || ReadU32LE(locBuf + 16) != 1u) {
+        if (ReadU32LE(locBuf) != kZip64LocatorSig ||
+            ReadU32LE(locBuf + 4) != 0u ||
+            ReadU32LE(locBuf + 16) > 1u) {
             if (outError) *outError = "Некорректный или многотомный локатор ZIP64.";
             return false;
         }

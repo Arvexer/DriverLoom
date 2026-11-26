@@ -203,3 +203,7 @@ elseif(MINGW)
 endif()
 
 add_test(NAME DriverLoomTests COMMAND DriverLoomTests)
+add_test(
+    NAME CodeHygieneChecks
+    COMMAND "${CMAKE_COMMAND}" "-DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}" -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/CheckHygiene.cmake"
+)

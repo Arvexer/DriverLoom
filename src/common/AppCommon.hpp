@@ -12,8 +12,11 @@
 #include <shellapi.h>
 #include <setupapi.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstddef>
+#include <cstdint>
 #include <cstdio>
 #include <cwchar>
 #include <filesystem>
