@@ -102,39 +102,6 @@ std::vector<InstalledAppEntry> CollectAllInstalledApps() {
     return apps;
 }
 
-std::string GetFileVersionUtf8(const std::filesystem::path& filePath) {
-    std::error_code ec;
-    if (!std::filesystem::exists(filePath, ec)) {
-        return {};
-    }
-    DWORD dummy = 0;
-    const std::wstring wPath = filePath.wstring();
-    const DWORD size = GetFileVersionInfoSizeW(wPath.c_str(), &dummy);
-    if (size == 0) {
-        return {};
-    }
-    std::vector<BYTE> data(size);
-    if (!GetFileVersionInfoW(wPath.c_str(), 0, size, data.data())) {
-        return {};
-    }
-    VS_FIXEDFILEINFO* ffi = nullptr;
-    UINT ffiLen = 0;
-    if (!VerQueryValueW(data.data(), L"\\", reinterpret_cast<LPVOID*>(&ffi), &ffiLen) ||
-        ffi == nullptr) {
-        return {};
-    }
-    char buf[64];
-    std::snprintf(
-        buf,
-        sizeof(buf),
-        "%u.%u.%u.%u",
-        HIWORD(ffi->dwFileVersionMS),
-        LOWORD(ffi->dwFileVersionMS),
-        HIWORD(ffi->dwFileVersionLS),
-        LOWORD(ffi->dwFileVersionLS));
-    return buf;
-}
-
 const InstalledAppEntry* FindInstalledApp(
     const std::vector<InstalledAppEntry>& apps,
     std::initializer_list<const char*> keywords) {
@@ -1482,10 +1449,47 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         bool cabReboot = false;
         std::error_code ec;
         if (IsProcessElevated()) {
+            std::filesystem::path adminRoot;
+            std::string dirErr;
+            if (!CreateAdminOnlyTempWorkDir(adminRoot, &dirErr)) {
+                cabLock.Reset();
+                if (!stopRequested_.load() && log) {
+                    log(LogLevel::Error,
+                        dirErr.empty() ? "Не удалось создать защищённый каталог установки." : dirErr);
+                }
+                SetPhaseMessage("Ошибка защищённого каталога");
+                return false;
+            }
+            TempWorkDirGuard adminDir;
+            adminDir.Set(adminRoot);
+
+            const std::filesystem::path stagedCab = adminDir.Path() / L"driver.cab";
+            cabLock.Reset();
+            std::string copyErr;
+            if (!CopyFileBoundedNoReparse(destFile, stagedCab, kMaxCabPackageBytes, &copyErr)) {
+                if (!stopRequested_.load() && log) {
+                    log(LogLevel::Error,
+                        copyErr.empty() ? "Ошибка копирования CAB-пакета в защищённый каталог." : copyErr);
+                }
+                SetPhaseMessage("Ошибка копирования CAB");
+                return false;
+            }
+
+            std::string adminSigErr;
+            if (!VerifyAndLockAuthenticodeFile(
+                    stagedCab, &cabLock, &adminSigErr, DefaultCabPublishers())) {
+                if (!stopRequested_.load() && log) {
+                    log(LogLevel::Error,
+                        "Цифровая подпись CAB-пакета не прошла проверку (" + adminSigErr + ").");
+                }
+                SetPhaseMessage("Подпись CAB не подтверждена");
+                return false;
+            }
+
             SetPhaseMessage("Распаковка драйвера (.cab)...");
-            std::filesystem::path cabExtractDir = workDir.Path() / L"cab_extract";
-            std::filesystem::create_directories(cabExtractDir, ec);
-            if (ec) {
+            const std::filesystem::path cabExtractDir = adminDir.Path() / L"cab_extract";
+            if (!CreateDirectoryW(cabExtractDir.c_str(), nullptr)) {
+                cabLock.Reset();
                 if (!stopRequested_.load() && log) {
                     log(LogLevel::Error, "Не удалось создать каталог распаковки CAB.");
                 }
@@ -1495,7 +1499,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
 
             CabExtractContext cabCtx{};
             cabCtx.baseDir = cabExtractDir;
-            if (!SetupIterateCabinetW(destFile.c_str(), 0, CabExtractCallback, &cabCtx)) {
+            if (!SetupIterateCabinetW(stagedCab.c_str(), 0, CabExtractCallback, &cabCtx)) {
                 cabLock.Reset();
                 if (!stopRequested_.load() && log) {
                     log(LogLevel::Error,
@@ -1506,7 +1510,7 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
                 return false;
             }
             cabLock.Reset();
-            std::filesystem::remove(destFile, ec);
+            std::filesystem::remove(stagedCab, ec);
 
             bool hasReparsePoint = false;
             for (std::filesystem::recursive_directory_iterator it(
@@ -1539,21 +1543,33 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
             if (sum.rebootRequired) {
                 cabReboot = true;
             }
-            std::filesystem::remove_all(cabExtractDir, ec);
         } else {
             SetPhaseMessage("Установка драйвера " + item.name + "...");
             progress_.store(std::clamp(baseProgress + progressSpan * 0.94f, 0.0f, 0.99f));
 
             const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_cab_inf");
+            const std::filesystem::path cancelMarker =
+                tempLog.empty() ? std::filesystem::path()
+                                : std::filesystem::path(tempLog.wstring() + L".cancel");
             std::wstring cliArgs = L"--cli-install-cab " + QuoteWin32Arg(destFile.wstring());
             if (!tempLog.empty()) {
                 cliArgs += L" --log " + QuoteWin32Arg(tempLog.wstring());
+                cliArgs += L" --cancel-file " + QuoteWin32Arg(cancelMarker.wstring());
             }
             const ElevatedRunResult run = ExecuteElevatedSelf(
-                cliArgs, true, tempLog.empty() ? nullptr : &tempLog, log, nullptr, &stopRequested_);
+                cliArgs,
+                true,
+                tempLog.empty() ? nullptr : &tempLog,
+                log,
+                nullptr,
+                &cancelInstallRequested_,
+                cancelMarker.empty() ? nullptr : &cancelMarker);
             cabLock.Reset();
             if (!tempLog.empty()) {
                 std::filesystem::remove(tempLog, ec);
+            }
+            if (!cancelMarker.empty()) {
+                std::filesystem::remove(cancelMarker, ec);
             }
             if (!run.launched) {
                 if (run.launchError == ERROR_CANCELLED) {
@@ -1563,6 +1579,11 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
                     }
                 } else if (!stopRequested_.load() && log) {
                     log(LogLevel::Error, "Ошибка запуска UAC: " + FormatWin32Error(run.launchError));
+                }
+            } else if (run.cancelled || run.exitCode == 3) {
+                cancelInstallRequested_.store(true);
+                if (!stopRequested_.load() && log) {
+                    log(LogLevel::Warning, "Установка драйвера отменена пользователем.");
                 }
             } else {
                 cabOk = (run.exitCode == 0 || run.exitCode == 2);
@@ -1638,230 +1659,120 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
         return cabOk;
     }
 
-    if (!isZipPackage && HasZipMagicHeader(destFile)) {
-        std::filesystem::path zipRenamed = destFile;
-        zipRenamed.replace_extension(L".zip");
-        std::error_code rec;
-        std::filesystem::rename(destFile, zipRenamed, rec);
-        if (!rec) {
-            destFile = zipRenamed;
-            isZipPackage = true;
-        }
-    } else if (!isZipPackage && !isCabPackage &&
-               !EndsWithCaseInsensitive(WideToUtf8(destFile.extension().wstring()), ".msi") &&
-               HasMsiMagicHeader(destFile)) {
-        std::filesystem::path msiRenamed = destFile;
-        msiRenamed.replace_extension(L".msi");
-        std::error_code rec;
-        std::filesystem::rename(destFile, msiRenamed, rec);
-        if (!rec) {
-            destFile = msiRenamed;
-        }
-    }
-
-    std::filesystem::path targetExe = destFile;
-    std::filesystem::path extractDir;
-    std::vector<HandleGuard> extractedLocks;
-
-    if (isZipPackage) {
-        SetPhaseMessage("Распаковка архива...");
-        extractDir = workDir.Path() / L"pkg_extract";
-        std::error_code ec;
-        if (!ExtractZipViaShellCom(destFile, extractDir, &cancelInstallRequested_)) {
-            if (!stopRequested_.load() && log) {
-                log(LogLevel::Error, "Не удалось распаковать архив " + item.name + ".");
-            }
-            SetPhaseMessage("Ошибка распаковки");
-            return false;
-        }
-
-        targetExe.clear();
-        if (!item.nestedInstallerHint.empty()) {
-            targetExe = ResolveContainedInstallerPath(extractDir, item.nestedInstallerHint);
-        }
-        if (targetExe.empty()) {
-            std::filesystem::path firstMsi;
-            std::filesystem::path setupExe;
-            std::filesystem::path firstExe;
-            for (std::filesystem::recursive_directory_iterator it(
-                     extractDir,
-                     std::filesystem::directory_options::none,
-                     ec);
-                 !ec && it != std::filesystem::recursive_directory_iterator();
-                 it.increment(ec)) {
-                std::error_code entryEc;
-                if (!it->is_regular_file(entryEc)) {
-                    continue;
-                }
-                const DWORD attrs = GetFileAttributesW(it->path().c_str());
-                if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                    continue;
-                }
-                const std::string ext = ToLowerAscii(WideToUtf8(it->path().extension().wstring()));
-                const std::string fname = ToLowerAscii(WideToUtf8(it->path().filename().wstring()));
-                if (ext == ".msi" && firstMsi.empty()) {
-                    firstMsi = it->path();
-                } else if (ext == ".exe") {
-                    if (firstExe.empty()) firstExe = it->path();
-                    if (setupExe.empty() &&
-                        (fname.find("setup") != std::string::npos ||
-                         fname.find("install") != std::string::npos)) {
-                        setupExe = it->path();
-                    }
-                }
-            }
-            if (!firstMsi.empty()) targetExe = firstMsi;
-            else if (!setupExe.empty()) targetExe = setupExe;
-            else targetExe = firstExe;
-        }
-        if (targetExe.empty()) {
-            if (!stopRequested_.load() && log) {
-                log(LogLevel::Error, "В архиве не найден исполняемый файл установщика.");
-            }
-            SetPhaseMessage("Установщик не найден");
-            return false;
-        }
-        std::string dirSigErr;
-        if (!VerifyExtractedDirectoryBinaries(extractDir, allowedPublishers, &dirSigErr, &extractedLocks)) {
-            if (!stopRequested_.load() && log) {
-                log(LogLevel::Error,
-                    "Содержимое распакованного архива не прошло проверку подписи (" +
-                        dirSigErr + "). Запуск отменён в целях безопасности.");
-            }
-            SetPhaseMessage("Подпись архива не подтверждена");
-            return false;
-        }
-    }
-
     if (cancelInstallRequested_.load()) {
         SetPhaseMessage("Установка отменена");
         return false;
     }
 
-    SetPhaseMessage("Проверка цифровой подписи Authenticode...");
-    HandleGuard targetLock;
-    std::string sigErr;
-    if (!VerifyAndLockAuthenticodeFile(targetExe, &targetLock, &sigErr, allowedPublishers)) {
-        if (!stopRequested_.load() && log) {
-            log(LogLevel::Error,
-                "Цифровая подпись установщика не прошла проверку (" + sigErr +
-                    "). Запуск отменён в целях безопасности.");
+    StagedPackageOptions pkgOpts;
+    pkgOpts.sourcePackagePath = destFile;
+    pkgOpts.expectedSha256 = item.expectedSha256;
+    pkgOpts.allowedPublishers.reserve(allowedPublishers.size());
+    std::string publishersJoined;
+    for (const auto& pub : allowedPublishers) {
+        if (!pub.empty()) {
+            pkgOpts.allowedPublishers.emplace_back(pub);
+            if (!publishersJoined.empty()) {
+                publishersJoined.push_back('|');
+            }
+            publishersJoined.append(pub);
         }
-        SetPhaseMessage("Подпись не подтверждена");
-        return false;
     }
+    pkgOpts.installerArgs = item.installerArgs;
+    pkgOpts.nestedInstallerHint = item.nestedInstallerHint;
+    pkgOpts.isDirectXLegacy = (item.id == "rt_dx_legacy");
+    pkgOpts.maxPackageBytes = kMaxInstallerPackageBytes;
 
-    const std::string dlVer = GetFileVersionUtf8(targetExe);
-    if (!stopRequested_.load() && log) {
-        log(LogLevel::Success,
-            "Подпись подтверждена" +
-                (dlVer.empty() ? std::string() : " (версия файла: " + dlVer + ")") +
-                ". Запуск установки...");
-    }
-
-    SetPhaseMessage("Установка " + item.name + "...");
+    SetPhaseMessage("Проверка и установка " + item.name + "...");
     progress_.store(std::clamp(baseProgress + progressSpan * 0.94f, 0.0f, 0.99f));
 
+    std::string dlVer;
     DWORD exitCode = 0;
     DWORD launchErr = 0;
     bool launched = false;
     bool processStillRunning = false;
     bool errorAlreadyLogged = false;
 
-    if (item.id == "rt_dx_legacy") {
-        const std::filesystem::path dxExtractDir = workDir.Path() / L"dx_extract";
-        std::error_code ec;
-        std::filesystem::create_directories(dxExtractDir, ec);
-        if (ec) {
-            launchErr = static_cast<DWORD>(ec.value());
-            if (!stopRequested_.load() && log) {
-                log(LogLevel::Error, "Не удалось создать временный каталог распаковки DirectX.");
-            }
-            errorAlreadyLogged = true;
-        } else {
-            const std::wstring extractArgs = L"/Q /T:" + QuoteWin32Arg(dxExtractDir.wstring());
-            const bool extracted = LaunchAndWaitProcess(
-                targetExe,
-                extractArgs,
-                &exitCode,
-                &launchErr,
-                &cancelInstallRequested_,
-                &stopRequested_,
-                &processStillRunning);
-            targetLock.Reset();
-            if (extracted) {
-                const std::filesystem::path dxSetup = dxExtractDir / L"DXSETUP.exe";
-                const std::filesystem::path dsetupDll = dxExtractDir / L"DSETUP.dll";
-                if (exitCode != 0) {
-                    if (!stopRequested_.load() && log) {
-                        log(LogLevel::Error,
-                            "Ошибка распаковки DirectX End-User Runtime (код " +
-                                std::to_string(exitCode) + ").");
-                    }
-                    errorAlreadyLogged = true;
-                } else if (std::filesystem::is_regular_file(dxSetup, ec) &&
-                           std::filesystem::is_regular_file(dsetupDll, ec)) {
-                    const std::vector<std::string_view> msPub{
-                        "Microsoft Corporation", "Microsoft Windows"};
-                    std::vector<HandleGuard> dxLocks;
-                    std::string dxSigErr;
-                    if (!VerifyExtractedDirectoryBinaries(dxExtractDir, msPub, &dxSigErr, &dxLocks)) {
-                        if (!stopRequested_.load() && log) {
-                            log(LogLevel::Error,
-                                "Цифровая подпись компонентов DirectX не прошла проверку (" + dxSigErr +
-                                    "). Запуск отменён в целях безопасности.");
-                        }
-                        launchErr = ERROR_INVALID_DATA;
-                        errorAlreadyLogged = true;
-                    } else {
-                        launched = LaunchAndWaitProcess(
-                            dxSetup,
-                            L"/silent",
-                            &exitCode,
-                            &launchErr,
-                            &cancelInstallRequested_,
-                            &stopRequested_,
-                            &processStillRunning);
-                        dxLocks.clear();
-                    }
-                } else {
-                    if (!stopRequested_.load() && log) {
-                        log(LogLevel::Error,
-                            "В распакованном пакете DirectX не найдены DXSETUP.exe или DSETUP.dll.");
-                    }
-                    launchErr = ERROR_FILE_NOT_FOUND;
-                    errorAlreadyLogged = true;
-                }
-            }
+    if (IsProcessElevated()) {
+        const StagedPackageResult res = RunStagedPackageInAdminDir(
+            pkgOpts, log, &cancelInstallRequested_, &stopRequested_);
+        dlVer = res.fileVersion;
+        launched = res.launched;
+        exitCode = res.exitCode;
+        launchErr = res.launchError;
+        processStillRunning = res.processStillRunning;
+        errorAlreadyLogged = !res.errorMessage.empty();
+        if (res.cancelled) {
+            cancelInstallRequested_.store(true);
+            launchErr = ERROR_CANCELLED;
         }
-    } else if (EndsWithCaseInsensitive(WideToUtf8(targetExe.extension().wstring()), ".msi")) {
-        const std::filesystem::path sysDir = GetSystemDirPath(false);
-        if (!sysDir.empty()) {
-            const std::filesystem::path msiexec = sysDir / L"msiexec.exe";
-            const std::wstring msiArgs =
-                L"/i " + QuoteWin32Arg(targetExe.wstring()) + L" /passive /norestart";
-            launched = LaunchAndWaitProcess(
-                msiexec,
-                msiArgs,
-                &exitCode,
-                &launchErr,
-                &cancelInstallRequested_,
-                &stopRequested_,
-                &processStillRunning);
-        } else {
-            launchErr = ERROR_PATH_NOT_FOUND;
-        }
-        targetLock.Reset();
     } else {
-        launched = LaunchAndWaitProcess(
-            targetExe,
-            Utf8ToWide(item.installerArgs),
-            &exitCode,
-            &launchErr,
+        const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_pkg");
+        const std::filesystem::path cancelMarker =
+            tempLog.empty() ? std::filesystem::path()
+                            : std::filesystem::path(tempLog.wstring() + L".cancel");
+        std::wstring cliArgs =
+            L"--cli-install-package " + QuoteWin32Arg(destFile.wstring()) +
+            L" --publishers " + QuoteWin32Arg(Utf8ToWide(publishersJoined));
+        if (!item.expectedSha256.empty()) {
+            cliArgs += L" --sha256 " + QuoteWin32Arg(Utf8ToWide(item.expectedSha256));
+        }
+        if (!item.installerArgs.empty()) {
+            cliArgs += L" --installer-args " + QuoteWin32Arg(Utf8ToWide(item.installerArgs));
+        }
+        if (!item.nestedInstallerHint.empty()) {
+            cliArgs += L" --nested-hint " + QuoteWin32Arg(Utf8ToWide(item.nestedInstallerHint));
+        }
+        if (pkgOpts.isDirectXLegacy) {
+            cliArgs += L" --pkg-kind directx";
+        }
+        if (!tempLog.empty()) {
+            cliArgs += L" --log " + QuoteWin32Arg(tempLog.wstring());
+            cliArgs += L" --cancel-file " + QuoteWin32Arg(cancelMarker.wstring());
+        }
+
+        DWORD pkgExitCode = 0;
+        bool hasPkgExit = false;
+        const ElevatedRunResult run = ExecuteElevatedSelf(
+            cliArgs,
+            true,
+            tempLog.empty() ? nullptr : &tempLog,
+            log,
+            [&](const std::string& ctrlLine) {
+                if (ctrlLine.rfind("FILE_VERSION ", 0) == 0) {
+                    dlVer = ctrlLine.substr(13);
+                } else if (ctrlLine.rfind("PKG_EXIT ", 0) == 0) {
+                    try {
+                        pkgExitCode = static_cast<DWORD>(std::stoul(ctrlLine.substr(9)));
+                        hasPkgExit = true;
+                    } catch (...) {
+                    }
+                }
+            },
             &cancelInstallRequested_,
-            &stopRequested_,
-            &processStillRunning);
-        targetLock.Reset();
+            cancelMarker.empty() ? nullptr : &cancelMarker);
+
+        std::error_code rmEc;
+        if (!tempLog.empty()) {
+            std::filesystem::remove(tempLog, rmEc);
+        }
+        if (!cancelMarker.empty()) {
+            std::filesystem::remove(cancelMarker, rmEc);
+        }
+
+        if (!run.launched) {
+            launched = false;
+            launchErr = run.launchError;
+        } else if (hasPkgExit) {
+            launched = true;
+            exitCode = pkgExitCode;
+        } else if (run.cancelled || run.exitCode == 3) {
+            launched = false;
+            launchErr = ERROR_CANCELLED;
+        } else {
+            launched = false;
+            errorAlreadyLogged = !tempLog.empty();
+        }
     }
 
     if (processStillRunning) {
@@ -2093,7 +2004,7 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
                     args += L" --log " + QuoteWin32Arg(tempLog.wstring());
                 }
                 const ElevatedRunResult run = ExecuteElevatedSelf(
-                    args, true, tempLog.empty() ? nullptr : &tempLog, log, nullptr, &stopRequested_);
+                    args, true, tempLog.empty() ? nullptr : &tempLog, log, nullptr, &cancelInstallRequested_);
                 std::error_code ec;
                 if (!tempLog.empty()) {
                     std::filesystem::remove(tempLog, ec);

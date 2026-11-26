@@ -3,12 +3,33 @@
 #include "common/AppCommon.hpp"
 
 #include <atomic>
+#include <cstdint>
 #include <filesystem>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace hdm {
+
+inline constexpr uint64_t kMaxCabPackageBytes = 512ULL * 1024ULL * 1024ULL;
+inline constexpr uint64_t kMaxInstallerPackageBytes = 2ULL * 1024ULL * 1024ULL * 1024ULL;
+
+/// Resolves and verifies LocalAppData\Temp without reparse points (fail-closed, no %TEMP% fallback).
+[[nodiscard]] std::wstring ResolveTrustedLocalTempDirFromBase(
+    const std::filesystem::path& localAppDataBase);
+[[nodiscard]] std::wstring ResolveTrustedLocalTempDir();
+
+/// Validates an elevated worker temp file path against a canonical non-reparse temp directory.
+[[nodiscard]] bool ValidateWorkerTempPathWithBase(
+    const std::wstring& rawPath,
+    const std::wstring& requiredSuffix,
+    const std::wstring& canonicalTempDir,
+    std::wstring& outFileName);
+[[nodiscard]] bool ValidateWorkerTempPath(
+    const std::wstring& rawPath,
+    const std::wstring& requiredSuffix,
+    std::wstring& outCanonicalTempDir,
+    std::wstring& outFileName);
 
 /// RAII wrapper that deletes an isolated temporary working directory upon destruction.
 class TempWorkDirGuard {
@@ -86,6 +107,61 @@ bool VerifyExtractedDirectoryBinaries(
     const std::vector<std::string_view>& allowedPublishers,
     std::string* outReason,
     std::vector<HandleGuard>* outLocks = nullptr);
+
+/// Reads PE FixedFileInfo version string (UTF-8), or empty string if unavailable.
+[[nodiscard]] std::string GetFileVersionUtf8(const std::filesystem::path& filePath);
+
+/// Validates lowercase/uppercase 64-char SHA-256 hex digest format.
+[[nodiscard]] bool IsValidSha256Hex(std::string_view hex);
+
+/// Parses pipe-separated publisher tokens ("Pub1|Pub2") with strict character/length validation.
+[[nodiscard]] bool ParsePipeSeparatedPublishers(
+    std::string_view raw,
+    std::vector<std::string>& outPublishers);
+
+/// Copies a regular non-reparse source file into a newly created destination file up to maxBytes.
+bool CopyFileBoundedNoReparse(
+    const std::filesystem::path& srcPath,
+    const std::filesystem::path& dstPath,
+    uint64_t maxBytes,
+    std::string* outError = nullptr);
+
+struct StagedPackageOptions {
+    std::filesystem::path sourcePackagePath;
+    std::string expectedSha256;
+    std::vector<std::string> allowedPublishers;
+    std::string installerArgs;
+    std::string nestedInstallerHint;
+    bool isDirectXLegacy{false};
+    uint64_t maxPackageBytes{kMaxInstallerPackageBytes};
+};
+
+struct StagedPackageResult {
+    bool launched{false};
+    bool cancelled{false};
+    bool processStillRunning{false};
+    DWORD exitCode{1};
+    DWORD launchError{0};
+    std::string fileVersion;
+    std::string errorMessage;
+};
+
+/// Stages, hashes, extracts (if ZIP), and Authenticode-locks a package inside an isolated directory.
+bool StageAndVerifyPackageIntoDir(
+    const std::filesystem::path& workDir,
+    const StagedPackageOptions& opts,
+    std::filesystem::path& outTargetExe,
+    std::vector<HandleGuard>& outLocks,
+    std::string& outFileVersion,
+    std::string& outError,
+    const std::atomic<bool>* cancelFlag = nullptr);
+
+/// Stages, verifies, and executes an installer package inside an Admin-only %SystemRoot%\Temp directory.
+StagedPackageResult RunStagedPackageInAdminDir(
+    const StagedPackageOptions& opts,
+    const LogCallback& log,
+    const std::atomic<bool>* cancelFlag = nullptr,
+    const std::atomic<bool>* stopFlag = nullptr);
 
 /// Launches a verified installer via ShellExecuteExW and waits with cancellation support.
 bool LaunchAndWaitProcess(

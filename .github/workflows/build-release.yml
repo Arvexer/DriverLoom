@@ -94,11 +94,33 @@ jobs:
             }
           }
 
+          $dbgRva = [BitConverter]::ToUInt32($bytes, $ddBase + 6 * 8)
+          $dbgSize = [BitConverter]::ToUInt32($bytes, $ddBase + 6 * 8 + 4)
+          $exDllChar = 0
+          $cetCompat = $false
+          $dbgOff = & $rvaToOffset $dbgRva
+          if ($dbgOff -gt 0 -and $dbgSize -ge 28) {
+            $off = $dbgOff
+            $dbgEnd = [Math]::Min($bytes.Length, $dbgOff + [int]$dbgSize)
+            while ($off + 28 -le $dbgEnd) {
+              $dbgType = [BitConverter]::ToUInt32($bytes, $off + 12)
+              $dataSize = [BitConverter]::ToUInt32($bytes, $off + 16)
+              $ptrRaw = [BitConverter]::ToUInt32($bytes, $off + 24)
+              if ($dbgType -eq 20 -and $dataSize -ge 4 -and $ptrRaw -gt 0 -and ($ptrRaw + 4) -le $bytes.Length) {
+                $exDllChar = [BitConverter]::ToUInt32($bytes, $ptrRaw)
+                $cetCompat = (($exDllChar -band 0x0001) -ne 0)
+                break
+              }
+              $off += 28
+            }
+          }
+
           $hash = (Get-FileHash $exe -Algorithm SHA256).Hash
           $size = (Get-Item $exe).Length
           Write-Host "Size: $size bytes"
           Write-Host "SHA256: $hash"
           Write-Host "DllCharacteristics: 0x$($dllChar.ToString('X4')) (HIGH_ENTROPY_VA=$highEntropy, DYNAMIC_BASE=$dynBase, NX_COMPAT=$nxCompat, GUARD_CF=$guardCf)"
+          Write-Host "ExDllCharacteristics: 0x$($exDllChar.ToString('X4')) (CET_COMPAT=$cetCompat)"
           Write-Host "DependentLoadFlags: 0x$($depLoadFlags.ToString('X4'))"
           Write-Host "Imports: $($imports -join ', ')"
 
@@ -106,6 +128,7 @@ jobs:
           if (-not $dynBase) { throw "ASLR (DYNAMIC_BASE) is not enabled!" }
           if (-not $nxCompat) { throw "DEP (NX_COMPAT) is not enabled!" }
           if (-not $highEntropy) { throw "64-bit High Entropy ASLR (HIGH_ENTROPY_VA) is not enabled!" }
+          if (-not $cetCompat) { throw "CET Shadow Stack (/CETCOMPAT) is not enabled!" }
           if (($depLoadFlags -band 0x800) -eq 0) { throw "DependentLoadFlags missing LOAD_LIBRARY_SEARCH_SYSTEM32 (0x800)!" }
           if ($imports.Count -eq 0) { throw "Import table is empty or failed to parse!" }
           foreach ($imp in $imports) {

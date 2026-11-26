@@ -8,10 +8,8 @@
 #include "core/SystemRestore.hpp"
 #include "core/WindowsUpdateManager.hpp"
 
-#include <knownfolders.h>
 #include <setupapi.h>
 #include <shellapi.h>
-#include <shlobj.h>
 
 #include <algorithm>
 #include <atomic>
@@ -38,13 +36,6 @@ bool EqualsIgnoreCaseWide(const std::wstring& a, const std::wstring& b) {
     return true;
 }
 
-std::wstring StripTrailingSeparators(std::wstring s) {
-    while (s.size() > 3 && (s.back() == L'\\' || s.back() == L'/')) {
-        s.pop_back();
-    }
-    return s;
-}
-
 std::wstring GetFinalPathString(HANDLE handle) {
     if (handle == nullptr || handle == INVALID_HANDLE_VALUE) {
         return {};
@@ -63,127 +54,10 @@ std::wstring GetFinalPathString(HANDLE handle) {
     return out;
 }
 
-std::wstring ResolveCanonicalTempDir() {
-    auto openVerifiedTempDir = [](const std::filesystem::path& dirPath) -> std::wstring {
-        hdm::HandleGuard dirHandle(CreateFileW(
-            dirPath.c_str(),
-            FILE_READ_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            nullptr));
-        BY_HANDLE_FILE_INFORMATION fi{};
-        if (!dirHandle.IsValid() || !GetFileInformationByHandle(dirHandle.Get(), &fi) ||
-            (fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
-            (fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-            return {};
-        }
-        return StripTrailingSeparators(GetFinalPathString(dirHandle.Get()));
-    };
-
-    hdm::CoTaskMemGuard<wchar_t> localAppRaw;
-    if (SUCCEEDED(SHGetKnownFolderPath(
-            FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, localAppRaw.Put())) &&
-        localAppRaw.Get() != nullptr) {
-        const std::wstring localAppCanon = openVerifiedTempDir(std::filesystem::path(localAppRaw.Get()));
-        if (!localAppCanon.empty()) {
-            const std::wstring knownTempCanon =
-                openVerifiedTempDir(std::filesystem::path(localAppCanon) / L"Temp");
-            if (!knownTempCanon.empty()) {
-                return knownTempCanon;
-            }
-        }
-    }
-
-    const DWORD needed = GetTempPathW(0, nullptr);
-    if (needed == 0) {
-        return {};
-    }
-    std::wstring tempBuf(static_cast<size_t>(needed) + 1, L'\0');
-    const DWORD len = GetTempPathW(needed + 1, tempBuf.data());
-    if (len == 0 || len > needed) {
-        return {};
-    }
-    tempBuf.resize(len);
-    return openVerifiedTempDir(std::filesystem::path(tempBuf));
-}
-
-bool ValidateWorkerTempPath(
-    const std::wstring& rawPath,
-    const std::wstring& requiredSuffix,
-    std::wstring& outCanonicalTempDir,
-    std::wstring& outFileName) {
-    outCanonicalTempDir.clear();
-    outFileName.clear();
-    if (rawPath.empty() || rawPath.rfind(L"\\\\", 0) == 0 || rawPath.rfind(L"//", 0) == 0) {
-        return false;
-    }
-
-    const std::filesystem::path candidate(rawPath);
-    if (!candidate.is_absolute()) {
-        return false;
-    }
-    for (const auto& part : candidate) {
-        if (part == L"..") {
-            return false;
-        }
-    }
-
-    const std::wstring fileName = candidate.filename().wstring();
-    const std::wstring kRequiredPrefix = L"DriverLoom_";
-    if (fileName.size() <= kRequiredPrefix.size() + requiredSuffix.size() ||
-        fileName.rfind(kRequiredPrefix, 0) != 0 ||
-        fileName.compare(
-            fileName.size() - requiredSuffix.size(), requiredSuffix.size(), requiredSuffix) != 0) {
-        return false;
-    }
-    for (wchar_t ch : fileName) {
-        const bool ok = (ch >= L'0' && ch <= L'9') || (ch >= L'A' && ch <= L'Z') ||
-                        (ch >= L'a' && ch <= L'z') || ch == L'_' || ch == L'-' || ch == L'.';
-        if (!ok) {
-            return false;
-        }
-    }
-
-    const std::wstring canonicalTemp = ResolveCanonicalTempDir();
-    if (canonicalTemp.empty()) {
-        return false;
-    }
-    const std::filesystem::path parentPath = candidate.parent_path();
-    if (parentPath.empty()) {
-        return false;
-    }
-    hdm::HandleGuard parentHandle(CreateFileW(
-        parentPath.c_str(),
-        FILE_READ_ATTRIBUTES,
-        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr,
-        OPEN_EXISTING,
-        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-        nullptr));
-    if (!parentHandle.IsValid()) {
-        return false;
-    }
-    BY_HANDLE_FILE_INFORMATION parentInfo{};
-    if (!GetFileInformationByHandle(parentHandle.Get(), &parentInfo) ||
-        (parentInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
-        return false;
-    }
-    const std::wstring parentCanon = StripTrailingSeparators(GetFinalPathString(parentHandle.Get()));
-    if (!EqualsIgnoreCaseWide(parentCanon, canonicalTemp)) {
-        return false;
-    }
-
-    outCanonicalTempDir = canonicalTemp;
-    outFileName = fileName;
-    return true;
-}
-
 hdm::HandleGuard OpenValidatedTempLogFile(const std::wstring& rawPath) {
     std::wstring canonicalTemp;
     std::wstring fileName;
-    if (!ValidateWorkerTempPath(rawPath, L".log", canonicalTemp, fileName)) {
+    if (!hdm::ValidateWorkerTempPath(rawPath, L".log", canonicalTemp, fileName)) {
         return hdm::HandleGuard{};
     }
 
@@ -246,6 +120,7 @@ int RunCliModeIfRequested() {
         RestorePoint,
         InstallInf,
         InstallCab,
+        InstallPackage,
         RemoveOemInfs,
         WuInstall,
         WuHide,
@@ -268,6 +143,11 @@ int RunCliModeIfRequested() {
     };
     std::wstring targetArg;
     std::wstring instanceArg;
+    std::wstring publishersArg;
+    std::wstring sha256Arg;
+    std::wstring installerArgsArg;
+    std::wstring nestedHintArg;
+    std::wstring pkgKindArg;
     std::wstring logPath;
     std::wstring cancelFilePath;
     bool forceInf = false;
@@ -285,6 +165,9 @@ int RunCliModeIfRequested() {
             targetArg = argv[++i];
         } else if (arg == L"--cli-install-cab" && i + 1 < argc) {
             setMode(Mode::InstallCab);
+            targetArg = argv[++i];
+        } else if (arg == L"--cli-install-package" && i + 1 < argc) {
+            setMode(Mode::InstallPackage);
             targetArg = argv[++i];
         } else if (arg == L"--cli-remove-oem-infs" && i + 1 < argc) {
             setMode(Mode::RemoveOemInfs);
@@ -309,6 +192,16 @@ int RunCliModeIfRequested() {
             targetArg = argv[++i];
         } else if (arg == L"--instance" && i + 1 < argc) {
             instanceArg = argv[++i];
+        } else if (arg == L"--publishers" && i + 1 < argc) {
+            publishersArg = argv[++i];
+        } else if (arg == L"--sha256" && i + 1 < argc) {
+            sha256Arg = argv[++i];
+        } else if (arg == L"--installer-args" && i + 1 < argc) {
+            installerArgsArg = argv[++i];
+        } else if (arg == L"--nested-hint" && i + 1 < argc) {
+            nestedHintArg = argv[++i];
+        } else if (arg == L"--pkg-kind" && i + 1 < argc) {
+            pkgKindArg = argv[++i];
         } else if (arg == L"--cli-reset-wucache") {
             setMode(Mode::ResetWuCache);
         } else if (arg == L"--cli-sfc") {
@@ -388,7 +281,41 @@ int RunCliModeIfRequested() {
         return summary.rebootRequired ? 2 : 0;
     }
 
+    struct CancelFileWatcherGuard {
+        std::atomic<bool> cancel{false};
+        std::atomic<bool> stop{false};
+        std::thread watcher;
+
+        explicit CancelFileWatcherGuard(const std::wstring& path) {
+            std::wstring canonicalTemp;
+            std::wstring fileName;
+            if (hdm::ValidateWorkerTempPath(path, L".log.cancel", canonicalTemp, fileName)) {
+                watcher = std::thread([path, this]() {
+                    while (!stop.load()) {
+                        const DWORD attrs = GetFileAttributesW(path.c_str());
+                        if (attrs != INVALID_FILE_ATTRIBUTES &&
+                            (attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0) {
+                            cancel.store(true);
+                            break;
+                        }
+                        Sleep(200);
+                    }
+                });
+            }
+        }
+        ~CancelFileWatcherGuard() {
+            stop.store(true);
+            if (watcher.joinable()) {
+                watcher.join();
+            }
+        }
+    };
+
     if (mode == Mode::InstallCab) {
+        CancelFileWatcherGuard cancelGuard(cancelFilePath);
+        if (cancelGuard.cancel.load()) {
+            return 3;
+        }
         std::filesystem::path adminRoot;
         std::string dirErr;
         if (!hdm::CreateAdminOnlyTempWorkDir(adminRoot, &dirErr)) {
@@ -399,63 +326,11 @@ int RunCliModeIfRequested() {
         hdm::TempWorkDirGuard adminDir;
         adminDir.Set(adminRoot);
 
-        hdm::HandleGuard srcHandle(CreateFileW(
-            targetArg.c_str(),
-            GENERIC_READ,
-            FILE_SHARE_READ,
-            nullptr,
-            OPEN_EXISTING,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
-            nullptr));
-        BY_HANDLE_FILE_INFORMATION srcInfo{};
-        if (!srcHandle.IsValid() || !GetFileInformationByHandle(srcHandle.Get(), &srcInfo) ||
-            (srcInfo.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
-            fileLogger(hdm::LogLevel::Error, "Недоступен или небезопасен исходный CAB-файл.");
-            return 1;
-        }
-
         const std::filesystem::path stagedCab = adminDir.Path() / L"driver.cab";
-        hdm::HandleGuard dstHandle(CreateFileW(
-            stagedCab.c_str(),
-            GENERIC_WRITE,
-            0,
-            nullptr,
-            CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_SEQUENTIAL_SCAN,
-            nullptr));
-        if (!dstHandle.IsValid()) {
-            fileLogger(hdm::LogLevel::Error, "Не удалось скопировать CAB-пакет в защищённый каталог.");
-            return 1;
-        }
-        std::vector<char> copyBuf(65536);
-        bool copyOk = true;
-        for (;;) {
-            DWORD readBytes = 0;
-            if (!ReadFile(srcHandle.Get(), copyBuf.data(), static_cast<DWORD>(copyBuf.size()), &readBytes, nullptr)) {
-                copyOk = false;
-                break;
-            }
-            if (readBytes == 0) {
-                break;
-            }
-            DWORD offset = 0;
-            while (offset < readBytes) {
-                DWORD written = 0;
-                if (!WriteFile(dstHandle.Get(), copyBuf.data() + offset, readBytes - offset, &written, nullptr) ||
-                    written == 0) {
-                    copyOk = false;
-                    break;
-                }
-                offset += written;
-            }
-            if (!copyOk) {
-                break;
-            }
-        }
-        dstHandle.Reset();
-        srcHandle.Reset();
-        if (!copyOk) {
-            fileLogger(hdm::LogLevel::Error, "Ошибка копирования CAB-пакета в защищённый каталог.");
+        std::string copyErr;
+        if (!hdm::CopyFileBoundedNoReparse(targetArg, stagedCab, hdm::kMaxCabPackageBytes, &copyErr)) {
+            fileLogger(hdm::LogLevel::Error,
+                       copyErr.empty() ? "Ошибка копирования CAB-пакета в защищённый каталог." : copyErr);
             return 1;
         }
 
@@ -466,6 +341,9 @@ int RunCliModeIfRequested() {
             fileLogger(hdm::LogLevel::Error,
                        "Цифровая подпись CAB-пакета не прошла проверку (" + sigErr + ").");
             return 1;
+        }
+        if (cancelGuard.cancel.load()) {
+            return 3;
         }
 
         const std::filesystem::path cabExtractDir = adminDir.Path() / L"cab_extract";
@@ -482,6 +360,9 @@ int RunCliModeIfRequested() {
             return 1;
         }
         cabLock.Reset();
+        if (cancelGuard.cancel.load()) {
+            return 3;
+        }
 
         const hdm::LocalInstallSummary summary =
             hdm::LocalDriverInstaller::InstallFromFolderSync(
@@ -490,6 +371,50 @@ int RunCliModeIfRequested() {
             return 1;
         }
         return summary.rebootRequired ? 2 : 0;
+    }
+
+    if (mode == Mode::InstallPackage) {
+        std::vector<std::string> publishers;
+        if (!hdm::ParsePipeSeparatedPublishers(hdm::WideToUtf8(publishersArg), publishers)) {
+            fileLogger(hdm::LogLevel::Error, "Не задан или повреждён список доверенных издателей.");
+            return 1;
+        }
+        if (!pkgKindArg.empty() && pkgKindArg != L"auto" && pkgKindArg != L"directx") {
+            fileLogger(hdm::LogLevel::Error, "Недопустимый тип пакета установки.");
+            return 1;
+        }
+
+        hdm::StagedPackageOptions opts;
+        opts.sourcePackagePath = std::filesystem::path(targetArg);
+        opts.expectedSha256 = hdm::WideToUtf8(sha256Arg);
+        opts.allowedPublishers = std::move(publishers);
+        opts.installerArgs = hdm::WideToUtf8(installerArgsArg);
+        opts.nestedInstallerHint = hdm::WideToUtf8(nestedHintArg);
+        opts.isDirectXLegacy = (pkgKindArg == L"directx");
+        opts.maxPackageBytes = hdm::kMaxInstallerPackageBytes;
+
+        CancelFileWatcherGuard cancelGuard(cancelFilePath);
+        const hdm::StagedPackageResult res =
+            hdm::RunStagedPackageInAdminDir(opts, fileLogger, &cancelGuard.cancel, nullptr);
+        if (!res.fileVersion.empty()) {
+            writeRawLine("[META] FILE_VERSION " + res.fileVersion);
+        }
+        if (res.launched) {
+            writeRawLine("[META] PKG_EXIT " + std::to_string(res.exitCode));
+        }
+        if (res.cancelled || cancelGuard.cancel.load()) {
+            return 3;
+        }
+        if (!res.launched) {
+            return 1;
+        }
+        if (res.exitCode == 0) {
+            return 0;
+        }
+        if (res.exitCode == 3010 || res.exitCode == 1641) {
+            return 2;
+        }
+        return 1;
     }
 
     if (mode == Mode::RemoveOemInfs) {
@@ -552,36 +477,6 @@ int RunCliModeIfRequested() {
         }
         return rebootReq ? 2 : 0;
     }
-
-    struct CancelFileWatcherGuard {
-        std::atomic<bool> cancel{false};
-        std::atomic<bool> stop{false};
-        std::thread watcher;
-
-        explicit CancelFileWatcherGuard(const std::wstring& path) {
-            std::wstring canonicalTemp;
-            std::wstring fileName;
-            if (ValidateWorkerTempPath(path, L".log.cancel", canonicalTemp, fileName)) {
-                watcher = std::thread([path, this]() {
-                    while (!stop.load()) {
-                        const DWORD attrs = GetFileAttributesW(path.c_str());
-                        if (attrs != INVALID_FILE_ATTRIBUTES &&
-                            (attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0) {
-                            cancel.store(true);
-                            break;
-                        }
-                        Sleep(200);
-                    }
-                });
-            }
-        }
-        ~CancelFileWatcherGuard() {
-            stop.store(true);
-            if (watcher.joinable()) {
-                watcher.join();
-            }
-        }
-    };
 
     if (mode == Mode::SfcScan || mode == Mode::DismCheck || mode == Mode::DismRestore) {
         CancelFileWatcherGuard cancelGuard(cancelFilePath);

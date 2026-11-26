@@ -2,17 +2,21 @@
 #include "core/OnlineCatalogClient.hpp"
 
 #include <bcrypt.h>
+#include <knownfolders.h>
 #include <objbase.h>
 #include <oleauto.h>
 #include <sddl.h>
 #include <setupapi.h>
+#include <shlobj.h>
 #include <shldisp.h>
 #include <softpub.h>
 #include <wincrypt.h>
 #include <wintrust.h>
+#include <winver.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cwchar>
 #include <fstream>
 #include <sstream>
@@ -21,6 +25,235 @@
 #include <vector>
 
 namespace hdm {
+
+namespace {
+
+bool EqualsIgnoreCaseWide(std::wstring_view a, std::wstring_view b) {
+    if (a.size() != b.size()) {
+        return false;
+    }
+    if (a.empty()) {
+        return true;
+    }
+    return CompareStringOrdinal(
+               a.data(),
+               static_cast<int>(a.size()),
+               b.data(),
+               static_cast<int>(b.size()),
+               TRUE) == CSTR_EQUAL;
+}
+
+std::wstring StripTrailingSeparators(std::wstring s) {
+    while (s.size() > 3 && (s.back() == L'\\' || s.back() == L'/')) {
+        s.pop_back();
+    }
+    return s;
+}
+
+std::wstring GetFinalPathString(HANDLE handle) {
+    if (handle == nullptr || handle == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+    const DWORD needed = GetFinalPathNameByHandleW(handle, nullptr, 0, FILE_NAME_NORMALIZED);
+    if (needed == 0) {
+        return {};
+    }
+    std::wstring out(static_cast<size_t>(needed) + 1, L'\0');
+    const DWORD written =
+        GetFinalPathNameByHandleW(handle, out.data(), needed + 1, FILE_NAME_NORMALIZED);
+    if (written == 0 || written >= out.size()) {
+        return {};
+    }
+    out.resize(written);
+    return out;
+}
+
+std::wstring OpenVerifiedDirCanonical(const std::filesystem::path& dirPath) {
+    if (dirPath.empty()) {
+        return {};
+    }
+    HandleGuard dirHandle(CreateFileW(
+        dirPath.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr));
+    BY_HANDLE_FILE_INFORMATION fi{};
+    if (!dirHandle.IsValid() || !GetFileInformationByHandle(dirHandle.Get(), &fi) ||
+        (fi.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+        (fi.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return {};
+    }
+    return StripTrailingSeparators(GetFinalPathString(dirHandle.Get()));
+}
+
+} // namespace
+
+std::wstring ResolveTrustedLocalTempDirFromBase(const std::filesystem::path& localAppDataBase) {
+    const std::wstring localAppCanon = OpenVerifiedDirCanonical(localAppDataBase);
+    if (localAppCanon.empty()) {
+        return {};
+    }
+    return OpenVerifiedDirCanonical(std::filesystem::path(localAppCanon) / L"Temp");
+}
+
+std::wstring ResolveTrustedLocalTempDir() {
+    CoTaskMemGuard<wchar_t> localAppRaw;
+    if (FAILED(SHGetKnownFolderPath(
+            FOLDERID_LocalAppData, KF_FLAG_DEFAULT, nullptr, localAppRaw.Put())) ||
+        localAppRaw.Get() == nullptr) {
+        return {};
+    }
+    return ResolveTrustedLocalTempDirFromBase(std::filesystem::path(localAppRaw.Get()));
+}
+
+bool ValidateWorkerTempPathWithBase(
+    const std::wstring& rawPath,
+    const std::wstring& requiredSuffix,
+    const std::wstring& canonicalTempDir,
+    std::wstring& outFileName) {
+    outFileName.clear();
+    if (rawPath.empty() || canonicalTempDir.empty() ||
+        rawPath.rfind(L"\\\\", 0) == 0 || rawPath.rfind(L"//", 0) == 0) {
+        return false;
+    }
+
+    const std::filesystem::path candidate(rawPath);
+    if (!candidate.is_absolute()) {
+        return false;
+    }
+    for (const auto& part : candidate) {
+        if (part == L"..") {
+            return false;
+        }
+    }
+
+    const std::wstring fileName = candidate.filename().wstring();
+    const std::wstring kRequiredPrefix = L"DriverLoom_";
+    if (fileName.size() <= kRequiredPrefix.size() + requiredSuffix.size() ||
+        fileName.rfind(kRequiredPrefix, 0) != 0 ||
+        fileName.compare(
+            fileName.size() - requiredSuffix.size(), requiredSuffix.size(), requiredSuffix) != 0) {
+        return false;
+    }
+    for (wchar_t ch : fileName) {
+        const bool ok = (ch >= L'0' && ch <= L'9') || (ch >= L'A' && ch <= L'Z') ||
+                        (ch >= L'a' && ch <= L'z') || ch == L'_' || ch == L'-' || ch == L'.';
+        if (!ok) {
+            return false;
+        }
+    }
+
+    const std::filesystem::path parentPath = candidate.parent_path();
+    if (parentPath.empty()) {
+        return false;
+    }
+    HandleGuard parentHandle(CreateFileW(
+        parentPath.c_str(),
+        FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr));
+    if (!parentHandle.IsValid()) {
+        return false;
+    }
+    BY_HANDLE_FILE_INFORMATION parentInfo{};
+    if (!GetFileInformationByHandle(parentHandle.Get(), &parentInfo) ||
+        (parentInfo.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+        (parentInfo.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        return false;
+    }
+    const std::wstring parentCanon = StripTrailingSeparators(GetFinalPathString(parentHandle.Get()));
+    const std::wstring expectedBase = StripTrailingSeparators(canonicalTempDir);
+    if (parentCanon.empty() || !EqualsIgnoreCaseWide(parentCanon, expectedBase)) {
+        return false;
+    }
+
+    outFileName = fileName;
+    return true;
+}
+
+bool ValidateWorkerTempPath(
+    const std::wstring& rawPath,
+    const std::wstring& requiredSuffix,
+    std::wstring& outCanonicalTempDir,
+    std::wstring& outFileName) {
+    outCanonicalTempDir = ResolveTrustedLocalTempDir();
+    if (outCanonicalTempDir.empty()) {
+        outFileName.clear();
+        return false;
+    }
+    return ValidateWorkerTempPathWithBase(
+        rawPath, requiredSuffix, outCanonicalTempDir, outFileName);
+}
+
+std::filesystem::path CreateTempLogPath(const wchar_t* prefix) {
+    const std::wstring canonicalTemp = ResolveTrustedLocalTempDir();
+    if (canonicalTemp.empty()) {
+        return {};
+    }
+    std::wstring rootStr = canonicalTemp;
+    if (rootStr.rfind(L"\\\\?\\", 0) == 0 && rootStr.size() >= 6 && rootStr[5] == L':') {
+        rootStr.erase(0, 4);
+    }
+    const std::filesystem::path tempRoot(rootStr);
+
+    std::wstring cleanPrefix = (prefix != nullptr && prefix[0] != L'\0') ? prefix : L"log";
+    for (wchar_t& ch : cleanPrefix) {
+        const bool ok = (ch >= L'0' && ch <= L'9') ||
+                        (ch >= L'A' && ch <= L'Z') ||
+                        (ch >= L'a' && ch <= L'z') ||
+                        ch == L'_' || ch == L'-';
+        if (!ok) {
+            ch = L'_';
+        }
+    }
+
+    for (int attempt = 0; attempt < 8; ++attempt) {
+        GUID guid{};
+        if (FAILED(CoCreateGuid(&guid))) {
+            continue;
+        }
+        wchar_t suffix[48]{};
+        std::swprintf(
+            suffix,
+            std::size(suffix),
+            L"_%08lx%04x%04x%02x%02x%02x%02x%02x%02x%02x%02x.log",
+            static_cast<unsigned long>(guid.Data1),
+            guid.Data2,
+            guid.Data3,
+            guid.Data4[0], guid.Data4[1], guid.Data4[2], guid.Data4[3],
+            guid.Data4[4], guid.Data4[5], guid.Data4[6], guid.Data4[7]);
+        const std::filesystem::path candidate = tempRoot / (L"DriverLoom_" + cleanPrefix + suffix);
+        HandleGuard file(CreateFileW(
+            candidate.c_str(),
+            GENERIC_WRITE | FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ,
+            nullptr,
+            CREATE_NEW,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+            nullptr));
+        if (file.IsValid()) {
+            BY_HANDLE_FILE_INFORMATION fi{};
+            const bool safeFile =
+                GetFileInformationByHandle(file.Get(), &fi) &&
+                (fi.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0 &&
+                fi.nNumberOfLinks == 1;
+            file.Reset();
+            if (safeFile) {
+                return candidate;
+            }
+            std::error_code rmEc;
+            std::filesystem::remove(candidate, rmEc);
+            return {};
+        }
+    }
+    return {};
+}
 
 void TempWorkDirGuard::Set(std::filesystem::path dir) {
     Reset();
@@ -1080,6 +1313,518 @@ bool LaunchAndWaitProcess(
         if (outExitCode) *outExitCode = code;
     }
     return true;
+}
+
+std::string GetFileVersionUtf8(const std::filesystem::path& filePath) {
+    std::error_code ec;
+    if (!std::filesystem::exists(filePath, ec)) {
+        return {};
+    }
+    DWORD dummy = 0;
+    const std::wstring wPath = filePath.wstring();
+    const DWORD size = GetFileVersionInfoSizeW(wPath.c_str(), &dummy);
+    if (size == 0) {
+        return {};
+    }
+    std::vector<BYTE> data(size);
+    if (!GetFileVersionInfoW(wPath.c_str(), 0, size, data.data())) {
+        return {};
+    }
+    VS_FIXEDFILEINFO* ffi = nullptr;
+    UINT ffiLen = 0;
+    if (!VerQueryValueW(data.data(), L"\\", reinterpret_cast<LPVOID*>(&ffi), &ffiLen) ||
+        ffi == nullptr) {
+        return {};
+    }
+    char buf[64];
+    std::snprintf(
+        buf,
+        sizeof(buf),
+        "%u.%u.%u.%u",
+        HIWORD(ffi->dwFileVersionMS),
+        LOWORD(ffi->dwFileVersionMS),
+        HIWORD(ffi->dwFileVersionLS),
+        LOWORD(ffi->dwFileVersionLS));
+    return buf;
+}
+
+bool IsValidSha256Hex(std::string_view hex) {
+    if (hex.size() != 64) {
+        return false;
+    }
+    for (unsigned char ch : hex) {
+        if (std::isxdigit(ch) == 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool ParsePipeSeparatedPublishers(
+    std::string_view raw,
+    std::vector<std::string>& outPublishers) {
+    outPublishers.clear();
+    if (raw.empty()) {
+        return false;
+    }
+    size_t start = 0;
+    while (start <= raw.size()) {
+        const size_t sep = raw.find('|', start);
+        const std::string_view part =
+            (sep == std::string_view::npos) ? raw.substr(start) : raw.substr(start, sep - start);
+        const std::string token = TrimCopy(part);
+        if (token.size() < 2 || token.size() > 128) {
+            outPublishers.clear();
+            return false;
+        }
+        for (unsigned char ch : token) {
+            if (ch < 0x20 || ch >= 0x7F) {
+                outPublishers.clear();
+                return false;
+            }
+        }
+        outPublishers.push_back(token);
+        if (sep == std::string_view::npos) {
+            break;
+        }
+        start = sep + 1;
+    }
+    return !outPublishers.empty();
+}
+
+bool CopyFileBoundedNoReparse(
+    const std::filesystem::path& srcPath,
+    const std::filesystem::path& dstPath,
+    uint64_t maxBytes,
+    std::string* outError) {
+    if (maxBytes == 0 || srcPath.empty() || dstPath.empty()) {
+        if (outError) *outError = "Некорректные параметры копирования пакета.";
+        return false;
+    }
+
+    HandleGuard srcHandle(CreateFileW(
+        srcPath.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
+        nullptr));
+    if (!srcHandle.IsValid()) {
+        if (outError) *outError = "Не удалось открыть исходный пакет: " + FormatWin32Error(GetLastError());
+        return false;
+    }
+
+    BY_HANDLE_FILE_INFORMATION srcInfo{};
+    if (!GetFileInformationByHandle(srcHandle.Get(), &srcInfo) ||
+        (srcInfo.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0) {
+        if (outError) *outError = "Исходный файл пакета является каталогом или точкой повторного анализа.";
+        return false;
+    }
+
+    LARGE_INTEGER srcSize{};
+    if (!GetFileSizeEx(srcHandle.Get(), &srcSize) || srcSize.QuadPart <= 0 ||
+        static_cast<uint64_t>(srcSize.QuadPart) > maxBytes) {
+        if (outError) *outError = "Размер пакета недопустим или превышает допустимый лимит.";
+        return false;
+    }
+
+    HandleGuard dstHandle(CreateFileW(
+        dstPath.c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN,
+        nullptr));
+    if (!dstHandle.IsValid()) {
+        if (outError) *outError = "Не удалось создать файл пакета в защищённом каталоге: " + FormatWin32Error(GetLastError());
+        return false;
+    }
+
+    std::vector<char> copyBuf(65536);
+    uint64_t totalCopied = 0;
+    bool copyOk = true;
+    std::string errMsg;
+    for (;;) {
+        DWORD readBytes = 0;
+        if (!ReadFile(srcHandle.Get(), copyBuf.data(), static_cast<DWORD>(copyBuf.size()), &readBytes, nullptr)) {
+            copyOk = false;
+            errMsg = "Ошибка чтения исходного пакета: " + FormatWin32Error(GetLastError());
+            break;
+        }
+        if (readBytes == 0) {
+            break;
+        }
+        if (static_cast<uint64_t>(readBytes) > maxBytes - totalCopied) {
+            copyOk = false;
+            errMsg = "Размер пакета превысил допустимый лимит при копировании.";
+            break;
+        }
+        DWORD offset = 0;
+        while (offset < readBytes) {
+            DWORD written = 0;
+            if (!WriteFile(dstHandle.Get(), copyBuf.data() + offset, readBytes - offset, &written, nullptr) ||
+                written == 0) {
+                copyOk = false;
+                errMsg = "Ошибка записи пакета в защищённый каталог: " + FormatWin32Error(GetLastError());
+                break;
+            }
+            offset += written;
+        }
+        if (!copyOk) {
+            break;
+        }
+        totalCopied += readBytes;
+    }
+    if (copyOk && totalCopied == 0) {
+        copyOk = false;
+        errMsg = "Исходный файл пакета пуст.";
+    }
+    if (copyOk && !FlushFileBuffers(dstHandle.Get())) {
+        copyOk = false;
+        errMsg = "Ошибка завершения записи пакета: " + FormatWin32Error(GetLastError());
+    }
+    dstHandle.Reset();
+    srcHandle.Reset();
+
+    if (!copyOk) {
+        std::error_code rmEc;
+        std::filesystem::remove(dstPath, rmEc);
+        if (outError) *outError = errMsg;
+        return false;
+    }
+    return true;
+}
+
+bool StageAndVerifyPackageIntoDir(
+    const std::filesystem::path& workDir,
+    const StagedPackageOptions& opts,
+    std::filesystem::path& outTargetExe,
+    std::vector<HandleGuard>& outLocks,
+    std::string& outFileVersion,
+    std::string& outError,
+    const std::atomic<bool>* cancelFlag) {
+    outTargetExe.clear();
+    outLocks.clear();
+    outFileVersion.clear();
+    outError.clear();
+
+    if (cancelFlag != nullptr && cancelFlag->load()) {
+        outError = "Установка отменена.";
+        return false;
+    }
+    if (workDir.empty() || opts.sourcePackagePath.empty() || opts.allowedPublishers.empty()) {
+        outError = "Некорректные параметры или отсутствует список доверенных издателей.";
+        return false;
+    }
+    if (!opts.expectedSha256.empty() && !IsValidSha256Hex(opts.expectedSha256)) {
+        outError = "Некорректный формат SHA-256.";
+        return false;
+    }
+    if (!opts.installerArgs.empty() && SanitizeWingetSilentArgs(opts.installerArgs).empty()) {
+        outError = "Недопустимые аргументы запуска установщика.";
+        return false;
+    }
+
+    const std::string srcExt = ToLowerAscii(WideToUtf8(opts.sourcePackagePath.extension().wstring()));
+    const wchar_t* initialExt =
+        (srcExt == ".zip") ? L".zip" : ((srcExt == ".msi") ? L".msi" : L".exe");
+    std::filesystem::path stagedFile = workDir / (std::wstring(L"package") + initialExt);
+
+    if (!CopyFileBoundedNoReparse(
+            opts.sourcePackagePath, stagedFile, opts.maxPackageBytes, &outError)) {
+        return false;
+    }
+    if (cancelFlag != nullptr && cancelFlag->load()) {
+        outError = "Установка отменена.";
+        return false;
+    }
+
+    if (!opts.expectedSha256.empty()) {
+        std::string actualSha;
+        std::string shaErr;
+        if (!ComputeFileSha256Hex(stagedFile, actualSha, &shaErr)) {
+            outError = "Не удалось проверить SHA-256 пакета: " + shaErr;
+            return false;
+        }
+        if (ToLowerAscii(actualSha) != ToLowerAscii(opts.expectedSha256)) {
+            outError = "Контрольная сумма SHA-256 пакета не совпадает с ожидаемой.";
+            return false;
+        }
+    }
+
+    bool isZipPackage = (srcExt == ".zip");
+    if (!isZipPackage && HasZipMagicHeader(stagedFile)) {
+        std::filesystem::path zipRenamed = stagedFile;
+        zipRenamed.replace_extension(L".zip");
+        std::error_code rec;
+        std::filesystem::rename(stagedFile, zipRenamed, rec);
+        if (!rec) {
+            stagedFile = zipRenamed;
+            isZipPackage = true;
+        }
+    } else if (!isZipPackage && srcExt != ".msi" && HasMsiMagicHeader(stagedFile)) {
+        std::filesystem::path msiRenamed = stagedFile;
+        msiRenamed.replace_extension(L".msi");
+        std::error_code rec;
+        std::filesystem::rename(stagedFile, msiRenamed, rec);
+        if (!rec) {
+            stagedFile = msiRenamed;
+        }
+    }
+
+    std::vector<std::string_view> pubViews;
+    pubViews.reserve(opts.allowedPublishers.size());
+    for (const auto& p : opts.allowedPublishers) {
+        if (!p.empty()) {
+            pubViews.push_back(p);
+        }
+    }
+    if (pubViews.empty()) {
+        outError = "Отсутствует список доверенных издателей.";
+        return false;
+    }
+
+    if (isZipPackage) {
+        const std::filesystem::path extractDir = workDir / L"pkg_extract";
+        if (!ExtractZipViaShellCom(stagedFile, extractDir, cancelFlag)) {
+            outError = "Не удалось безопасно распаковать ZIP-архив.";
+            return false;
+        }
+
+        std::filesystem::path candidateExe;
+        if (!opts.nestedInstallerHint.empty()) {
+            candidateExe = ResolveContainedInstallerPath(extractDir, opts.nestedInstallerHint);
+        }
+        if (candidateExe.empty()) {
+            std::filesystem::path firstMsi;
+            std::filesystem::path setupExe;
+            std::filesystem::path firstExe;
+            std::error_code ec;
+            for (std::filesystem::recursive_directory_iterator it(
+                     extractDir,
+                     std::filesystem::directory_options::none,
+                     ec);
+                 !ec && it != std::filesystem::recursive_directory_iterator();
+                 it.increment(ec)) {
+                std::error_code entryEc;
+                if (!it->is_regular_file(entryEc)) {
+                    continue;
+                }
+                const DWORD attrs = GetFileAttributesW(it->path().c_str());
+                if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+                    continue;
+                }
+                const std::string ext = ToLowerAscii(WideToUtf8(it->path().extension().wstring()));
+                const std::string fname = ToLowerAscii(WideToUtf8(it->path().filename().wstring()));
+                if (ext == ".msi" && firstMsi.empty()) {
+                    firstMsi = it->path();
+                } else if (ext == ".exe") {
+                    if (firstExe.empty()) firstExe = it->path();
+                    if (setupExe.empty() &&
+                        (fname.find("setup") != std::string::npos ||
+                         fname.find("install") != std::string::npos)) {
+                        setupExe = it->path();
+                    }
+                }
+            }
+            if (!firstMsi.empty()) candidateExe = firstMsi;
+            else if (!setupExe.empty()) candidateExe = setupExe;
+            else candidateExe = firstExe;
+        }
+        if (candidateExe.empty()) {
+            outError = "В архиве не найден исполняемый файл установщика.";
+            return false;
+        }
+
+        std::string dirSigErr;
+        if (!VerifyExtractedDirectoryBinaries(extractDir, pubViews, &dirSigErr, &outLocks)) {
+            outError = "Содержимое распакованного архива не прошло проверку подписи (" + dirSigErr + ").";
+            outLocks.clear();
+            return false;
+        }
+        outTargetExe = std::move(candidateExe);
+    } else {
+        outTargetExe = stagedFile;
+    }
+
+    if (cancelFlag != nullptr && cancelFlag->load()) {
+        outError = "Установка отменена.";
+        outLocks.clear();
+        return false;
+    }
+
+    HandleGuard targetLock;
+    std::string sigErr;
+    if (!VerifyAndLockAuthenticodeFile(outTargetExe, &targetLock, &sigErr, pubViews)) {
+        outError = "Цифровая подпись установщика не прошла проверку (" + sigErr + ").";
+        outLocks.clear();
+        return false;
+    }
+    if (targetLock.IsValid()) {
+        outLocks.push_back(std::move(targetLock));
+    }
+    outFileVersion = GetFileVersionUtf8(outTargetExe);
+    return true;
+}
+
+StagedPackageResult RunStagedPackageInAdminDir(
+    const StagedPackageOptions& opts,
+    const LogCallback& log,
+    const std::atomic<bool>* cancelFlag,
+    const std::atomic<bool>* stopFlag) {
+    StagedPackageResult res;
+    if ((cancelFlag != nullptr && cancelFlag->load()) || (stopFlag != nullptr && stopFlag->load())) {
+        res.cancelled = true;
+        res.launchError = ERROR_CANCELLED;
+        res.errorMessage = "Установка отменена.";
+        return res;
+    }
+
+    std::filesystem::path adminRoot;
+    std::string dirErr;
+    if (!CreateAdminOnlyTempWorkDir(adminRoot, &dirErr)) {
+        res.launchError = GetLastError();
+        res.errorMessage = dirErr.empty() ? "Не удалось создать защищённый каталог установки." : dirErr;
+        if ((stopFlag == nullptr || !stopFlag->load()) && log) {
+            log(LogLevel::Error, res.errorMessage);
+        }
+        return res;
+    }
+    TempWorkDirGuard adminDir;
+    adminDir.Set(adminRoot);
+
+    std::filesystem::path targetExe;
+    std::vector<HandleGuard> locks;
+    std::string stageErr;
+    if (!StageAndVerifyPackageIntoDir(
+            adminDir.Path(), opts, targetExe, locks, res.fileVersion, stageErr, cancelFlag)) {
+        const bool cancelledNow = (cancelFlag != nullptr && cancelFlag->load());
+        if (cancelledNow) {
+            res.cancelled = true;
+            res.launchError = ERROR_CANCELLED;
+        }
+        res.errorMessage = stageErr;
+        if ((stopFlag == nullptr || !stopFlag->load()) && log && !stageErr.empty()) {
+            log(cancelledNow ? LogLevel::Warning : LogLevel::Error, stageErr);
+        }
+        return res;
+    }
+
+    if ((stopFlag == nullptr || !stopFlag->load()) && log) {
+        log(LogLevel::Success,
+            "Подпись подтверждена" +
+                (res.fileVersion.empty() ? std::string() : " (версия файла: " + res.fileVersion + ")") +
+                ". Запуск установки...");
+    }
+
+    if (opts.isDirectXLegacy) {
+        const std::filesystem::path dxExtractDir = adminDir.Path() / L"dx_extract";
+        if (!CreateDirectoryW(dxExtractDir.c_str(), nullptr)) {
+            res.launchError = GetLastError();
+            res.errorMessage = "Не удалось создать защищённый каталог распаковки DirectX.";
+            if ((stopFlag == nullptr || !stopFlag->load()) && log) {
+                log(LogLevel::Error, res.errorMessage);
+            }
+            return res;
+        }
+        const std::wstring extractArgs = L"/Q /T:" + QuoteWin32Arg(dxExtractDir.wstring());
+        const bool extracted = LaunchAndWaitProcess(
+            targetExe,
+            extractArgs,
+            &res.exitCode,
+            &res.launchError,
+            cancelFlag,
+            stopFlag,
+            &res.processStillRunning);
+        locks.clear();
+        if (extracted) {
+            std::error_code ec;
+            const std::filesystem::path dxSetup = dxExtractDir / L"DXSETUP.exe";
+            const std::filesystem::path dsetupDll = dxExtractDir / L"DSETUP.dll";
+            if (res.exitCode != 0) {
+                res.errorMessage =
+                    "Ошибка распаковки DirectX End-User Runtime (код " + std::to_string(res.exitCode) + ").";
+                if ((stopFlag == nullptr || !stopFlag->load()) && log) {
+                    log(LogLevel::Error, res.errorMessage);
+                }
+            } else if (std::filesystem::is_regular_file(dxSetup, ec) &&
+                       std::filesystem::is_regular_file(dsetupDll, ec)) {
+                const std::vector<std::string_view> msPub{
+                    "Microsoft Corporation", "Microsoft Windows"};
+                std::vector<HandleGuard> dxLocks;
+                std::string dxSigErr;
+                if (!VerifyExtractedDirectoryBinaries(dxExtractDir, msPub, &dxSigErr, &dxLocks)) {
+                    res.launchError = ERROR_INVALID_DATA;
+                    res.errorMessage =
+                        "Цифровая подпись компонентов DirectX не прошла проверку (" + dxSigErr +
+                        "). Запуск отменён в целях безопасности.";
+                    if ((stopFlag == nullptr || !stopFlag->load()) && log) {
+                        log(LogLevel::Error, res.errorMessage);
+                    }
+                } else {
+                    res.launched = LaunchAndWaitProcess(
+                        dxSetup,
+                        L"/silent",
+                        &res.exitCode,
+                        &res.launchError,
+                        cancelFlag,
+                        stopFlag,
+                        &res.processStillRunning);
+                    dxLocks.clear();
+                }
+            } else {
+                res.launchError = ERROR_FILE_NOT_FOUND;
+                res.errorMessage = "В распакованном пакете DirectX не найдены DXSETUP.exe или DSETUP.dll.";
+                if ((stopFlag == nullptr || !stopFlag->load()) && log) {
+                    log(LogLevel::Error, res.errorMessage);
+                }
+            }
+        }
+    } else if (ToLowerAscii(WideToUtf8(targetExe.extension().wstring())) == ".msi") {
+        wchar_t sysBuf[MAX_PATH]{};
+        const UINT sysLen = GetSystemDirectoryW(sysBuf, MAX_PATH);
+        if (sysLen > 0 && sysLen < MAX_PATH) {
+            const std::filesystem::path msiexec = std::filesystem::path(sysBuf) / L"msiexec.exe";
+            const std::wstring msiArgs =
+                L"/i " + QuoteWin32Arg(targetExe.wstring()) + L" /passive /norestart";
+            res.launched = LaunchAndWaitProcess(
+                msiexec,
+                msiArgs,
+                &res.exitCode,
+                &res.launchError,
+                cancelFlag,
+                stopFlag,
+                &res.processStillRunning);
+        } else {
+            res.launchError = ERROR_PATH_NOT_FOUND;
+        }
+        locks.clear();
+    } else {
+        const std::wstring safeArgs = Utf8ToWide(SanitizeWingetSilentArgs(opts.installerArgs));
+        res.launched = LaunchAndWaitProcess(
+            targetExe,
+            safeArgs,
+            &res.exitCode,
+            &res.launchError,
+            cancelFlag,
+            stopFlag,
+            &res.processStillRunning);
+        locks.clear();
+    }
+
+    if (res.processStillRunning) {
+        adminDir.Release();
+        if ((stopFlag == nullptr || !stopFlag->load()) && log) {
+            log(LogLevel::Warning,
+                "Повышенный установщик ещё выполняется в фоне; временная папка не удалена.");
+        }
+    }
+    if (!res.launched && res.launchError == ERROR_CANCELLED) {
+        res.cancelled = true;
+    }
+    return res;
 }
 
 } // namespace hdm

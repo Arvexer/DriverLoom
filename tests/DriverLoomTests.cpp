@@ -5,9 +5,11 @@
 #include "core/PackageSecurity.hpp"
 
 #include <setupapi.h>
+#include <winioctl.h>
 
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -514,6 +516,299 @@ void TestZipAndDirectorySecurity() {
           sigReason);
 }
 
+bool CreateNtfsJunction(
+    const std::filesystem::path& junctionPath,
+    const std::filesystem::path& targetDir) {
+    std::error_code ec;
+    if (!std::filesystem::create_directories(junctionPath, ec) &&
+        !std::filesystem::exists(junctionPath, ec)) {
+        return false;
+    }
+    std::wstring absTarget = std::filesystem::weakly_canonical(targetDir, ec).wstring();
+    if (absTarget.empty()) {
+        absTarget = targetDir.wstring();
+    }
+    if (absTarget.rfind(L"\\\\?\\", 0) == 0 && absTarget.size() >= 6 && absTarget[5] == L':') {
+        absTarget.erase(0, 4);
+    }
+    while (absTarget.size() > 3 && absTarget.back() == L'\\') {
+        absTarget.pop_back();
+    }
+    const std::wstring substitute = L"\\??\\" + absTarget;
+    const std::wstring& printName = absTarget;
+
+    const uint16_t subBytes = static_cast<uint16_t>(substitute.size() * sizeof(wchar_t));
+    const uint16_t printBytes = static_cast<uint16_t>(printName.size() * sizeof(wchar_t));
+    const size_t pathBytes = static_cast<size_t>(subBytes) + sizeof(wchar_t) +
+                             static_cast<size_t>(printBytes) + sizeof(wchar_t);
+    std::vector<uint8_t> buf(16 + pathBytes, 0);
+
+    auto write16 = [&](size_t off, uint16_t v) {
+        buf[off] = static_cast<uint8_t>(v & 0xFFu);
+        buf[off + 1] = static_cast<uint8_t>((v >> 8) & 0xFFu);
+    };
+    auto write32 = [&](size_t off, uint32_t v) {
+        buf[off] = static_cast<uint8_t>(v & 0xFFu);
+        buf[off + 1] = static_cast<uint8_t>((v >> 8) & 0xFFu);
+        buf[off + 2] = static_cast<uint8_t>((v >> 16) & 0xFFu);
+        buf[off + 3] = static_cast<uint8_t>((v >> 24) & 0xFFu);
+    };
+
+    write32(0, IO_REPARSE_TAG_MOUNT_POINT);
+    write16(4, static_cast<uint16_t>(8 + pathBytes));
+    write16(6, 0);
+    write16(8, 0);
+    write16(10, subBytes);
+    write16(12, static_cast<uint16_t>(subBytes + sizeof(wchar_t)));
+    write16(14, printBytes);
+    std::memcpy(buf.data() + 16, substitute.data(), subBytes);
+    std::memcpy(buf.data() + 16 + subBytes + sizeof(wchar_t), printName.data(), printBytes);
+
+    hdm::HandleGuard hDir(CreateFileW(
+        junctionPath.c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+        nullptr));
+    if (!hDir.IsValid()) {
+        RemoveDirectoryW(junctionPath.c_str());
+        return false;
+    }
+    DWORD returned = 0;
+    const BOOL ok = DeviceIoControl(
+        hDir.Get(),
+        FSCTL_SET_REPARSE_POINT,
+        buf.data(),
+        static_cast<DWORD>(buf.size()),
+        nullptr,
+        0,
+        &returned,
+        nullptr);
+    if (!ok) {
+        hDir.Reset();
+        RemoveDirectoryW(junctionPath.c_str());
+        return false;
+    }
+    return true;
+}
+
+void TestTrustedTempAndCliValidation() {
+    const std::wstring trustedTemp = hdm::ResolveTrustedLocalTempDir();
+    Check(!trustedTemp.empty(), "CliTemp: ResolveTrustedLocalTempDir returns verified LocalAppData\\Temp");
+
+    const std::filesystem::path logPath = hdm::CreateTempLogPath(L"unit_r3");
+    Check(!logPath.empty(), "CliTemp: CreateTempLogPath succeeds");
+    if (!logPath.empty()) {
+        std::wstring canon;
+        std::wstring fname;
+        Check(hdm::ValidateWorkerTempPath(logPath.wstring(), L".log", canon, fname),
+              "CliTemp: CreateTempLogPath output passes ValidateWorkerTempPath");
+        std::error_code rmEc;
+        std::filesystem::remove(logPath, rmEc);
+    }
+
+    std::filesystem::path rootDir;
+    std::string err;
+    Check(hdm::CreateUniqueTempWorkDir(rootDir, &err), "CliTemp: CreateUniqueTempWorkDir", err);
+    if (rootDir.empty()) {
+        return;
+    }
+    hdm::TempWorkDirGuard guard;
+    guard.Set(rootDir);
+
+    std::error_code ec;
+    const std::filesystem::path validBase = rootDir / L"valid_local";
+    const std::filesystem::path validTemp = validBase / L"Temp";
+    const std::filesystem::path validSub = validTemp / L"sub";
+    std::filesystem::create_directories(validSub, ec);
+    const std::wstring validCanon = hdm::ResolveTrustedLocalTempDirFromBase(validBase);
+    Check(!validCanon.empty(), "CliTemp: ResolveTrustedLocalTempDirFromBase succeeds on real Temp");
+
+    const std::filesystem::path noTempBase = rootDir / L"missing_temp";
+    std::filesystem::create_directories(noTempBase, ec);
+    Check(hdm::ResolveTrustedLocalTempDirFromBase(noTempBase).empty(),
+          "CliTemp: missing LocalAppData\\Temp fails closed (no GetTempPathW fallback)");
+
+    const std::filesystem::path realTarget = rootDir / L"redirect_target";
+    std::filesystem::create_directories(realTarget, ec);
+    const std::filesystem::path juncBase = rootDir / L"junc_local";
+    const std::filesystem::path juncTemp = juncBase / L"Temp";
+    const bool juncCreated = CreateNtfsJunction(juncTemp, realTarget);
+    Check(juncCreated, "CliTemp: CreateNtfsJunction helper created mount point");
+    if (juncCreated) {
+        Check(hdm::ResolveTrustedLocalTempDirFromBase(juncBase).empty(),
+              "CliTemp: junction Temp fails closed in ResolveTrustedLocalTempDirFromBase");
+        std::wstring dummyName;
+        Check(!hdm::ValidateWorkerTempPathWithBase(
+                  (juncTemp / L"DriverLoom_evil.log").wstring(), L".log", validCanon, dummyName),
+              "CliTemp: ValidateWorkerTempPathWithBase rejects junction parent");
+        RemoveDirectoryW(juncTemp.c_str());
+    }
+
+    std::wstring fname;
+    Check(hdm::ValidateWorkerTempPathWithBase(
+              (validTemp / L"DriverLoom_ok123.log").wstring(), L".log", validCanon, fname) &&
+              fname == L"DriverLoom_ok123.log",
+          "CliTemp: accepts valid DriverLoom_*.log");
+    Check(hdm::ValidateWorkerTempPathWithBase(
+              (validTemp / L"DriverLoom_ok123.log.cancel").wstring(), L".log.cancel", validCanon, fname),
+          "CliTemp: accepts valid DriverLoom_*.log.cancel");
+    Check(!hdm::ValidateWorkerTempPathWithBase(
+              L"C:\\Windows\\System32\\DriverLoom_ok123.log", L".log", validCanon, fname),
+          "CliTemp: rejects path outside canonical Temp (System32)");
+    Check(!hdm::ValidateWorkerTempPathWithBase(
+              L"\\\\server\\share\\DriverLoom_ok123.log", L".log", validCanon, fname),
+          "CliTemp: rejects UNC path");
+    Check(!hdm::ValidateWorkerTempPathWithBase(
+              (validSub / L".." / L"DriverLoom_ok123.log").wstring(), L".log", validCanon, fname),
+          "CliTemp: rejects '..' traversal component");
+    Check(!hdm::ValidateWorkerTempPathWithBase(
+              (validTemp / L"Other_ok123.log").wstring(), L".log", validCanon, fname),
+          "CliTemp: rejects non-DriverLoom prefix");
+    Check(!hdm::ValidateWorkerTempPathWithBase(
+              (validTemp / L"DriverLoom_ok123.txt").wstring(), L".log", validCanon, fname),
+          "CliTemp: rejects wrong suffix");
+    Check(!hdm::ValidateWorkerTempPathWithBase(
+              (validTemp / L"DriverLoom_bad$1.log").wstring(), L".log", validCanon, fname),
+          "CliTemp: rejects disallowed filename character");
+    Check(!hdm::ValidateWorkerTempPathWithBase(
+              (validTemp / L"DriverLoom_ok123.log").wstring(), L".log", L"", fname),
+          "CliTemp: rejects empty canonical temp base");
+}
+
+void TestBoundedCopyAndPackageStaging() {
+    std::filesystem::path dir;
+    std::string err;
+    Check(hdm::CreateUniqueTempWorkDir(dir, &err), "Staging: CreateUniqueTempWorkDir", err);
+    if (dir.empty()) {
+        return;
+    }
+    hdm::TempWorkDirGuard guard;
+    guard.Set(dir);
+
+    const std::string data64(64, 'A');
+    const std::filesystem::path src64 = dir / L"src64.exe";
+    {
+        std::ofstream ofs(src64, std::ios::binary);
+        ofs.write(data64.data(), static_cast<std::streamsize>(data64.size()));
+    }
+    const std::filesystem::path dst64 = dir / L"dst64.exe";
+    Check(hdm::CopyFileBoundedNoReparse(src64, dst64, 128, &err),
+          "CopyBounded: copies 64-byte file within 128-byte limit", err);
+    {
+        std::ifstream ifs(dst64, std::ios::binary);
+        std::string copied((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        Check(copied == data64, "CopyBounded: copied content matches source");
+    }
+    Check(!hdm::CopyFileBoundedNoReparse(src64, dst64, 128, &err),
+          "CopyBounded: rejects existing destination file (CREATE_NEW)");
+
+    const std::filesystem::path dstOver = dir / L"dst_over.exe";
+    Check(!hdm::CopyFileBoundedNoReparse(src64, dstOver, 16, &err),
+          "CopyBounded: rejects 64-byte file when limit is 16 bytes");
+    std::error_code ec;
+    Check(!std::filesystem::exists(dstOver, ec),
+          "CopyBounded: oversized failure leaves no partial destination file");
+
+    const std::filesystem::path srcEmpty = dir / L"empty.exe";
+    {
+        std::ofstream ofs(srcEmpty, std::ios::binary);
+    }
+    Check(!hdm::CopyFileBoundedNoReparse(srcEmpty, dir / L"dst_empty.exe", 128, &err),
+          "CopyBounded: rejects 0-byte source file");
+    Check(!hdm::CopyFileBoundedNoReparse(dir, dir / L"dst_dir.exe", 128, &err),
+          "CopyBounded: rejects directory source");
+
+    Check(hdm::IsValidSha256Hex("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+          "Sha256Format: valid lowercase 64 hex");
+    Check(hdm::IsValidSha256Hex("BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD"),
+          "Sha256Format: valid uppercase 64 hex");
+    Check(!hdm::IsValidSha256Hex("ba7816bf"), "Sha256Format: rejects short digest");
+    Check(!hdm::IsValidSha256Hex(std::string(65, 'a')), "Sha256Format: rejects 65-char digest");
+    Check(!hdm::IsValidSha256Hex("ga7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+          "Sha256Format: rejects non-hex character");
+    Check(!hdm::IsValidSha256Hex(""), "Sha256Format: rejects empty digest");
+
+    std::vector<std::string> parsedPubs;
+    Check(hdm::ParsePipeSeparatedPublishers("Microsoft Corporation|Microsoft Windows", parsedPubs) &&
+              parsedPubs.size() == 2 && parsedPubs[0] == "Microsoft Corporation" &&
+              parsedPubs[1] == "Microsoft Windows",
+          "Publishers: parses valid pipe-separated allowlist");
+    Check(!hdm::ParsePipeSeparatedPublishers("", parsedPubs), "Publishers: rejects empty string");
+    Check(!hdm::ParsePipeSeparatedPublishers("Microsoft|", parsedPubs), "Publishers: rejects trailing pipe");
+    Check(!hdm::ParsePipeSeparatedPublishers("A", parsedPubs), "Publishers: rejects 1-char token");
+    Check(!hdm::ParsePipeSeparatedPublishers("Bad\nPub", parsedPubs), "Publishers: rejects control char");
+
+    std::string src64Sha;
+    Check(hdm::ComputeFileSha256Hex(src64, src64Sha, &err), "Staging: hash src64", err);
+
+    auto runStage = [&](const std::wstring& subName, const hdm::StagedPackageOptions& opts, std::string& outErr) {
+        const std::filesystem::path workSub = dir / subName;
+        std::filesystem::create_directories(workSub, ec);
+        std::filesystem::path targetExe;
+        std::vector<hdm::HandleGuard> locks;
+        std::string ver;
+        return hdm::StageAndVerifyPackageIntoDir(workSub, opts, targetExe, locks, ver, outErr, nullptr);
+    };
+
+    hdm::StagedPackageOptions optNoPub;
+    optNoPub.sourcePackagePath = src64;
+    Check(!runStage(L"s_nopub", optNoPub, err), "Staging: rejects empty allowedPublishers");
+
+    hdm::StagedPackageOptions optBadSha = optNoPub;
+    optBadSha.allowedPublishers = {"Microsoft Corporation"};
+    optBadSha.expectedSha256 = "not_a_sha";
+    Check(!runStage(L"s_badsha", optBadSha, err), "Staging: rejects malformed SHA-256");
+
+    hdm::StagedPackageOptions optBadArgs = optBadSha;
+    optBadArgs.expectedSha256 = src64Sha;
+    optBadArgs.installerArgs = "/S & calc.exe";
+    Check(!runStage(L"s_badargs", optBadArgs, err), "Staging: rejects shell-injection installerArgs");
+
+    hdm::StagedPackageOptions optOver = optBadSha;
+    optOver.expectedSha256 = src64Sha;
+    optOver.maxPackageBytes = 16;
+    Check(!runStage(L"s_over", optOver, err), "Staging: rejects oversized package copy");
+
+    hdm::StagedPackageOptions optMismatch = optBadSha;
+    optMismatch.expectedSha256 = std::string(64, '0');
+    Check(!runStage(L"s_mismatch", optMismatch, err), "Staging: rejects SHA-256 mismatch");
+
+    hdm::StagedPackageOptions optUnsignedExe = optBadSha;
+    optUnsignedExe.expectedSha256 = src64Sha;
+    Check(!runStage(L"s_unsigned_exe", optUnsignedExe, err),
+          "Staging: rejects unsigned .exe even when SHA-256 matches", err);
+
+    const std::filesystem::path zipNoInst = dir / L"no_inst.zip";
+    {
+        const std::vector<uint8_t> zb = BuildMinimalStoredZip("readme.txt", "hello");
+        std::ofstream ofs(zipNoInst, std::ios::binary);
+        ofs.write(reinterpret_cast<const char*>(zb.data()), static_cast<std::streamsize>(zb.size()));
+    }
+    hdm::StagedPackageOptions optZipNoInst;
+    optZipNoInst.sourcePackagePath = zipNoInst;
+    optZipNoInst.allowedPublishers = {"Microsoft Corporation"};
+    Check(!runStage(L"s_zip_noinst", optZipNoInst, err),
+          "Staging: rejects ZIP without installer executable", err);
+
+    const std::filesystem::path zipUnsigned = dir / L"unsigned_inst.zip";
+    {
+        const std::vector<uint8_t> zb = BuildMinimalStoredZip("setup.exe", "MZ_FAKE_UNSIGNED_SETUP");
+        std::ofstream ofs(zipUnsigned, std::ios::binary);
+        ofs.write(reinterpret_cast<const char*>(zb.data()), static_cast<std::streamsize>(zb.size()));
+    }
+    std::string zipSha;
+    Check(hdm::ComputeFileSha256Hex(zipUnsigned, zipSha, &err), "Staging: hash zipUnsigned", err);
+    hdm::StagedPackageOptions optZipUnsigned;
+    optZipUnsigned.sourcePackagePath = zipUnsigned;
+    optZipUnsigned.expectedSha256 = zipSha;
+    optZipUnsigned.allowedPublishers = {"Microsoft Corporation"};
+    Check(!runStage(L"s_zip_unsigned", optZipUnsigned, err),
+          "Staging: rejects ZIP with unsigned setup.exe even when ZIP SHA-256 matches", err);
+}
+
 } // namespace
 
 int main() {
@@ -529,6 +824,8 @@ int main() {
     TestTempAndMiscHelpers();
     TestLocalizationTrDyn();
     TestZipAndDirectorySecurity();
+    TestTrustedTempAndCliValidation();
+    TestBoundedCopyAndPackageStaging();
 
     std::cout << "\nSummary: " << g_passed << " passed, " << g_failed << " failed.\n";
     return g_failed == 0 ? 0 : 1;
