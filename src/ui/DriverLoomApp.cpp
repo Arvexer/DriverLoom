@@ -144,9 +144,12 @@ void DriverLoomApp::RenderFrame() {
                userRelevantIssueCount_ > 0) {
         desiredOverlay = TaskbarOverlayState::Attention;
     }
-    if (desiredOverlay != lastTaskbarOverlay_) {
+    const hdm::Lang curOverlayLang = hdm::GetLang();
+    if (desiredOverlay != lastTaskbarOverlay_ ||
+        (desiredOverlay != TaskbarOverlayState::None && curOverlayLang != lastTaskbarOverlayLang_)) {
         SetTaskbarOverlayBadge(hwnd_, desiredOverlay);
         lastTaskbarOverlay_ = desiredOverlay;
+        lastTaskbarOverlayLang_ = curOverlayLang;
     }
 
     const ImGuiViewport* vp = ImGui::GetMainViewport();
@@ -563,10 +566,32 @@ void DriverLoomApp::RenderSettingsTab() {
         PopFontSafe(g_fontSecondaryHeader);
         ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
 
-        const float halfW = std::max(220.0f, (fullW - gap) * 0.5f);
+        const char* simpleTitle = hdm::Tr("Обычный режим", "Звичайний режим", "Simple Mode");
+        const char* simpleBadge = hdm::Tr("Рекомендуется", "Рекомендовано", "Recommended");
+        const char* simpleDesc = hdm::Tr(
+            "Понятный интерфейс простым языком без сложного жаргона. Перед установкой автоматически создаётся точка восстановления.",
+            "Зрозумілий інтерфейс простою мовою без складного жаргону. Перед встановленням автоматично створюється точка відновлення.",
+            "Clear, everyday interface without technical jargon. Automatically creates a System Restore point before updates.");
+        const char* expertTitle = hdm::Tr("Режим эксперта", "Режим експерта", "Expert Mode");
+        const char* expertBadge = g_isAdvancedMode ? hdm::Tr("Активен", "Активний", "Active") : "";
+        const char* expertDesc = hdm::Tr(
+            "Полный доступ: Hardware ID, установка .inf, очистка DriverStore, управление PnP, службы Windows, SFC/DISM и снимок До/После.",
+            "Повний доступ: Hardware ID, встановлення .inf, очищення DriverStore, керування PnP, служби Windows, SFC/DISM і знімок До/Після.",
+            "Full power tools: Hardware IDs, manual .inf install, DriverStore cleanup, PnP control, Services, SFC/DISM, and Before/After diff.");
+
+        const float halfW = std::max(std::round(200.0f * uiScale), (fullW - gap) * 0.5f);
+        const float wrapW = std::max(100.0f * uiScale, halfW - cardPad * 2.0f);
+        PushFontSafe(g_fontSecondaryHeader);
+        const float modeTitleH = ImGui::GetTextLineHeight();
+        PopFontSafe(g_fontSecondaryHeader);
+        PushFontSafe(g_fontSmall);
+        const float descH = std::max(
+            ImGui::CalcTextSize(simpleDesc, nullptr, false, wrapW).y,
+            ImGui::CalcTextSize(expertDesc, nullptr, false, wrapW).y);
+        PopFontSafe(g_fontSmall);
         const float modeCardH = std::max(
             std::round(112.0f * uiScale),
-            ImGui::GetTextLineHeightWithSpacing() * 4.2f + std::round(24.0f * uiScale));
+            cardPad * 2.0f + modeTitleH + std::round(10.0f * uiScale) + descH + std::round(4.0f * uiScale));
 
         auto renderModeCard = [&](const char* id,
                                   const char* title,
@@ -663,12 +688,9 @@ void DriverLoomApp::RenderSettingsTab() {
 
         if (renderModeCard(
                 "##ModeCardSimple",
-                hdm::Tr("Обычный режим", "Звичайний режим", "Simple Mode"),
-                hdm::Tr("Рекомендуется", "Рекомендовано", "Recommended"),
-                hdm::Tr(
-                    "Понятный интерфейс простым языком без сложного жаргона. Перед установкой автоматически создаётся точка восстановления.",
-                    "Зрозумілий інтерфейс простою мовою без складного жаргону. Перед встановленням автоматично створюється точка відновлення.",
-                    "Clear, everyday interface without technical jargon. Automatically creates a System Restore point before updates."),
+                simpleTitle,
+                simpleBadge,
+                simpleDesc,
                 !g_isAdvancedMode)) {
             if (g_isAdvancedMode) {
                 g_isAdvancedMode = false;
@@ -682,12 +704,9 @@ void DriverLoomApp::RenderSettingsTab() {
         ImGui::SameLine(0.0f, gap);
         if (renderModeCard(
                 "##ModeCardExpert",
-                hdm::Tr("Режим эксперта", "Режим експерта", "Expert Mode"),
-                g_isAdvancedMode ? hdm::Tr("Активен", "Активний", "Active") : "",
-                hdm::Tr(
-                    "Полный доступ: Hardware ID, установка .inf, очистка DriverStore, управление PnP, службы Windows, SFC/DISM и снимок До/После.",
-                    "Повний доступ: Hardware ID, встановлення .inf, очищення DriverStore, керування PnP, служби Windows, SFC/DISM і знімок До/Після.",
-                    "Full power tools: Hardware IDs, manual .inf install, DriverStore cleanup, PnP control, Services, SFC/DISM, and Before/After diff."),
+                expertTitle,
+                expertBadge,
+                expertDesc,
                 g_isAdvancedMode)) {
             if (!g_isAdvancedMode) {
                 g_isAdvancedMode = true;
@@ -721,16 +740,20 @@ void DriverLoomApp::RenderSettingsTab() {
                 std::max(ImGui::CalcTextSize(langLbl).x, ImGui::CalcTextSize(scaleLbl).x)) +
             std::round(14.0f * uiScale);
 
+        const char* darkBtnLbl = hdm::Tr("Тёмная###SetDark", "Темна###SetDark", "Dark###SetDark");
+        const char* lightBtnLbl = hdm::Tr("Светлая###SetLight", "Світла###SetLight", "Light###SetLight");
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("%s", themeLbl);
-        ImGui::SameLine(cardPad + labelColW);
-        if (RenderPillButton(hdm::Tr("Тёмная###SetDark", "Темна###SetDark", "Dark###SetDark"), !g_isLightTheme)) {
+        if (cardPad + labelColW + CalcButtonWidth(darkBtnLbl) <= ImGui::GetWindowContentRegionMax().x) {
+            ImGui::SameLine(cardPad + labelColW);
+        }
+        if (RenderPillButton(darkBtnLbl, !g_isLightTheme)) {
             if (g_isLightTheme) {
                 pendingThemeChange_ = 0;
             }
         }
-        ImGui::SameLine();
-        if (RenderPillButton(hdm::Tr("Светлая###SetLight", "Світла###SetLight", "Light###SetLight"), g_isLightTheme)) {
+        SameLineWrapIfNeeded(CalcButtonWidth(lightBtnLbl));
+        if (RenderPillButton(lightBtnLbl, g_isLightTheme)) {
             if (!g_isLightTheme) {
                 pendingThemeChange_ = 1;
             }
@@ -739,20 +762,22 @@ void DriverLoomApp::RenderSettingsTab() {
         ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("%s", langLbl);
-        ImGui::SameLine(cardPad + labelColW);
+        if (cardPad + labelColW + CalcButtonWidth("Русский###SetRu") <= ImGui::GetWindowContentRegionMax().x) {
+            ImGui::SameLine(cardPad + labelColW);
+        }
         const hdm::Lang curLang = hdm::GetLang();
         if (RenderPillButton("Русский###SetRu", curLang == hdm::Lang::Ru)) {
             hdm::SetLang(hdm::Lang::Ru);
             g_cliOverrideLanguage = false;
             SaveUserPreferences();
         }
-        ImGui::SameLine();
+        SameLineWrapIfNeeded(CalcButtonWidth("Українська###SetUk"));
         if (RenderPillButton("Українська###SetUk", curLang == hdm::Lang::Uk)) {
             hdm::SetLang(hdm::Lang::Uk);
             g_cliOverrideLanguage = false;
             SaveUserPreferences();
         }
-        ImGui::SameLine();
+        SameLineWrapIfNeeded(CalcButtonWidth("English###SetEn"));
         if (RenderPillButton("English###SetEn", curLang == hdm::Lang::En)) {
             hdm::SetLang(hdm::Lang::En);
             g_cliOverrideLanguage = false;
@@ -762,10 +787,16 @@ void DriverLoomApp::RenderSettingsTab() {
         ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("%s", scaleLbl);
-        ImGui::SameLine(cardPad + labelColW);
+        if (cardPad + labelColW + CalcButtonWidth("90%###SetScale90") <= ImGui::GetWindowContentRegionMax().x) {
+            ImGui::SameLine(cardPad + labelColW);
+        }
         constexpr int kScalePresets[5] = {90, 100, 110, 125, 150};
+        bool matchesPreset = false;
         for (int i = 0; i < 5; ++i) {
             const int preset = kScalePresets[i];
+            if (g_uiScalePercent == preset) {
+                matchesPreset = true;
+            }
             char scaleBtnLbl[32];
             std::snprintf(scaleBtnLbl, sizeof(scaleBtnLbl), "%d%%###SetScale%d", preset, preset);
             if (i > 0) {
@@ -779,6 +810,17 @@ void DriverLoomApp::RenderSettingsTab() {
                     SaveUserPreferences();
                 }
             }
+        }
+        if (!matchesPreset) {
+            char customScaleLbl[64];
+            std::snprintf(
+                customScaleLbl,
+                sizeof(customScaleLbl),
+                "%d%% (%s)###SetScaleCustom",
+                g_uiScalePercent,
+                hdm::Tr("кастом", "свій", "custom"));
+            SameLineWrapIfNeeded(CalcButtonWidth(customScaleLbl));
+            RenderPillButton(customScaleLbl, true);
         }
 
         ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
@@ -857,6 +899,10 @@ void DriverLoomApp::RenderSettingsTab() {
                 false);
         }
 
+        const char* srBtnLbl =
+            systemRestore_.IsBusy()
+                ? hdm::Tr("Создание точки восстановления...###SetSrBtn", "Створення точки відновлення...###SetSrBtn", "Creating restore point...###SetSrBtn")
+                : hdm::Tr("Создать точку восстановления сейчас###SetSrBtn", "Створити точку відновлення зараз###SetSrBtn", "Create Restore Point Now###SetSrBtn");
         ImGui::Dummy(ImVec2(0.0f, std::round(4.0f * uiScale)));
         if (!isElevated_) {
             if (RenderSecondaryButton(hdm::Tr(
@@ -876,13 +922,10 @@ void DriverLoomApp::RenderSettingsTab() {
                             hdm::FormatWin32Error(run.launchError));
                 }
             }
-            ImGui::SameLine();
+            SameLineWrapIfNeeded(CalcButtonWidth(srBtnLbl));
         }
         ImGui::BeginDisabled(systemRestore_.IsBusy());
-        if (RenderSecondaryButton(
-                systemRestore_.IsBusy()
-                    ? hdm::Tr("Создание точки восстановления...###SetSrBtn", "Створення точки відновлення...###SetSrBtn", "Creating restore point...###SetSrBtn")
-                    : hdm::Tr("Создать точку восстановления сейчас###SetSrBtn", "Створити точку відновлення зараз###SetSrBtn", "Create Restore Point Now###SetSrBtn"))) {
+        if (RenderSecondaryButton(srBtnLbl)) {
             systemRestore_.CreateRestorePointAsync(
                 hdm::Tr(
                     "DriverLoom (ручная точка восстановления)",
@@ -1326,17 +1369,19 @@ void DriverLoomApp::RenderRebootBanner() {
         true,
         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
     ImGui::PopStyleColor(2);
+    const char* hideLabel = hdm::Tr("Позже###RebHide", "Пізніше###RebHide", "Later###RebHide");
+    const float hideW = CalcButtonWidth(hdm::Tr("Позже", "Пізніше", "Later"));
+    const float badgeMaxW =
+        std::max(80.0f * uiScale, ImGui::GetContentRegionAvail().x - hideW - style.ItemSpacing.x);
     RenderStatusBadge(
         WarningColor(),
         hdm::Tr(
             "Перезагрузите компьютер, чтобы завершить установку драйверов.",
             "Перезавантажте комп'ютер, щоб завершити встановлення драйверів.",
             "Restart your PC to finish applying the installed drivers."),
-        true);
-    const char* hideLabel = hdm::Tr("Позже###RebHide", "Пізніше###RebHide", "Later###RebHide");
-    const float hideW = CalcButtonWidth(hdm::Tr("Позже", "Пізніше", "Later"));
-    ImGui::SameLine(std::max(ImGui::GetCursorPosX() + 12.0f,
-                             ImGui::GetWindowContentRegionMax().x - hideW));
+        true,
+        badgeMaxW);
+    ImGui::SameLine(ImGui::GetWindowContentRegionMax().x - hideW);
     if (RenderSecondaryButton(hideLabel, ImVec2(hideW, 0.0f))) {
         rebootRequired_.store(false);
     }
@@ -1743,8 +1788,12 @@ void DriverLoomApp::RenderAboutModal() {
         ImGui::EndDisabled();
 
         if (updState == AppUpdateState::UpdateAvailable) {
-            ImGui::SameLine();
-            if (RenderPrimaryButton(hdm::Tr("Скачать новую версию###AboutDlUpd", "Завантажити нову версію###AboutDlUpd", "Download Update###AboutDlUpd"))) {
+            const char* dlLbl = hdm::Tr(
+                "Скачать новую версию###AboutDlUpd",
+                "Завантажити нову версію###AboutDlUpd",
+                "Download Update###AboutDlUpd");
+            SameLineWrapIfNeeded(CalcButtonWidth(dlLbl));
+            if (RenderPrimaryButton(dlLbl)) {
                 OpenUrlInBrowser(releaseUrl);
             }
         }
@@ -1971,7 +2020,7 @@ void DriverLoomApp::RenderStatusBarAndLogDrawer() {
                              componentsScanner_.IsCheckingOnline() || componentsScanner_.IsInstalling() ||
                              wuManager_.IsBusy() || diagnostics_.IsBusy() ||
                              localInstaller_.IsInstalling() || localInstaller_.IsExportingBackup() ||
-                             systemRestore_.IsBusy();
+                             localInstaller_.IsRemovingStorePackages() || systemRestore_.IsBusy();
 
         ImVec4 dotCol = HealthyColor();
         std::string statusText;
@@ -1984,6 +2033,16 @@ void DriverLoomApp::RenderStatusBarAndLogDrawer() {
         } else if (diagnostics_.IsRunningAction()) {
             dotCol = WarningColor();
             statusText = hdm::TrDyn(diagnostics_.ActionPhase());
+        } else if (localInstaller_.IsInstalling() || localInstaller_.IsExportingBackup() ||
+                   localInstaller_.IsRemovingStorePackages()) {
+            dotCol = InfoAccentColor();
+            statusText = hdm::TrDyn(localInstaller_.StatusMessage());
+        } else if (systemRestore_.IsBusy()) {
+            dotCol = InfoAccentColor();
+            statusText = hdm::Tr(
+                "Создание точки восстановления...",
+                "Створення точки відновлення...",
+                "Creating restore point...");
         } else if (anyBusy) {
             dotCol = InfoAccentColor();
             statusText = hdm::Tr("Выполняется проверка...", "Виконується перевірка...", "Checking system...");

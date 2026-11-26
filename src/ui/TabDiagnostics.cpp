@@ -148,19 +148,35 @@ void DriverLoomApp::RenderDiagnosticsTab() {
     const float cardW = std::max(240.0f, (ImGui::GetContentRegionAvail().x - cardGap) * 0.5f);
     const float cardInnerW = std::max(160.0f, cardW - cardPadX * 2.0f);
 
+    auto countWrappedRows = [](const std::vector<float>& widths, float availWidth, float sp) {
+        int rows = 1;
+        float curX = 0.0f;
+        for (float w : widths) {
+            if (w <= 0.0f) {
+                continue;
+            }
+            if (curX > 0.0f && curX + sp + w > availWidth) {
+                ++rows;
+                curX = w;
+            } else {
+                curX += (curX > 0.0f ? sp : 0.0f) + w;
+            }
+        }
+        return rows;
+    };
+
     const char* mbSiteLbl = hdm::Tr("Сайт платы###MbSite", "Сайт плати###MbSite", "Board Website###MbSite");
     const char* mbSearchLbl = hdm::Tr("Найти драйверы###MbSearch", "Знайти драйвери###MbSearch", "Find Drivers###MbSearch");
     const char* mbCopyLbl = hdm::Tr("Копировать###MbCopy", "Копіювати###MbCopy", "Copy###MbCopy");
     const float mbSiteW = !diagCache_.motherboard.supportUrl.empty() ? CalcButtonWidth(mbSiteLbl) : 0.0f;
     const float mbSearchW = CalcButtonWidth(mbSearchLbl);
     const float mbCopyW = g_isAdvancedMode ? CalcButtonWidth(mbCopyLbl) : 0.0f;
-    float mbBtnsTotalW = mbSearchW;
-    if (mbSiteW > 0.0f) mbBtnsTotalW += mbSiteW + style.ItemSpacing.x;
-    if (mbCopyW > 0.0f) mbBtnsTotalW += mbCopyW + style.ItemSpacing.x;
-    const bool moboNeedsTwoRows = (mbBtnsTotalW > cardInnerW);
+    const int moboBtnRows = countWrappedRows(
+        {mbSiteW, mbSearchW, mbCopyW}, cardInnerW, style.ItemSpacing.x);
     const float cardH = std::max(
         std::round(118.0f * uiScale),
-        moboNeedsTwoRows ? (std::round(118.0f * uiScale) + ImGui::GetFrameHeight() + cardSpacingY) : 0.0f);
+        std::round(118.0f * uiScale) +
+            static_cast<float>(moboBtnRows - 1) * (ImGui::GetFrameHeight() + cardSpacingY));
 
     // Left Card: Motherboard & BIOS
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(cardPadX, cardPadY));
@@ -202,7 +218,8 @@ void DriverLoomApp::RenderDiagnosticsTab() {
         }
 
         const float mbBtnBlockH =
-            moboNeedsTwoRows ? (ImGui::GetFrameHeight() * 2.0f + cardSpacingY) : ImGui::GetFrameHeight();
+            ImGui::GetFrameHeight() * static_cast<float>(moboBtnRows) +
+            cardSpacingY * static_cast<float>(moboBtnRows - 1);
         const float btnsY = cardH - cardPadY - mbBtnBlockH;
         if (ImGui::GetCursorPosY() < btnsY) {
             ImGui::SetCursorPosY(btnsY);
@@ -344,32 +361,42 @@ void DriverLoomApp::RenderDiagnosticsTab() {
     const float footerPadY = std::round(8.0f * uiScale);
     const float footerInnerW = std::max(200.0f, ImGui::GetContentRegionAvail().x - cardPadX * 2.0f);
     int footerRows = 1;
-    if (showFooterBar && diagSectionIndex_ != 3) {
-        float rowNeededW = 0.0f;
+    if (showFooterBar) {
+        std::vector<float> footerItemWidths;
         if (diagSectionIndex_ == 2) {
-            rowNeededW =
-                CalcButtonWidth(hdm::Tr("Создать точку отката###FtRpCreate", "Створити точку відкату###FtRpCreate", "Create Restore Point###FtRpCreate")) +
-                CalcButtonWidth(hdm::Tr("Откатить Windows...###FtRstrui", "Відкотити Windows...###FtRstrui", "Open System Restore###FtRstrui")) +
-                CalcButtonWidth(hdm::Tr("Настроить защиту диска###FtProt", "Налаштувати захист диска###FtProt", "Protection Settings###FtProt")) +
-                style.ItemSpacing.x * 2.0f;
+            footerItemWidths = {
+                CalcButtonWidth(hdm::Tr("Создать точку отката###FtRpCreate", "Створити точку відкату###FtRpCreate", "Create Restore Point###FtRpCreate")),
+                CalcButtonWidth(hdm::Tr("Откатить Windows...###FtRstrui", "Відкотити Windows...###FtRstrui", "Open System Restore###FtRstrui")),
+                CalcButtonWidth(hdm::Tr("Настроить защиту диска###FtProt", "Налаштувати захист диска###FtProt", "Protection Settings###FtProt")),
+            };
+        } else if (diagSectionIndex_ == 3) {
+            footerItemWidths.push_back(
+                ImGui::CalcTextSize(hdm::Tr("Режим питания:", "Режим живлення:", "Power Plan:")).x);
+            for (const auto& ps : diagCache_.powerSchemes) {
+                footerItemWidths.push_back(CalcButtonWidth(hdm::TrDyn(ps.friendlyName).c_str()));
+            }
+            const char* trimTxtEst =
+                diagCache_.readiness.trimEnabled
+                    ? hdm::Tr("SSD TRIM: Включён", "SSD TRIM: Увімкнено", "SSD TRIM: Enabled")
+                    : hdm::Tr("SSD TRIM: Отключён", "SSD TRIM: Вимкнено", "SSD TRIM: Disabled");
+            footerItemWidths.push_back(ImGui::CalcTextSize(trimTxtEst).x + 12.0f * uiScale);
         } else if (diagSectionIndex_ == 4) {
-            rowNeededW =
-                CalcButtonWidth(hdm::Tr("Обновить снимок «До»###SnapSaveBtn", "Оновити знімок «До»###SnapSaveBtn", "Capture New Baseline###SnapSaveBtn")) +
-                CalcButtonWidth("Changes (999)") + CalcButtonWidth("All (999)") +
-                CalcButtonWidth(hdm::Tr("Копировать###SnapCopyBtn", "Копіювати###SnapCopyBtn", "Copy###SnapCopyBtn")) +
-                style.ItemSpacing.x * 3.0f;
+            footerItemWidths = {
+                CalcButtonWidth(hdm::Tr("Обновить снимок «До»###SnapSaveBtn", "Оновити знімок «До»###SnapSaveBtn", "Capture New Baseline###SnapSaveBtn")),
+                CalcButtonWidth(hdm::Tr("Изменения (999)", "Зміни (999)", "Changes (999)")),
+                CalcButtonWidth(hdm::Tr("Все (999)", "Усі (999)", "All (999)")),
+                CalcButtonWidth(hdm::Tr("Копировать###SnapCopyBtn", "Копіювати###SnapCopyBtn", "Copy###SnapCopyBtn")),
+            };
         } else {
             const char* sfcHdr = hdm::Tr("Проверка системных файлов:", "Перевірка системних файлів:", "System File Check:");
-            rowNeededW =
-                ImGui::CalcTextSize(sfcHdr).x + 10.0f +
-                CalcButtonWidth("SFC /scannow") +
-                CalcButtonWidth("DISM CheckHealth") +
-                CalcButtonWidth("DISM RestoreHealth") +
-                style.ItemSpacing.x * 3.0f;
+            footerItemWidths = {
+                ImGui::CalcTextSize(sfcHdr).x + 10.0f * uiScale,
+                CalcButtonWidth("SFC /scannow"),
+                CalcButtonWidth("DISM CheckHealth"),
+                CalcButtonWidth("DISM RestoreHealth"),
+            };
         }
-        if (rowNeededW > footerInnerW) {
-            footerRows = 2;
-        }
+        footerRows = countWrappedRows(footerItemWidths, footerInnerW, style.ItemSpacing.x);
     }
     const float footerH =
         showFooterBar
@@ -700,11 +727,7 @@ void DriverLoomApp::RenderDiagnosticsTab() {
         for (const auto& ps : diagCache_.powerSchemes) {
             const std::string psShown = hdm::TrDyn(ps.friendlyName);
             const float btnW = CalcButtonWidth(psShown.c_str());
-            const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
-            if (lastEnd + style.ItemSpacing.x + btnW > winRight - trimW - 16.0f) {
-                break;
-            }
-            ImGui::SameLine();
+            SameLineWrapIfNeeded(btnW);
             ImGui::PushID(ps.guidString.c_str());
             const std::string psBtnLbl = psShown + "###PsBtn";
             if (RenderPillButton(psBtnLbl.c_str(), ps.isActive) && !ps.isActive) {
@@ -715,11 +738,13 @@ void DriverLoomApp::RenderDiagnosticsTab() {
         ImGui::EndDisabled();
 
         const float lastEnd = ImGui::GetItemRectMax().x - ImGui::GetWindowPos().x;
-        if (winRight - trimW > lastEnd + 16.0f) {
+        if (winRight - trimW > lastEnd + 16.0f * uiScale) {
             ImGui::SameLine(winRight - trimW);
-            ImGui::AlignTextToFramePadding();
-            ImGui::TextDisabled("%s", trimTxt);
+        } else {
+            SameLineWrapIfNeeded(trimW);
         }
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextDisabled("%s", trimTxt);
     } else if (diagSectionIndex_ == 2) {
         auto launchSystem32Tool = [&](const wchar_t* exeName) {
             wchar_t sysDir[MAX_PATH]{};

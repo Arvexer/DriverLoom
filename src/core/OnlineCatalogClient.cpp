@@ -636,7 +636,8 @@ CatalogDriverMatch ResolveMsCatalogDriverCab(const std::string& searchKey) {
     const std::wstring searchUrl = Utf8ToWide(
         "https://www.catalog.update.microsoft.com/Search.aspx?q=" +
         UrlEncodeCatalogParam(searchKey));
-    const HttpResponse searchResp = WinHttpRequest(searchUrl, L"GET", true, 1024 * 1024);
+    const HttpResponse searchResp = WinHttpRequest(
+        searchUrl, L"GET", true, 1024 * 1024, nullptr, {}, {"catalog.update.microsoft.com"});
     if (!searchResp.ok || searchResp.truncated || searchResp.body.empty()) {
         return {};
     }
@@ -780,7 +781,8 @@ CatalogDriverMatch ResolveMsCatalogDriverCab(const std::string& searchKey) {
         true,
         128 * 1024,
         L"Content-Type: application/x-www-form-urlencoded\r\n",
-        postBody);
+        postBody,
+        {"catalog.update.microsoft.com"});
     if (!dlResp.ok || dlResp.truncated || dlResp.body.empty()) {
         return {bestVer, "", bestDateYmd};
     }
@@ -1052,7 +1054,8 @@ WingetManifestInfo ResolveWingetPkgManifest(
     const std::wstring treeUrl = Utf8ToWide(
         "https://github.com/microsoft/winget-pkgs/tree/master/manifests/" + encPath);
     const HttpResponse treeResp = WinHttpRequest(
-        treeUrl, L"GET", true, 256 * 1024, L"Accept: application/json\r\n");
+        treeUrl, L"GET", true, 256 * 1024, L"Accept: application/json\r\n", {},
+        {"github.com", "githubusercontent.com"});
     if (!treeResp.ok || treeResp.truncated || treeResp.body.empty()) {
         return result;
     }
@@ -1091,7 +1094,8 @@ WingetManifestInfo ResolveWingetPkgManifest(
         "https://github.com/microsoft/winget-pkgs/tree/master/manifests/" +
         encPath + "/" + encVer);
     const HttpResponse verResp = WinHttpRequest(
-        verTreeUrl, L"GET", true, 128 * 1024, L"Accept: application/json\r\n");
+        verTreeUrl, L"GET", true, 128 * 1024, L"Accept: application/json\r\n", {},
+        {"github.com", "githubusercontent.com"});
     if (!verResp.ok || verResp.truncated || verResp.body.empty()) {
         return result;
     }
@@ -1115,7 +1119,8 @@ WingetManifestInfo ResolveWingetPkgManifest(
     const std::wstring rawUrl = Utf8ToWide(
         "https://raw.githubusercontent.com/microsoft/winget-pkgs/master/manifests/" +
         encPath + "/" + encVer + "/" + encYaml);
-    const HttpResponse yamlResp = WinHttpRequest(rawUrl, L"GET", true, 128 * 1024);
+    const HttpResponse yamlResp = WinHttpRequest(
+        rawUrl, L"GET", true, 128 * 1024, nullptr, {}, {"github.com", "githubusercontent.com"});
     if (!yamlResp.ok || yamlResp.truncated || yamlResp.body.empty()) {
         return result;
     }

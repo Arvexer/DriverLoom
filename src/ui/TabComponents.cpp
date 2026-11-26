@@ -156,7 +156,7 @@ void DriverLoomApp::RenderComponentsTab() {
     }
     ImGui::EndDisabled();
 
-    ImGui::SameLine();
+    SameLineWrapIfNeeded(mainW);
     ImGui::BeginDisabled(busy || (!useSelectedBatch && batchTargets.empty()));
     if (RenderActionButton(mainActLbl, ImVec2(mainW, 0.0f), !batchTargets.empty() || useSelectedBatch)) {
         if (useSelectedBatch) {
@@ -251,7 +251,13 @@ void DriverLoomApp::RenderComponentsTab() {
 
     const float rowPadX = std::round(14.0f * uiScale);
     const float rowPadY = std::round(11.0f * uiScale);
-    const float primaryW = CalcButtonWidth(hdm::Tr("Установить", "Встановити", "Install")) + 6.0f * uiScale;
+    const float primaryW =
+        std::max({
+            CalcButtonWidth(hdm::Tr("Установить", "Встановити", "Install")),
+            CalcButtonWidth(hdm::Tr("Обновить", "Оновити", "Update")),
+            CalcButtonWidth(hdm::Tr("Переуст.", "Перевст.", "Reinstall")),
+        }) +
+        6.0f * uiScale;
     const float siteW = CalcButtonWidth(hdm::Tr("Сайт", "Сайт", "Site")) + 2.0f * uiScale;
     const float openSiteW = primaryW + style.ItemSpacing.x + siteW;
     const float checkBoxReserve = g_isAdvancedMode ? (ImGui::GetFrameHeight() + style.ItemSpacing.x) : 0.0f;
@@ -309,8 +315,13 @@ void DriverLoomApp::RenderComponentsTab() {
         }
 
         const float innerW = ImGui::GetContentRegionAvail().x;
-        const float versionBlockW = std::round(146.0f * uiScale);
-        const float leftTextMaxW = std::max(140.0f, innerW - actionsBlockW - versionBlockW - std::round(16.0f * uiScale));
+        const float versionBlockW = std::min(
+            std::round(146.0f * uiScale),
+            std::max(std::round(88.0f * uiScale),
+                     (innerW - actionsBlockW - std::round(16.0f * uiScale)) * 0.28f));
+        const float leftTextMaxW = std::max(
+            100.0f * uiScale,
+            innerW - actionsBlockW - versionBlockW - std::round(16.0f * uiScale));
 
         // Left: Title + Status Pill (Line 1) and Plain Description (Line 2), vertically centered
         const std::string nameShown = hdm::TrDyn(item.name);
@@ -353,14 +364,14 @@ void DriverLoomApp::RenderComponentsTab() {
         {
             PushFontSafe(g_fontSecondaryHeader);
             ImGui::SetCursorPosY(line1TopY + std::max(0.0f, (line1H - titleH) * 0.5f));
-            const std::string shownTitle = EllipsizeUtf8(
-                nameShown, std::max(80.0f * uiScale, leftTextMaxW - badgeMaxW - titleGapX));
+            const float maxTitleCap = std::max(40.0f * uiScale, leftTextMaxW - badgeMaxW - titleGapX);
+            const std::string shownTitle = EllipsizeUtf8(nameShown, maxTitleCap);
             const float shownTitleW = ImGui::CalcTextSize(shownTitle.c_str()).x;
             ImGui::TextColored(CardHeaderTextColor(), "%s", shownTitle.c_str());
             PopFontSafe(g_fontSecondaryHeader);
 
             const float remainingBadgeW = std::max(
-                52.0f * uiScale,
+                24.0f * uiScale,
                 leftTextMaxW - shownTitleW - titleGapX);
             ImGui::SameLine(0.0f, titleGapX);
             PushFontSafe(g_fontSmall);
@@ -418,7 +429,11 @@ void DriverLoomApp::RenderComponentsTab() {
         const std::string latVer = hdm::TrDyn(item.latestVersion);
         if (item.installed && item.updateAvailable && !latVer.empty()) {
             ImGui::TextColored(MutedTextColor(), "%s", EllipsizeUtf8(instVer.empty() ? "—" : instVer, versionBlockW).c_str());
-            ImGui::TextColored(WarningTextColor(), "-> %s", EllipsizeUtf8(latVer, versionBlockW - 22.0f).c_str());
+            const float arrowW = ImGui::CalcTextSize("-> ").x;
+            ImGui::TextColored(
+                WarningTextColor(),
+                "-> %s",
+                EllipsizeUtf8(latVer, std::max(24.0f * uiScale, versionBlockW - arrowW)).c_str());
         } else if (!item.installed && !latVer.empty()) {
             ImGui::TextColored(MutedTextColor(), "%s", hdm::Tr("Версия:", "Версія:", "Version:"));
             ImGui::TextUnformatted(EllipsizeUtf8(latVer, versionBlockW).c_str());

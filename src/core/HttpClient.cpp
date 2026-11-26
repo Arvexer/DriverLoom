@@ -365,21 +365,9 @@ HttpResponse WinHttpRequest(
     bool followRedirects,
     size_t maxBytes,
     const wchar_t* extraHeaders,
-    std::string_view postBody) {
+    std::string_view postBody,
+    const std::vector<std::string_view>& allowedHostSuffixes) {
     HttpResponse res;
-    URL_COMPONENTS urlComp{};
-    urlComp.dwStructSize = sizeof(urlComp);
-    wchar_t hostBuf[256]{};
-    wchar_t pathBuf[2048]{};
-    urlComp.lpszHostName = hostBuf;
-    urlComp.dwHostNameLength = static_cast<DWORD>(std::size(hostBuf));
-    urlComp.lpszUrlPath = pathBuf;
-    urlComp.dwUrlPathLength = static_cast<DWORD>(std::size(pathBuf));
-
-    if (!WinHttpCrackUrl(url.c_str(), static_cast<DWORD>(url.size()), 0, &urlComp) ||
-        urlComp.nScheme != INTERNET_SCHEME_HTTPS) {
-        return res;
-    }
 
     WinHttpGuard session(WinHttpOpen(
         L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) DriverLoom/1.0",
@@ -393,55 +381,109 @@ HttpResponse WinHttpRequest(
     EnforceTls12Or13(session.Get());
     WinHttpSetTimeouts(session.Get(), 3000, 3000, 3500, 6000);
 
-    WinHttpGuard connect(WinHttpConnect(session.Get(), hostBuf, urlComp.nPort, 0));
-    if (!connect.IsValid()) {
-        return res;
-    }
+    const bool manualRedirects = !allowedHostSuffixes.empty();
+    std::wstring currentUrl = url;
+    std::wstring currentMethod = method != nullptr ? method : L"GET";
+    std::string_view currentBody = postBody;
 
-    TrackedWinHttpRequestGuard request(WinHttpOpenRequest(
-        connect.Get(),
-        method,
-        pathBuf,
-        nullptr,
-        WINHTTP_NO_REFERER,
-        WINHTTP_DEFAULT_ACCEPT_TYPES,
-        WINHTTP_FLAG_SECURE));
-    if (!request.IsValid()) {
-        return res;
-    }
-
-    DWORD redirPolicy = followRedirects
-                            ? WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP
-                            : WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
-    WinHttpSetOption(request.Get(), WINHTTP_OPTION_REDIRECT_POLICY, &redirPolicy, sizeof(redirPolicy));
-
-    if (extraHeaders != nullptr && extraHeaders[0] != L'\0') {
-        WinHttpAddRequestHeaders(
-            request.Get(),
-            extraHeaders,
-            static_cast<DWORD>(-1),
-            WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
-    }
-
-    LPVOID bodyPtr = postBody.empty()
-                         ? WINHTTP_NO_REQUEST_DATA
-                         : const_cast<char*>(postBody.data());
-    const DWORD bodyLen = static_cast<DWORD>(postBody.size());
-    if (!WinHttpSendRequest(request.Get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0,
-                            bodyPtr, bodyLen, bodyLen, 0) ||
-        !WinHttpReceiveResponse(request.Get(), nullptr)) {
-        return res;
-    }
-
+    WinHttpGuard connect;
+    TrackedWinHttpRequestGuard request;
     DWORD status = 0;
-    DWORD statusLen = sizeof(status);
-    WinHttpQueryHeaders(
-        request.Get(),
-        WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-        WINHTTP_HEADER_NAME_BY_INDEX,
-        &status,
-        &statusLen,
-        WINHTTP_NO_HEADER_INDEX);
+
+    constexpr int kMaxRedirects = 8;
+    const int maxHops = (followRedirects && manualRedirects) ? kMaxRedirects : 0;
+    for (int hop = 0; hop <= maxHops; ++hop) {
+        std::wstring host;
+        std::wstring path;
+        INTERNET_PORT port = 0;
+        if (!CrackHttpsUrl(currentUrl, host, path, port)) {
+            return res;
+        }
+        if (manualRedirects) {
+            const std::string hostLower = ToLowerAscii(WideToUtf8(host));
+            if (!MatchesAllowedHostSuffix(hostLower, allowedHostSuffixes)) {
+                return res;
+            }
+        }
+
+        request.Reset();
+        connect.Reset(WinHttpConnect(session.Get(), host.c_str(), port, 0));
+        if (!connect.IsValid()) {
+            return res;
+        }
+
+        request.Reset(WinHttpOpenRequest(
+            connect.Get(),
+            currentMethod.c_str(),
+            path.c_str(),
+            nullptr,
+            WINHTTP_NO_REFERER,
+            WINHTTP_DEFAULT_ACCEPT_TYPES,
+            WINHTTP_FLAG_SECURE));
+        if (!request.IsValid()) {
+            return res;
+        }
+
+        DWORD redirPolicy = (followRedirects && !manualRedirects)
+                                ? WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP
+                                : WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        WinHttpSetOption(request.Get(), WINHTTP_OPTION_REDIRECT_POLICY, &redirPolicy, sizeof(redirPolicy));
+
+        if (extraHeaders != nullptr && extraHeaders[0] != L'\0') {
+            WinHttpAddRequestHeaders(
+                request.Get(),
+                extraHeaders,
+                static_cast<DWORD>(-1),
+                WINHTTP_ADDREQ_FLAG_ADD | WINHTTP_ADDREQ_FLAG_REPLACE);
+        }
+
+        LPVOID bodyPtr = currentBody.empty()
+                             ? WINHTTP_NO_REQUEST_DATA
+                             : const_cast<char*>(currentBody.data());
+        const DWORD bodyLen = static_cast<DWORD>(currentBody.size());
+        if (!WinHttpSendRequest(request.Get(), WINHTTP_NO_ADDITIONAL_HEADERS, 0,
+                                bodyPtr, bodyLen, bodyLen, 0) ||
+            !WinHttpReceiveResponse(request.Get(), nullptr)) {
+            return res;
+        }
+
+        status = 0;
+        DWORD statusLen = sizeof(status);
+        WinHttpQueryHeaders(
+            request.Get(),
+            WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+            WINHTTP_HEADER_NAME_BY_INDEX,
+            &status,
+            &statusLen,
+            WINHTTP_NO_HEADER_INDEX);
+
+        if (followRedirects && manualRedirects &&
+            (status == 301 || status == 302 || status == 303 || status == 307 || status == 308)) {
+            if (hop == maxHops) {
+                return res;
+            }
+            wchar_t locBuf[2048]{};
+            DWORD locBytes = sizeof(locBuf);
+            if (!WinHttpQueryHeaders(
+                    request.Get(),
+                    WINHTTP_QUERY_LOCATION,
+                    WINHTTP_HEADER_NAME_BY_INDEX,
+                    locBuf,
+                    &locBytes,
+                    WINHTTP_NO_HEADER_INDEX) ||
+                locBuf[0] == L'\0') {
+                return res;
+            }
+            currentUrl = ResolveRedirectTarget(host, port, locBuf);
+            if ((status == 301 || status == 302 || status == 303) && currentMethod == L"POST") {
+                currentMethod = L"GET";
+                currentBody = {};
+            }
+            continue;
+        }
+        break;
+    }
+
     res.statusCode = status;
     res.ok = followRedirects ? (status >= 200 && status < 300) : (status >= 200 && status < 400);
 
@@ -459,7 +501,7 @@ HttpResponse WinHttpRequest(
         }
     }
 
-    if (std::wstring_view(method) != L"HEAD" && res.ok) {
+    if (currentMethod != L"HEAD" && res.ok) {
         DWORD avail = 0;
         for (;;) {
             if (!WinHttpQueryDataAvailable(request.Get(), &avail)) {

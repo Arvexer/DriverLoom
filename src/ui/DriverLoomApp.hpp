@@ -211,6 +211,7 @@ private:
     bool logAutoScroll_{true};
     int pendingThemeChange_{-1}; // -1 = none, 0 = dark, 1 = light
     TaskbarOverlayState lastTaskbarOverlay_{TaskbarOverlayState::None};
+    hdm::Lang lastTaskbarOverlayLang_{hdm::Lang::Ru};
 
     // About dialog & GitHub Releases update checker
     bool openAboutPopupNextFrame_{false};

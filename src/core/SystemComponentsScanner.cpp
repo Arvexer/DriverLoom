@@ -791,7 +791,10 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                 L"https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/releases-index.json",
                 L"GET",
                 true,
-                256 * 1024);
+                256 * 1024,
+                nullptr,
+                {},
+                {"dotnetcli.blob.core.windows.net", "microsoft.com", "azureedge.net"});
             const auto markUnavailable = [&](const std::string& compId) {
                 updateItem(compId, [](SystemComponentItem& item) {
                     item.latestVersion = "Недоступно";
@@ -869,7 +872,10 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                     L"https://edgeupdates.microsoft.com/api/products?view=enterprise",
                     L"GET",
                     true,
-                    2 * 1024 * 1024);
+                    2 * 1024 * 1024,
+                    nullptr,
+                    {},
+                    {"edgeupdates.microsoft.com", "microsoft.com"});
                 std::string latestWv2;
                 if (resp.ok && !resp.truncated && !resp.body.empty()) {
                     const size_t stablePos = resp.body.find("\"Product\":\"Stable\"");
@@ -889,7 +895,13 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
 
             {
                 const HttpResponse resp = WinHttpRequest(
-                    L"https://vulkan.lunarg.com/sdk/files", L"GET", true, 2 * 1024 * 1024);
+                    L"https://vulkan.lunarg.com/sdk/files",
+                    L"GET",
+                    true,
+                    2 * 1024 * 1024,
+                    nullptr,
+                    {},
+                    {"lunarg.com"});
                 const auto [vkLatest, vkUrl] =
                     (resp.ok && !resp.truncated)
                         ? ParseLatestVulkanRuntimeFromJson(resp.body)
@@ -914,7 +926,13 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
             ScopedHttpRegistry onlineScope(onlineHttpRegistry_.get());
             if (hasItem("sw_steelseries")) {
                 const HttpResponse resp = WinHttpRequest(
-                    L"https://steelseries.com/gg/downloads/gg/latest/windows", L"HEAD", false);
+                    L"https://steelseries.com/gg/downloads/gg/latest/windows",
+                    L"HEAD",
+                    false,
+                    256 * 1024,
+                    nullptr,
+                    {},
+                    {"steelseries.com", "steelseriescdn.com"});
                 std::string ver;
                 std::string url =
                     IsAllowedHttpsHost(resp.locationHeader, {"steelseries.com", "steelseriescdn.com"})
@@ -959,7 +977,13 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
 
             if (hasItem("sw_razer")) {
                 const HttpResponse rzHead = WinHttpRequest(
-                    L"https://rzr.to/synapse-4-pc-download", L"HEAD", true);
+                    L"https://rzr.to/synapse-4-pc-download",
+                    L"HEAD",
+                    true,
+                    256 * 1024,
+                    nullptr,
+                    {},
+                    {"rzr.to", "razer.com", "razerzone.com"});
                 updateItem("sw_razer", [&](SystemComponentItem& item) {
                     item.onlineChecked = true;
                     item.latestVersion = rzHead.ok ? "Synapse 4 (актуальный)" : "Сайт Razer";
@@ -971,7 +995,10 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                     L"https://gfwsl.geforce.com/services_toolkit/services/com/nvidia/services/AjaxDriverService.php?func=DriverManualLookup&psid=127&pfid=985&osID=57&languageCode=1033&isWHQL=1&dch=1&upcrd=0&numberOfResults=1",
                     L"GET",
                     true,
-                    64 * 1024);
+                    64 * 1024,
+                    nullptr,
+                    {},
+                    {"nvidia.com", "geforce.com"});
                 if (resp.ok && !resp.truncated && !resp.body.empty()) {
                     const std::string nvVer = ExtractJsonStringField(resp.body, "Version");
                     const std::string nvUrl = ExtractJsonStringField(resp.body, "DownloadURL");
@@ -995,7 +1022,10 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                     L"https://www.amd.com/en/support/download/drivers.html",
                     L"GET",
                     true,
-                    512 * 1024);
+                    512 * 1024,
+                    nullptr,
+                    {},
+                    {"amd.com"});
                 const auto [amdVer, amdUrl] =
                     (resp.ok && !resp.truncated) ? ParseAmdAdrenalinFromHtml(resp.body)
                                                  : std::pair<std::string, std::string>{};
@@ -1019,7 +1049,10 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                     L"https://www.amd.com/en/support/downloads/drivers.html/chipsets/am4/b550.html",
                     L"GET",
                     true,
-                    512 * 1024);
+                    512 * 1024,
+                    nullptr,
+                    {},
+                    {"amd.com"});
                 const auto [chipVer, chipUrl] =
                     (resp.ok && !resp.truncated) ? ParseAmdChipsetFromHtml(resp.body)
                                                  : std::pair<std::string, std::string>{};

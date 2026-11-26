@@ -1,10 +1,12 @@
 #include "common/AppCommon.hpp"
+#include "common/Localization.hpp"
 #include "core/HttpClient.hpp"
 #include "core/OnlineCatalogClient.hpp"
 #include "core/PackageSecurity.hpp"
 
 #include <setupapi.h>
 
+#include <cstdint>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -351,6 +353,167 @@ void TestTempAndMiscHelpers() {
           "HttpRequestRegistry: Reset after Shutdown stays disabled");
 }
 
+void TestLocalizationTrDyn() {
+    const hdm::Lang prevLang = hdm::GetLang();
+    hdm::SetLang(hdm::Lang::En);
+    Check(hdm::TrDyn("Проверка системных файлов (SFC /scannow)...") ==
+              "Checking system files (SFC /scannow)...",
+          "TrDyn(EN): SFC phase");
+    Check(hdm::TrDyn("Установка завершена (требуется перезагрузка).") ==
+              "Installation complete (Reboot required).",
+          "TrDyn(EN): local inf complete with period");
+    Check(hdm::TrDyn("Экспорт [1/5]: oem1.inf") == "Exporting [1/5]: oem1.inf",
+          "TrDyn(EN): export progress");
+    Check(hdm::TrDyn("Установка Vulkan Runtime...") == "Installing Vulkan Runtime...",
+          "TrDyn(EN): component install prefix");
+    Check(hdm::TrDyn("Установка драйвера Realtek...") == "Installing driver Realtek...",
+          "TrDyn(EN): driver install prefix takes priority");
+    Check(hdm::TrDyn("Пакетная установка завершена: успешно — 2 из 3") ==
+              "Batch installation complete: succeeded — 2 of 3",
+          "TrDyn(EN): batch summary");
+    Check(hdm::TrDyn("Найдено обновлений в Windows Update: 4") ==
+              "Windows Update updates found: 4",
+          "TrDyn(EN): WU found count");
+    Check(hdm::TrDyn("Ошибка сетевого поиска Windows Update") ==
+              "Windows Update online search failed",
+          "TrDyn(EN): WU online search failed");
+
+    hdm::SetLang(hdm::Lang::Uk);
+    Check(hdm::TrDyn("Восстановление образа Windows (DISM /RestoreHealth)...") ==
+              "Відновлення образу Windows (DISM /RestoreHealth)...",
+          "TrDyn(UK): DISM RestoreHealth phase");
+    Check(hdm::TrDyn("Установка завершена (требуется перезагрузка).") ==
+              "Встановлення завершено (потрібне перезавантаження).",
+          "TrDyn(UK): local inf complete with period");
+    hdm::SetLang(prevLang);
+}
+
+uint32_t ComputeCrc32(const std::string& data) {
+    uint32_t crc = 0xFFFFFFFFu;
+    for (unsigned char b : data) {
+        crc ^= b;
+        for (int k = 0; k < 8; ++k) {
+            crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
+        }
+    }
+    return ~crc;
+}
+
+std::vector<uint8_t> BuildMinimalStoredZip(const std::string& fileName, const std::string& content) {
+    auto push16 = [](std::vector<uint8_t>& out, uint16_t v) {
+        out.push_back(static_cast<uint8_t>(v & 0xFFu));
+        out.push_back(static_cast<uint8_t>((v >> 8) & 0xFFu));
+    };
+    auto push32 = [](std::vector<uint8_t>& out, uint32_t v) {
+        out.push_back(static_cast<uint8_t>(v & 0xFFu));
+        out.push_back(static_cast<uint8_t>((v >> 8) & 0xFFu));
+        out.push_back(static_cast<uint8_t>((v >> 16) & 0xFFu));
+        out.push_back(static_cast<uint8_t>((v >> 24) & 0xFFu));
+    };
+
+    const uint32_t crc = ComputeCrc32(content);
+    const uint32_t sz = static_cast<uint32_t>(content.size());
+    const uint16_t nameLen = static_cast<uint16_t>(fileName.size());
+
+    std::vector<uint8_t> zip;
+    // Local file header
+    push32(zip, 0x04034B50u);
+    push16(zip, 20);
+    push16(zip, 0);
+    push16(zip, 0); // stored
+    push16(zip, 0);
+    push16(zip, 0);
+    push32(zip, crc);
+    push32(zip, sz);
+    push32(zip, sz);
+    push16(zip, nameLen);
+    push16(zip, 0);
+    zip.insert(zip.end(), fileName.begin(), fileName.end());
+    zip.insert(zip.end(), content.begin(), content.end());
+
+    const uint32_t cdOffset = static_cast<uint32_t>(zip.size());
+    // Central directory header
+    push32(zip, 0x02014B50u);
+    push16(zip, 20);
+    push16(zip, 20);
+    push16(zip, 0);
+    push16(zip, 0);
+    push16(zip, 0);
+    push16(zip, 0);
+    push32(zip, crc);
+    push32(zip, sz);
+    push32(zip, sz);
+    push16(zip, nameLen);
+    push16(zip, 0);
+    push16(zip, 0);
+    push16(zip, 0);
+    push16(zip, 0);
+    push32(zip, 0);
+    push32(zip, 0);
+    zip.insert(zip.end(), fileName.begin(), fileName.end());
+
+    const uint32_t cdSize = static_cast<uint32_t>(zip.size()) - cdOffset;
+    // End of central directory
+    push32(zip, 0x06054B50u);
+    push16(zip, 0);
+    push16(zip, 0);
+    push16(zip, 1);
+    push16(zip, 1);
+    push32(zip, cdSize);
+    push32(zip, cdOffset);
+    push16(zip, 0);
+    return zip;
+}
+
+void TestZipAndDirectorySecurity() {
+    std::filesystem::path dir;
+    std::string err;
+    Check(hdm::CreateUniqueTempWorkDir(dir, &err), "ZipSecurity: CreateUniqueTempWorkDir", err);
+    if (dir.empty()) {
+        return;
+    }
+    hdm::TempWorkDirGuard guard;
+    guard.Set(dir);
+
+    const std::filesystem::path zipFile = dir / L"sample.zip";
+    const std::string payload = "DriverLoomZipOk";
+    const std::vector<uint8_t> zipBytes = BuildMinimalStoredZip("hello.txt", payload);
+    {
+        std::ofstream ofs(zipFile, std::ios::binary);
+        ofs.write(reinterpret_cast<const char*>(zipBytes.data()),
+                  static_cast<std::streamsize>(zipBytes.size()));
+    }
+    Check(hdm::HasZipMagicHeader(zipFile), "ZipSecurity: HasZipMagicHeader true on valid zip");
+
+    const std::filesystem::path notZip = dir / L"plain.txt";
+    {
+        std::ofstream ofs(notZip, std::ios::binary);
+        ofs.write("not a zip", 9);
+    }
+    Check(!hdm::HasZipMagicHeader(notZip), "ZipSecurity: HasZipMagicHeader false on text file");
+
+    const std::filesystem::path extractDir = dir / L"out";
+    Check(hdm::ExtractZipViaShellCom(zipFile, extractDir, nullptr),
+          "ZipSecurity: ExtractZipViaShellCom extracts valid stored zip");
+    {
+        std::ifstream ifs(extractDir / L"hello.txt", std::ios::binary);
+        std::string extracted((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+        Check(extracted == payload, "ZipSecurity: extracted file content matches", extracted);
+    }
+
+    const std::filesystem::path unsignedDll = extractDir / L"evil.dll";
+    {
+        std::ofstream ofs(unsignedDll, std::ios::binary);
+        ofs.write("MZ_FAKE_UNSIGNED_DLL", 20);
+    }
+    std::string sigReason;
+    std::vector<hdm::HandleGuard> locks;
+    Check(!hdm::VerifyExtractedDirectoryBinaries(
+              extractDir, {"Microsoft Corporation"}, &sigReason, &locks),
+          "ZipSecurity: unsigned evil.dll rejected by VerifyExtractedDirectoryBinaries",
+          sigReason);
+}
+
 } // namespace
 
 int main() {
@@ -364,6 +527,8 @@ int main() {
     TestHttpsHostAllowlist();
     TestCabExtractCallback();
     TestTempAndMiscHelpers();
+    TestLocalizationTrDyn();
+    TestZipAndDirectorySecurity();
 
     std::cout << "\nSummary: " << g_passed << " passed, " << g_failed << " failed.\n";
     return g_failed == 0 ? 0 : 1;

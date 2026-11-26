@@ -671,7 +671,7 @@ std::string EllipsizeUtf8(const std::string& text, float maxWidth) {
     const char* ellipsis = "...";
     const float ellipsisW = ImGui::CalcTextSize(ellipsis).x;
     if (maxWidth <= ellipsisW) {
-        return ellipsis;
+        return {};
     }
 
     size_t len = text.size();
@@ -882,12 +882,15 @@ void RenderSecondaryCardHeader(const char* title, const char* rightMeta) {
 
     float rightReserve = 0.0f;
     if (rightMeta != nullptr && rightMeta[0] != '\0') {
-        const ImVec2 metaSize = ImGui::CalcTextSize(rightMeta);
-        rightReserve = metaSize.x + std::round(10.0f * uiScale);
-        dl->AddText(
-            ImVec2(pMax.x - metaSize.x, pMin.y + (headerH - textH) * 0.5f),
-            ImGui::ColorConvertFloat4ToU32(MutedTextColor()),
-            rightMeta);
+        const std::string shownMeta = EllipsizeUtf8(rightMeta, availW * 0.55f);
+        if (!shownMeta.empty()) {
+            const ImVec2 metaSize = ImGui::CalcTextSize(shownMeta.c_str());
+            rightReserve = metaSize.x + std::round(10.0f * uiScale);
+            dl->AddText(
+                ImVec2(pMax.x - metaSize.x, pMin.y + (headerH - textH) * 0.5f),
+                ImGui::ColorConvertFloat4ToU32(MutedTextColor()),
+                shownMeta.c_str());
+        }
     }
 
     const float titleOffset = barW + std::round(8.0f * uiScale);

@@ -66,9 +66,11 @@ void DriverLoomApp::RenderOverviewTab() {
                 "Виконується встановлення оновлень...",
                 "Installing updates...");
             const std::string phase =
-                componentsScanner_.IsInstalling()
-                    ? hdm::TrDyn(componentsScanner_.PhaseMessage())
-                    : hdm::TrDyn(wuManager_.PhaseMessage());
+                localInstaller_.IsInstalling()
+                    ? hdm::TrDyn(localInstaller_.StatusMessage())
+                    : (componentsScanner_.IsInstalling()
+                           ? hdm::TrDyn(componentsScanner_.PhaseMessage())
+                           : hdm::TrDyn(wuManager_.PhaseMessage()));
             std::snprintf(
                 heroSub,
                 sizeof(heroSub),
@@ -773,20 +775,20 @@ void DriverLoomApp::RenderOverviewTab() {
         if (!boardName.empty()) {
             ImGui::TextDisabled("%s", hdm::Tr("Материнская плата:", "Материнська плата:", "Motherboard:"));
             ImGui::SameLine();
-            ImGui::TextUnformatted(boardName.c_str());
+            ImGui::TextWrapped("%s", boardName.c_str());
         }
         for (const auto& d : devicesCache_) {
             if (d.gpuVramBytes >= (64ull * 1024ull * 1024ull)) {
                 ImGui::TextDisabled("%s", hdm::Tr("Видеокарта:", "Відеокарта:", "Graphics Card:"));
                 ImGui::SameLine();
-                ImGui::Text("%s (%s)", d.name.c_str(), hdm::FormatBytes(d.gpuVramBytes).c_str());
+                ImGui::TextWrapped("%s (%s)", d.name.c_str(), hdm::FormatBytes(d.gpuVramBytes).c_str());
                 break;
             }
         }
         if (!diagCache_.activePowerSchemeName.empty()) {
             ImGui::TextDisabled("%s", hdm::Tr("Режим питания:", "Режим живлення:", "Power Plan:"));
             ImGui::SameLine();
-            ImGui::TextUnformatted(hdm::TrDyn(diagCache_.activePowerSchemeName).c_str());
+            ImGui::TextWrapped("%s", hdm::TrDyn(diagCache_.activePowerSchemeName).c_str());
         }
 
         ImGui::EndChild();

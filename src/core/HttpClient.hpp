@@ -67,7 +67,8 @@ HttpResponse WinHttpRequest(
     bool followRedirects = true,
     size_t maxBytes = 256 * 1024,
     const wchar_t* extraHeaders = nullptr,
-    std::string_view postBody = {});
+    std::string_view postBody = {},
+    const std::vector<std::string_view>& allowedHostSuffixes = {});
 
 /// Streams an HTTPS payload into a newly created destination file (2 GiB cap, cancellable).
 bool DownloadFileViaWinHttp(

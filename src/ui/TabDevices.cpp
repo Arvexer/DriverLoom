@@ -168,7 +168,7 @@ void DriverLoomApp::RenderDevicesTab() {
     }
 
     RenderSummaryInfoBadge(segments, 3);
-    ImGui::SameLine();
+    SameLineWrapIfNeeded(g_isAdvancedMode ? pnpW : scanW);
     if (g_isAdvancedMode) {
         ImGui::BeginDisabled(devBusy);
         if (RenderSecondaryButton(hdm::Tr("Обновить PnP###DevPnp", "Оновити PnP###DevPnp", "Rescan PnP###DevPnp"))) {
@@ -191,7 +191,7 @@ void DriverLoomApp::RenderDevicesTab() {
                     "Rescan the PnP bus (CM_Reenumerate_DevNode) to detect connected hardware."));
         }
         ImGui::EndDisabled();
-        ImGui::SameLine();
+        SameLineWrapIfNeeded(scanW);
     }
     ImGui::BeginDisabled(devBusy);
     if (RenderSecondaryButton(devScanLbl, ImVec2(scanW, 0.0f))) {
@@ -264,31 +264,42 @@ void DriverLoomApp::RenderDevicesTab() {
     const ImGuiStyle& devStyle = ImGui::GetStyle();
     const float cardPadY = std::round(10.0f * uiScale);
     const float availW = ImGui::GetContentRegionAvail().x;
-    float estBtnRowW = 0.0f;
+    const float innerCardW = std::max(120.0f, availW - std::round(28.0f * uiScale));
+    int btnRows = 1;
     if (selectedDevBefore != nullptr) {
         const float sp = devStyle.ItemSpacing.x;
+        std::vector<float> btnWidths;
         const char* catTxt = g_isAdvancedMode
             ? hdm::Tr("Установить из Catalog (WHQL)", "Встановити з Catalog (WHQL)", "Install from Catalog (WHQL)")
             : hdm::Tr("Установить официальный драйвер", "Встановити офіційний драйвер", "Install Official Driver");
-        estBtnRowW += CalcButtonWidth(catTxt);
+        btnWidths.push_back(CalcButtonWidth(catTxt));
         if (!g_isAdvancedMode && selectedDevBefore->problemCode == CM_PROB_DISABLED) {
-            estBtnRowW += sp + CalcButtonWidth(hdm::Tr("Включить устройство", "Увімкнути пристрій", "Enable Device"));
+            btnWidths.push_back(CalcButtonWidth(hdm::Tr("Включить устройство", "Увімкнути пристрій", "Enable Device")));
         }
         if (g_isAdvancedMode) {
-            estBtnRowW += sp + CalcButtonWidth(hdm::Tr("Перезапустить", "Перезапустити", "Restart"));
-            estBtnRowW += sp + CalcButtonWidth(hdm::Tr("Откатить", "Відкотити", "Roll Back"));
-            estBtnRowW += sp + CalcButtonWidth(hdm::Tr("HWID", "HWID", "Copy HWID"));
-            estBtnRowW += sp + CalcButtonWidth(hdm::Tr("Свойства", "Властивості", "Properties"));
+            btnWidths.push_back(CalcButtonWidth(hdm::Tr("Перезапустить", "Перезапустити", "Restart")));
+            btnWidths.push_back(CalcButtonWidth(hdm::Tr("Откатить", "Відкотити", "Roll Back")));
+            btnWidths.push_back(CalcButtonWidth(hdm::Tr("HWID", "HWID", "Copy HWID")));
+            btnWidths.push_back(CalcButtonWidth(hdm::Tr("Свойства", "Властивості", "Properties")));
             if (IsOemInfName(selectedDevBefore->infName)) {
-                estBtnRowW += sp + CalcButtonWidth(hdm::Tr("В DriverStore", "У DriverStore", "DriverStore"));
+                btnWidths.push_back(CalcButtonWidth(hdm::Tr("В DriverStore", "У DriverStore", "DriverStore")));
             }
         } else {
-            estBtnRowW += sp + CalcButtonWidth(hdm::Tr("Найти в интернете", "Знайти в інтернеті", "Search Online"));
+            btnWidths.push_back(CalcButtonWidth(hdm::Tr("Найти в интернете", "Знайти в інтернеті", "Search Online")));
         }
-        estBtnRowW += sp + CalcButtonWidth(hdm::Tr("Закрыть", "Закрити", "Close")) + 4.0f * uiScale;
+        btnWidths.push_back(CalcButtonWidth(hdm::Tr("Закрыть", "Закрити", "Close")));
+
+        float curX = 0.0f;
+        for (float bw : btnWidths) {
+            if (curX > 0.0f && curX + sp + bw > innerCardW) {
+                ++btnRows;
+                curX = bw;
+            } else {
+                curX += (curX > 0.0f ? sp : 0.0f) + bw;
+            }
+        }
     }
-    const float innerCardW = std::max(120.0f, availW - std::round(28.0f * uiScale));
-    const float extraButtonsRow = (estBtnRowW > innerCardW) ? ImGui::GetFrameHeightWithSpacing() : 0.0f;
+    const float extraButtonsRow = static_cast<float>(btnRows - 1) * ImGui::GetFrameHeightWithSpacing();
     const float detailsH =
         (selectedDevBefore != nullptr)
             ? (ImGui::GetTextLineHeightWithSpacing() * 2.0f + ImGui::GetFrameHeight() +
@@ -552,6 +563,7 @@ void DriverLoomApp::RenderDevicesTab() {
     }
 
     // Selected Device Details Card
+    if (detailsH > 0.0f) {
     if (const hdm::DeviceInfo* selectedDev = FindSelectedDevice()) {
         ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(std::round(14.0f * uiScale), cardPadY));
         ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
@@ -565,7 +577,10 @@ void DriverLoomApp::RenderDevicesTab() {
         const float titleStartY = ImGui::GetCursorPosY();
         PushFontSafe(g_fontSecondaryHeader);
         const float hdrH = ImGui::GetTextLineHeight();
-        ImGui::TextColored(CardHeaderTextColor(), "%s", EllipsizeUtf8(hdm::TrDyn(selectedDev->name), 420.0f * uiScale).c_str());
+        const float maxDevNameW = std::min(
+            420.0f * uiScale,
+            std::max(100.0f * uiScale, ImGui::GetContentRegionAvail().x * 0.52f));
+        ImGui::TextColored(CardHeaderTextColor(), "%s", EllipsizeUtf8(hdm::TrDyn(selectedDev->name), maxDevNameW).c_str());
         PopFontSafe(g_fontSecondaryHeader);
 
         const float regH = ImGui::GetTextLineHeight();
@@ -753,5 +768,6 @@ void DriverLoomApp::RenderDevicesTab() {
 
         ImGui::EndChild();
         ImGui::PopStyleVar();
+    }
     }
 }

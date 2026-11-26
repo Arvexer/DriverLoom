@@ -397,8 +397,11 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     }
     case WM_GETMINMAXINFO: {
         auto* mmi = reinterpret_cast<MINMAXINFO*>(lParam);
-        const float dpi = (g_dpiScale > 0.5f ? g_dpiScale : 1.0f);
-        const float minScale = std::min(dpi, EffectiveUiScale());
+        const float activeDpi =
+            g_pendingDpiReload ? g_pendingDpiScale : (g_dpiScale > 0.5f ? g_dpiScale : 1.0f);
+        const float effScale =
+            activeDpi * (static_cast<float>(std::clamp(g_uiScalePercent, 80, 175)) / 100.0f);
+        const float minScale = std::min(activeDpi, effScale);
         LONG minW = static_cast<LONG>(std::round(980.0f * minScale));
         LONG minH = static_cast<LONG>(std::round(640.0f * minScale));
         HMONITOR mon = MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST);
@@ -442,11 +445,15 @@ void RenderSingleFrame(
     g_isRenderingFrame = true;
 
     if (g_resizeWidth != 0 && g_resizeHeight != 0) {
+        g_pd3dDeviceContext->OMSetRenderTargets(0, nullptr, nullptr);
         CleanupRenderTarget();
-        g_pSwapChain->ResizeBuffers(0, g_resizeWidth, g_resizeHeight, DXGI_FORMAT_UNKNOWN, 0);
+        const HRESULT hrResize =
+            g_pSwapChain->ResizeBuffers(0, g_resizeWidth, g_resizeHeight, DXGI_FORMAT_UNKNOWN, 0);
         g_resizeWidth = 0;
         g_resizeHeight = 0;
-        CreateRenderTarget();
+        if (SUCCEEDED(hrResize)) {
+            CreateRenderTarget();
+        }
     }
     if (g_mainRenderTargetView == nullptr) {
         g_isRenderingFrame = false;
