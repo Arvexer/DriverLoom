@@ -1,14 +1,13 @@
 #include "core/PackageSecurity.hpp"
 #include "core/OnlineCatalogClient.hpp"
+#include "core/SafeZipExtractor.hpp"
 
 #include <bcrypt.h>
 #include <knownfolders.h>
 #include <objbase.h>
-#include <oleauto.h>
 #include <sddl.h>
 #include <setupapi.h>
 #include <shlobj.h>
-#include <shldisp.h>
 #include <softpub.h>
 #include <wincrypt.h>
 #include <wintrust.h>
@@ -579,219 +578,6 @@ bool HasMsiMagicHeader(const std::filesystem::path& filePath) {
     return ifs.gcount() == 8 &&
            hdr[0] == 0xD0 && hdr[1] == 0xCF && hdr[2] == 0x11 && hdr[3] == 0xE0 &&
            hdr[4] == 0xA1 && hdr[5] == 0xB1 && hdr[6] == 0x1A && hdr[7] == 0xE1;
-}
-
-bool ExtractZipViaShellCom(
-    const std::filesystem::path& zipPath,
-    const std::filesystem::path& destDir,
-    const std::atomic<bool>* cancelFlag) {
-    constexpr size_t kMaxArchiveFiles = 1024;
-    constexpr uint64_t kMaxExtractedBytes = 512ULL * 1024ULL * 1024ULL;
-
-    std::error_code ec;
-    std::filesystem::create_directories(destDir, ec);
-    if (ec) {
-        return false;
-    }
-
-    CoInitGuard comInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    if (!comInit.Succeeded()) {
-        return false;
-    }
-
-    ComPtr<IShellDispatch> shell;
-    HRESULT hr = CoCreateInstance(
-        CLSID_Shell,
-        nullptr,
-        CLSCTX_INPROC_SERVER,
-        IID_IShellDispatch,
-        reinterpret_cast<void**>(shell.Put()));
-    if (FAILED(hr) || !shell) {
-        return false;
-    }
-
-    BstrGuard zipBstr(zipPath.wstring().c_str());
-    BstrGuard dstBstr(destDir.wstring().c_str());
-
-    VARIANT vZip;
-    VariantInit(&vZip);
-    vZip.vt = VT_BSTR;
-    vZip.bstrVal = zipBstr.Get();
-
-    VARIANT vDst;
-    VariantInit(&vDst);
-    vDst.vt = VT_BSTR;
-    vDst.bstrVal = dstBstr.Get();
-
-    ComPtr<Folder> zipFolder;
-    ComPtr<Folder> dstFolder;
-    if (FAILED(shell->NameSpace(vZip, zipFolder.Put())) || !zipFolder ||
-        FAILED(shell->NameSpace(vDst, dstFolder.Put())) || !dstFolder) {
-        return false;
-    }
-
-    auto validateZipFolderEntries = [&](auto& self,
-                                      Folder* folder,
-                                      size_t& totalEntries,
-                                      size_t maxEntries,
-                                      int depth) -> bool {
-        if (folder == nullptr || depth > 16) {
-            return false;
-        }
-        ComPtr<FolderItems> subItems;
-        if (FAILED(folder->Items(subItems.Put())) || !subItems) {
-            return false;
-        }
-        long count = 0;
-        if (FAILED(subItems->get_Count(&count)) || count < 0) {
-            return false;
-        }
-        if (depth == 0 && count == 0) {
-            return false;
-        }
-        for (long idx = 0; idx < count; ++idx) {
-            if (totalEntries >= maxEntries) {
-                return false;
-            }
-            ++totalEntries;
-            VARIANT vIdx;
-            VariantInit(&vIdx);
-            vIdx.vt = VT_I4;
-            vIdx.lVal = idx;
-            ComPtr<FolderItem> itemObj;
-            if (FAILED(subItems->Item(vIdx, itemObj.Put())) || !itemObj) {
-                return false;
-            }
-            BSTR rawName = nullptr;
-            if (FAILED(itemObj->get_Name(&rawName)) || rawName == nullptr) {
-                if (rawName != nullptr) SysFreeString(rawName);
-                return false;
-            }
-            const std::wstring entryName(rawName);
-            SysFreeString(rawName);
-            if (entryName.empty() || entryName == L"." || entryName == L".." ||
-                entryName.find(L':') != std::wstring::npos ||
-                entryName.find(L"..") != std::wstring::npos ||
-                entryName.find(L'/') != std::wstring::npos ||
-                entryName.find(L'\\') != std::wstring::npos) {
-                return false;
-            }
-            VARIANT_BOOL isFolder = VARIANT_FALSE;
-            if (SUCCEEDED(itemObj->get_IsFolder(&isFolder)) && isFolder == VARIANT_TRUE) {
-                ComPtr<IDispatch> subDisp;
-                if (FAILED(itemObj->get_GetFolder(subDisp.Put())) || !subDisp) {
-                    return false;
-                }
-                ComPtr<Folder> subFolder;
-                if (FAILED(subDisp->QueryInterface(
-                        IID_Folder, reinterpret_cast<void**>(subFolder.Put()))) ||
-                    !subFolder) {
-                    return false;
-                }
-                if (!self(self, subFolder.Get(), totalEntries, maxEntries, depth + 1)) {
-                    return false;
-                }
-            }
-        }
-        return true;
-    };
-
-    ComPtr<FolderItems> items;
-    if (FAILED(zipFolder->Items(items.Put())) || !items) {
-        return false;
-    }
-    size_t totalPrecheckedEntries = 0;
-    if (!validateZipFolderEntries(
-            validateZipFolderEntries, zipFolder.Get(), totalPrecheckedEntries, kMaxArchiveFiles, 0) ||
-        totalPrecheckedEntries == 0) {
-        return false;
-    }
-
-    VARIANT vItems;
-    VariantInit(&vItems);
-    vItems.vt = VT_DISPATCH;
-    vItems.pdispVal = items.Get();
-
-    VARIANT vOpt;
-    VariantInit(&vOpt);
-    vOpt.vt = VT_I4;
-    vOpt.lVal = 0x0614; // FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOF_NOCONFIRMMKDIR
-
-    hr = dstFolder->CopyHere(vItems, vOpt);
-    if (FAILED(hr)) {
-        return false;
-    }
-
-    // Folder::CopyHere can finalize asynchronously; pump STA messages and poll until settled.
-    size_t prevFiles = 0;
-    uint64_t prevBytes = 0;
-    int stableTicks = 0;
-    for (int poll = 0; poll < 100; ++poll) {
-        MSG msg{};
-        while (PeekMessageW(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        if (cancelFlag != nullptr && cancelFlag->load()) {
-            return false;
-        }
-        size_t curFiles = 0;
-        uint64_t curBytes = 0;
-        bool allReadable = true;
-        std::error_code scanEc;
-        for (std::filesystem::recursive_directory_iterator it(
-                 destDir,
-                 std::filesystem::directory_options::none,
-                 scanEc);
-             !scanEc && it != std::filesystem::recursive_directory_iterator();
-             it.increment(scanEc)) {
-            const DWORD attrs = GetFileAttributesW(it->path().c_str());
-            if (attrs == INVALID_FILE_ATTRIBUTES || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-                return false;
-            }
-            if ((attrs & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-                continue;
-            }
-            ++curFiles;
-            if (curFiles > kMaxArchiveFiles) {
-                return false;
-            }
-            std::error_code szEc;
-            const uint64_t fz = it->file_size(szEc);
-            if (!szEc) {
-                if (fz > kMaxExtractedBytes || curBytes > kMaxExtractedBytes - fz) {
-                    return false;
-                }
-                curBytes += fz;
-            }
-            HandleGuard probeRead(CreateFileW(
-                it->path().c_str(),
-                GENERIC_READ,
-                FILE_SHARE_READ,
-                nullptr,
-                OPEN_EXISTING,
-                FILE_FLAG_OPEN_REPARSE_POINT,
-                nullptr));
-            if (!probeRead.IsValid()) {
-                allReadable = false;
-            }
-        }
-        if (scanEc) {
-            return false;
-        }
-        if (allReadable && curFiles > 0 && curFiles == prevFiles && curBytes == prevBytes) {
-            ++stableTicks;
-            if (stableTicks >= 4) {
-                return true;
-            }
-        } else {
-            stableTicks = 0;
-            prevFiles = curFiles;
-            prevBytes = curBytes;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(150));
-    }
-    return false;
 }
 
 UINT CALLBACK CabExtractCallback(PVOID ctx, UINT notification, UINT_PTR param1, UINT_PTR param2) {
@@ -1588,8 +1374,11 @@ bool StageAndVerifyPackageIntoDir(
 
     if (isZipPackage) {
         const std::filesystem::path extractDir = workDir / L"pkg_extract";
-        if (!ExtractZipViaShellCom(stagedFile, extractDir, cancelFlag)) {
-            outError = "Не удалось безопасно распаковать ZIP-архив.";
+        std::string zipErr;
+        if (!ExtractZipSafely(stagedFile, extractDir, cancelFlag, &zipErr)) {
+            outError = zipErr.empty()
+                           ? "Не удалось безопасно распаковать ZIP-архив."
+                           : ("Не удалось безопасно распаковать ZIP-архив: " + zipErr);
             return false;
         }
 

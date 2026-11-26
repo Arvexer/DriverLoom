@@ -63,10 +63,6 @@ bool CreateAdminOnlyTempWorkDir(std::filesystem::path& outDir, std::string* outE
 
 [[nodiscard]] bool HasZipMagicHeader(const std::filesystem::path& filePath);
 [[nodiscard]] bool HasMsiMagicHeader(const std::filesystem::path& filePath);
-bool ExtractZipViaShellCom(
-    const std::filesystem::path& zipPath,
-    const std::filesystem::path& destDir,
-    const std::atomic<bool>* cancelFlag = nullptr);
 
 struct CabExtractContext {
     std::filesystem::path baseDir;

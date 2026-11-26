@@ -66,6 +66,7 @@ add_executable(DriverLoom WIN32
     src/core/SystemRestore.cpp
     src/core/HttpClient.cpp
     src/core/PackageSecurity.cpp
+    src/core/SafeZipExtractor.cpp
     src/core/OnlineCatalogClient.cpp
     src/core/SystemComponentsScanner.cpp
     src/core/SystemDiagnostics.cpp
@@ -151,6 +152,7 @@ add_executable(DriverLoomTests
     tests/DriverLoomTests.cpp
     src/core/HttpClient.cpp
     src/core/PackageSecurity.cpp
+    src/core/SafeZipExtractor.cpp
     src/core/OnlineCatalogClient.cpp
 )
 

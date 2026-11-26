@@ -3,6 +3,7 @@
 #include "core/HttpClient.hpp"
 #include "core/OnlineCatalogClient.hpp"
 #include "core/PackageSecurity.hpp"
+#include "core/SafeZipExtractor.hpp"
 
 #include <setupapi.h>
 #include <winioctl.h>
@@ -495,8 +496,8 @@ void TestZipAndDirectorySecurity() {
     Check(!hdm::HasZipMagicHeader(notZip), "ZipSecurity: HasZipMagicHeader false on text file");
 
     const std::filesystem::path extractDir = dir / L"out";
-    Check(hdm::ExtractZipViaShellCom(zipFile, extractDir, nullptr),
-          "ZipSecurity: ExtractZipViaShellCom extracts valid stored zip");
+    Check(hdm::ExtractZipSafely(zipFile, extractDir, nullptr, &err),
+          "ZipSecurity: ExtractZipSafely extracts valid stored zip", err);
     {
         std::ifstream ifs(extractDir / L"hello.txt", std::ios::binary);
         std::string extracted((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
@@ -809,6 +810,376 @@ void TestBoundedCopyAndPackageStaging() {
           "Staging: rejects ZIP with unsigned setup.exe even when ZIP SHA-256 matches", err);
 }
 
+struct ZipTestEntry {
+    std::string name;
+    uint16_t method{0};
+    uint16_t gpFlag{0};
+    uint16_t versionMadeBy{20};
+    uint32_t externalAttrs{0};
+    std::vector<uint8_t> compBytes;
+    uint32_t crc32{0};
+    uint32_t uncompSize{0};
+    bool zeroLocalSizes{false};
+};
+
+std::vector<uint8_t> BuildCustomZip(const std::vector<ZipTestEntry>& entries) {
+    auto push16 = [](std::vector<uint8_t>& out, uint16_t v) {
+        out.push_back(static_cast<uint8_t>(v & 0xFFu));
+        out.push_back(static_cast<uint8_t>((v >> 8) & 0xFFu));
+    };
+    auto push32 = [](std::vector<uint8_t>& out, uint32_t v) {
+        out.push_back(static_cast<uint8_t>(v & 0xFFu));
+        out.push_back(static_cast<uint8_t>((v >> 8) & 0xFFu));
+        out.push_back(static_cast<uint8_t>((v >> 16) & 0xFFu));
+        out.push_back(static_cast<uint8_t>((v >> 24) & 0xFFu));
+    };
+
+    std::vector<uint8_t> zip;
+    std::vector<uint32_t> localOffsets;
+    localOffsets.reserve(entries.size());
+
+    for (const auto& e : entries) {
+        const uint32_t lfhOff = static_cast<uint32_t>(zip.size());
+        localOffsets.push_back(lfhOff);
+        const uint16_t nameLen = static_cast<uint16_t>(e.name.size());
+        const uint32_t compSz = static_cast<uint32_t>(e.compBytes.size());
+
+        push32(zip, 0x04034B50u);
+        push16(zip, 20);
+        push16(zip, e.gpFlag);
+        push16(zip, e.method);
+        push16(zip, 0);
+        push16(zip, 0);
+        push32(zip, e.zeroLocalSizes ? 0u : e.crc32);
+        push32(zip, e.zeroLocalSizes ? 0u : compSz);
+        push32(zip, e.zeroLocalSizes ? 0u : e.uncompSize);
+        push16(zip, nameLen);
+        push16(zip, 0);
+        zip.insert(zip.end(), e.name.begin(), e.name.end());
+        zip.insert(zip.end(), e.compBytes.begin(), e.compBytes.end());
+    }
+
+    const uint32_t cdOffset = static_cast<uint32_t>(zip.size());
+    for (size_t i = 0; i < entries.size(); ++i) {
+        const auto& e = entries[i];
+        const uint16_t nameLen = static_cast<uint16_t>(e.name.size());
+        const uint32_t compSz = static_cast<uint32_t>(e.compBytes.size());
+
+        push32(zip, 0x02014B50u);
+        push16(zip, e.versionMadeBy);
+        push16(zip, 20);
+        push16(zip, e.gpFlag);
+        push16(zip, e.method);
+        push16(zip, 0);
+        push16(zip, 0);
+        push32(zip, e.crc32);
+        push32(zip, compSz);
+        push32(zip, e.uncompSize);
+        push16(zip, nameLen);
+        push16(zip, 0);
+        push16(zip, 0);
+        push16(zip, 0);
+        push16(zip, 0);
+        push32(zip, e.externalAttrs);
+        push32(zip, localOffsets[i]);
+        zip.insert(zip.end(), e.name.begin(), e.name.end());
+    }
+
+    const uint32_t cdSize = static_cast<uint32_t>(zip.size()) - cdOffset;
+    const uint16_t count16 = static_cast<uint16_t>(entries.size());
+    push32(zip, 0x06054B50u);
+    push16(zip, 0);
+    push16(zip, 0);
+    push16(zip, count16);
+    push16(zip, count16);
+    push32(zip, cdSize);
+    push32(zip, cdOffset);
+    push16(zip, 0);
+    return zip;
+}
+
+void WriteBytesFile(const std::filesystem::path& p, const std::vector<uint8_t>& bytes) {
+    std::ofstream ofs(p, std::ios::binary);
+    ofs.write(reinterpret_cast<const char*>(bytes.data()), static_cast<std::streamsize>(bytes.size()));
+}
+
+std::string ReadBytesAsString(const std::filesystem::path& p) {
+    std::ifstream ifs(p, std::ios::binary);
+    return std::string((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+}
+
+ZipTestEntry MakeStoredEntry(const std::string& name, const std::string& content) {
+    ZipTestEntry e;
+    e.name = name;
+    e.method = 0;
+    e.compBytes.assign(content.begin(), content.end());
+    e.crc32 = ComputeCrc32(content);
+    e.uncompSize = static_cast<uint32_t>(content.size());
+    return e;
+}
+
+void TestSafeZipExtractor() {
+    std::filesystem::path dir;
+    std::string err;
+    Check(hdm::CreateUniqueTempWorkDir(dir, &err), "SafeZip: CreateUniqueTempWorkDir", err);
+    if (dir.empty()) {
+        return;
+    }
+    hdm::TempWorkDirGuard guard;
+    guard.Set(dir);
+
+    auto countFilesIn = [](const std::filesystem::path& p) -> size_t {
+        size_t n = 0;
+        std::error_code ec;
+        for (std::filesystem::recursive_directory_iterator it(p, ec);
+             !ec && it != std::filesystem::recursive_directory_iterator();
+             it.increment(ec)) {
+            if (!it->is_directory(ec)) {
+                ++n;
+            }
+        }
+        return n;
+    };
+
+    // 1. Multi-file nested stored + dir entry + zero-byte file
+    {
+        ZipTestEntry dirEntry;
+        dirEntry.name = "sub/";
+        const auto zipBytes = BuildCustomZip({
+            dirEntry,
+            MakeStoredEntry("sub/a.txt", "AlphaPayload"),
+            MakeStoredEntry("sub/deep/b.txt", "BetaPayload"),
+            MakeStoredEntry("empty.txt", ""),
+        });
+        const auto zPath = dir / L"stored_multi.zip";
+        const auto out = dir / L"out_stored";
+        WriteBytesFile(zPath, zipBytes);
+        Check(hdm::ExtractZipSafely(zPath, out, nullptr, &err), "SafeZip: stored multi+nested", err);
+        Check(ReadBytesAsString(out / L"sub" / L"a.txt") == "AlphaPayload", "SafeZip: sub/a.txt matches");
+        Check(ReadBytesAsString(out / L"sub" / L"deep" / L"b.txt") == "BetaPayload",
+              "SafeZip: sub/deep/b.txt matches");
+        Check(ReadBytesAsString(out / L"empty.txt").empty(), "SafeZip: empty stored file matches");
+    }
+
+    // 2. DEFLATE BTYPE=0 (stored block inside method 8)
+    {
+        ZipTestEntry e;
+        e.name = "btype0.txt";
+        e.method = 8;
+        e.compBytes = {0x01, 0x05, 0x00, 0xFA, 0xFF, 'H', 'e', 'l', 'l', 'o'};
+        e.crc32 = ComputeCrc32("Hello");
+        e.uncompSize = 5;
+        const auto zPath = dir / L"deflate0.zip";
+        const auto out = dir / L"out_def0";
+        WriteBytesFile(zPath, BuildCustomZip({e}));
+        Check(hdm::ExtractZipSafely(zPath, out, nullptr, &err), "SafeZip: DEFLATE BTYPE=0", err);
+        Check(ReadBytesAsString(out / L"btype0.txt") == "Hello", "SafeZip: DEFLATE BTYPE=0 content");
+    }
+
+    // 3. DEFLATE BTYPE=1 (Fixed Huffman, 760 bytes)
+    {
+        std::string fixedPayload;
+        for (int i = 0; i < 12; ++i) {
+            fixedPayload += "DriverLoom SafeZipExtractor RFC1951 Dynamic Huffman Test! ";
+        }
+        fixedPayload += "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+-=[]{}|;:,.<>?/~";
+        ZipTestEntry e;
+        e.name = "fixed.txt";
+        e.method = 8;
+        e.compBytes = {
+            0x73, 0x29, 0xCA, 0x2C, 0x4B, 0x2D, 0xF2, 0xC9, 0xCF, 0xCF, 0x55, 0x08, 0x4E, 0x4C, 0x4B, 0x8D,
+            0xCA, 0x2C, 0x70, 0xAD, 0x28, 0x29, 0x4A, 0x4C, 0x2E, 0xC9, 0x2F, 0x52, 0x08, 0x72, 0x73, 0x36,
+            0xB4, 0x34, 0x35, 0x54, 0x70, 0xA9, 0xCC, 0x4B, 0xCC, 0xCD, 0x4C, 0x56, 0xF0, 0x28, 0x4D, 0x4B,
+            0xCB, 0x4D, 0xCC, 0x53, 0x08, 0x49, 0x2D, 0x2E, 0x51, 0x54, 0x70, 0x19, 0xD5, 0x39, 0xAA, 0x73,
+            0xC0, 0x74, 0x3A, 0x3A, 0x39, 0xBB, 0xB8, 0xBA, 0xB9, 0x7B, 0x78, 0x7A, 0x79, 0xFB, 0xF8, 0xFA,
+            0xF9, 0x07, 0x04, 0x06, 0x05, 0x87, 0x84, 0x86, 0x85, 0x47, 0x44, 0x46, 0x19, 0x18, 0x1A, 0x19,
+            0x9B, 0x98, 0x9A, 0x99, 0x5B, 0x58, 0x2A, 0x3A, 0x28, 0xAB, 0xA8, 0xC6, 0xA9, 0x69, 0x69, 0x68,
+            0xC6, 0x6B, 0xEB, 0xDA, 0x46, 0xC7, 0x56, 0xD7, 0xD6, 0x58, 0x5B, 0xE9, 0xE8, 0xD9, 0xD8, 0xD9,
+            0xEB, 0xD7, 0x01, 0x00
+        };
+        e.crc32 = ComputeCrc32(fixedPayload);
+        e.uncompSize = static_cast<uint32_t>(fixedPayload.size());
+        const auto zPath = dir / L"deflate1.zip";
+        const auto out = dir / L"out_def1";
+        WriteBytesFile(zPath, BuildCustomZip({e}));
+        Check(hdm::ExtractZipSafely(zPath, out, nullptr, &err), "SafeZip: DEFLATE BTYPE=1 Fixed Huffman", err);
+        Check(ReadBytesAsString(out / L"fixed.txt") == fixedPayload,
+              "SafeZip: DEFLATE BTYPE=1 exact 760-byte payload");
+    }
+
+    // 4. DEFLATE BTYPE=2 (Dynamic Huffman, 586 bytes) + Data Descriptor flag (gpFlag=0x0008)
+    {
+        const std::string dynPayload =
+            "The quick brown fox jumps over the lazy dog. DriverLoom verifies Authenticode signatures, "
+            "SHA-256 digests, and blocks directory traversal, NTFS alternate data streams, reparse points, "
+            "and zip bombs! Pack my box with five dozen liquor jugs. Sphinx of black quartz, judge my vow. "
+            "0123456789 ABCDEFGHIJKLMNOPQRSTUVWXYZ abcdefghijklmnopqrstuvwxyz "
+            "DriverLoom hybrid driver manager streaming deflate dynamic huffman block verification payload 2026! "
+            "The quick brown fox jumps over the lazy dog again while testing dynamic huffman trees and LZ77 "
+            "sliding window back-references across distances.";
+        ZipTestEntry e;
+        e.name = "dyn.txt";
+        e.method = 8;
+        e.gpFlag = 0x0008;
+        e.zeroLocalSizes = true;
+        e.compBytes = {
+            0x8D, 0x51, 0xC1, 0x76, 0xD3, 0x30, 0x10, 0xFC, 0x95, 0xE9, 0x3D, 0xCD, 0x2B, 0x29, 0x4D, 0xE0,
+            0x18, 0x68, 0x4B, 0x81, 0x50, 0x5A, 0x12, 0xA0, 0xED, 0x6D, 0x6D, 0xAD, 0xED, 0x6D, 0x64, 0xC9,
+            0x91, 0xE4, 0x38, 0xF6, 0xD7, 0xB3, 0x4E, 0xE1, 0x3D, 0x1E, 0x27, 0x4E, 0xFB, 0x34, 0x3B, 0x9A,
+            0x9D, 0x9D, 0xDD, 0x54, 0x8C, 0x5D, 0x2B, 0xF9, 0x16, 0x59, 0xF0, 0x9D, 0x43, 0xE1, 0x0F, 0x78,
+            0x6E, 0xEB, 0x26, 0xC2, 0xEF, 0x39, 0x20, 0x69, 0xDB, 0xD2, 0xD0, 0xC3, 0xF8, 0x72, 0x8A, 0xCB,
+            0x20, 0x0A, 0xAE, 0xBC, 0xAF, 0xA1, 0x55, 0x0A, 0xE1, 0x88, 0x65, 0xAB, 0x1C, 0x97, 0x24, 0xF7,
+            0x86, 0x11, 0xA5, 0x74, 0x94, 0xDA, 0xC0, 0x71, 0x82, 0xF5, 0xCD, 0xF2, 0x74, 0x76, 0x31, 0x87,
+            0x91, 0x92, 0x63, 0x52, 0x80, 0x9C, 0x41, 0x66, 0x7D, 0xBE, 0x8D, 0x8A, 0x05, 0xCE, 0x93, 0x0F,
+            0x3D, 0x52, 0x20, 0x95, 0x8A, 0x64, 0x27, 0xB8, 0xDD, 0x5C, 0xAF, 0x41, 0x36, 0x71, 0x50, 0x0D,
+            0x86, 0xA1, 0x44, 0x88, 0x29, 0x30, 0xD5, 0xFA, 0x39, 0x70, 0x43, 0x21, 0x32, 0x1A, 0x2F, 0xEE,
+            0x8F, 0xD8, 0x20, 0x0D, 0x32, 0x5F, 0x67, 0xF1, 0x04, 0x77, 0xA4, 0x1B, 0xD4, 0xBD, 0x3E, 0x0F,
+            0xE8, 0x24, 0x55, 0x28, 0xD4, 0xA9, 0x9A, 0x1E, 0xD8, 0xC1, 0xCA, 0xAE, 0xF5, 0x41, 0xB7, 0x2A,
+            0xE3, 0x14, 0xEB, 0xA6, 0x12, 0x77, 0x80, 0x2F, 0xD4, 0xCA, 0xF8, 0x67, 0xD7, 0x52, 0x48, 0xC3,
+            0x44, 0xBB, 0xA6, 0xE4, 0x51, 0x61, 0xEF, 0xBB, 0x29, 0xCE, 0x5E, 0xCD, 0xCE, 0x5F, 0x5F, 0xCC,
+            0x17, 0x6F, 0xDE, 0x62, 0xF9, 0xEE, 0xFD, 0xE5, 0xD5, 0xF5, 0x87, 0x9B, 0x8F, 0x9F, 0x3E, 0xAF,
+            0xBE, 0xDC, 0x7E, 0xBD, 0xBB, 0xFF, 0xB6, 0xDE, 0x7C, 0xFF, 0xF1, 0xF3, 0xE1, 0xF1, 0x09, 0x94,
+            0xE5, 0x86, 0x8B, 0xB2, 0x92, 0xE7, 0xAD, 0xAD, 0x9D, 0x6F, 0x76, 0x21, 0xA6, 0x76, 0xDF, 0x1D,
+            0xFA, 0xE1, 0xEF, 0xA4, 0xAA, 0x3E, 0x0B, 0x62, 0x60, 0x8E, 0x08, 0x6A, 0x72, 0x54, 0x6A, 0x7D,
+            0x59, 0x4C, 0x5C, 0x09, 0x95, 0xB0, 0xC7, 0x7D, 0x7B, 0xA7, 0x40, 0x8E, 0xAA, 0x2D, 0x0A, 0x65,
+            0xBD, 0x44, 0xF5, 0x3B, 0xE7, 0x9C, 0x92, 0x78, 0x87, 0x86, 0x7A, 0xEB, 0xC9, 0x60, 0x76, 0x36,
+            0x9B, 0x9F, 0x60, 0xF3, 0xFF, 0xA7, 0x03, 0x95, 0x24, 0x0E, 0x5D, 0x25, 0x96, 0x91, 0xF4, 0x1C,
+            0xC7, 0xC1, 0xFF, 0x0C, 0x54, 0x47, 0x7A, 0xCF, 0x31, 0xD8, 0xD5, 0xD3, 0x62, 0x81, 0x68, 0xC5,
+            0x8C, 0xB4, 0x4E, 0x9C, 0xF1, 0x1D, 0x32, 0x4D, 0xEB, 0x34, 0x70, 0xC1, 0x81, 0x5D, 0x3E, 0xF2,
+            0xF2, 0xE0, 0xE3, 0x78, 0xC9, 0x98, 0x68, 0x04, 0xA6, 0xBF, 0x00
+        };
+        e.crc32 = ComputeCrc32(dynPayload);
+        e.uncompSize = static_cast<uint32_t>(dynPayload.size());
+        const auto zPath = dir / L"deflate2.zip";
+        const auto out = dir / L"out_def2";
+        WriteBytesFile(zPath, BuildCustomZip({e}));
+        Check(hdm::ExtractZipSafely(zPath, out, nullptr, &err),
+              "SafeZip: DEFLATE BTYPE=2 Dynamic Huffman + data descriptor", err);
+        Check(ReadBytesAsString(out / L"dyn.txt") == dynPayload,
+              "SafeZip: DEFLATE BTYPE=2 exact 586-byte payload");
+    }
+
+    // 5. Zip-bomb (spoofed header + honest oversized header), both aborted & cleaned up
+    {
+        const std::vector<uint8_t> bombDeflate = {
+            0xED, 0xC1, 0x31, 0x01, 0x00, 0x00, 0x00, 0xC2, 0xA0, 0x6C, 0xEB, 0x5F, 0xCA, 0x18, 0x3E, 0x40,
+            0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x6F, 0x03
+        };
+        const uint32_t bombCrc = ComputeCrc32(std::string(16384, 'A'));
+        hdm::ZipExtractLimits smallLim;
+        smallLim.maxTotalBytes = 4096;
+
+        ZipTestEntry spoofed;
+        spoofed.name = "bomb_spoof.txt";
+        spoofed.method = 8;
+        spoofed.compBytes = bombDeflate;
+        spoofed.crc32 = bombCrc;
+        spoofed.uncompSize = 16;
+        const auto zSpoof = dir / L"bomb_spoof.zip";
+        const auto outSpoof = dir / L"out_bomb_spoof";
+        WriteBytesFile(zSpoof, BuildCustomZip({spoofed}));
+        Check(!hdm::ExtractZipSafely(zSpoof, outSpoof, nullptr, &err, smallLim),
+              "SafeZip: rejects zip-bomb with spoofed uncompSize", err);
+        Check(countFilesIn(outSpoof) == 0, "SafeZip: spoofed zip-bomb cleans partial files");
+
+        ZipTestEntry honest = spoofed;
+        honest.name = "bomb_honest.txt";
+        honest.uncompSize = 16384;
+        const auto zHonest = dir / L"bomb_honest.zip";
+        const auto outHonest = dir / L"out_bomb_honest";
+        WriteBytesFile(zHonest, BuildCustomZip({honest}));
+        Check(!hdm::ExtractZipSafely(zHonest, outHonest, nullptr, &err, smallLim),
+              "SafeZip: rejects zip-bomb with oversized declared uncompSize", err);
+        Check(countFilesIn(outHonest) == 0, "SafeZip: oversized zip-bomb leaves zero files");
+    }
+
+    // 6. CRC-32 mismatch cleans partial file
+    {
+        auto badCrc = MakeStoredEntry("bad.txt", "CorruptMe");
+        badCrc.crc32 ^= 1u;
+        const auto zPath = dir / L"bad_crc.zip";
+        const auto out = dir / L"out_bad_crc";
+        WriteBytesFile(zPath, BuildCustomZip({badCrc}));
+        Check(!hdm::ExtractZipSafely(zPath, out, nullptr, &err),
+              "SafeZip: rejects CRC-32 mismatch", err);
+        Check(countFilesIn(out) == 0, "SafeZip: CRC-32 failure removes partial file");
+    }
+
+    // 7. Malicious entry paths & flags
+    auto expectReject = [&](const char* label, const std::vector<ZipTestEntry>& entries,
+                            const hdm::ZipExtractLimits& lim = {}) {
+        static int idxCounter = 0;
+        ++idxCounter;
+        const auto zp = dir / (L"bad_" + std::to_wstring(idxCounter) + L".zip");
+        const auto od = dir / (L"out_bad_" + std::to_wstring(idxCounter));
+        WriteBytesFile(zp, BuildCustomZip(entries));
+        std::string r;
+        Check(!hdm::ExtractZipSafely(zp, od, nullptr, &r, lim), label, r);
+    };
+
+    expectReject("SafeZip: rejects ../ traversal", {MakeStoredEntry("../evil.exe", "x")});
+    expectReject("SafeZip: rejects sub/../../ traversal", {MakeStoredEntry("sub/../../evil.exe", "x")});
+    expectReject("SafeZip: rejects leading slash path", {MakeStoredEntry("/evil.exe", "x")});
+    expectReject("SafeZip: rejects drive path", {MakeStoredEntry("C:\\evil.exe", "x")});
+    expectReject("SafeZip: rejects NTFS ADS ':'", {MakeStoredEntry("setup.exe:stream", "x")});
+    expectReject("SafeZip: rejects Windows reserved CON.txt", {MakeStoredEntry("CON.txt", "x")});
+    expectReject("SafeZip: rejects Windows reserved sub/NUL", {MakeStoredEntry("sub/NUL", "x")});
+    expectReject("SafeZip: rejects trailing dot segment", {MakeStoredEntry("setup.exe.", "x")});
+    expectReject("SafeZip: rejects trailing space dir segment", {MakeStoredEntry("dir /a.txt", "x")});
+
+    {
+        auto sym = MakeStoredEntry("sym.txt", "target");
+        sym.versionMadeBy = 0x0314;
+        sym.externalAttrs = 0xA1FF0000u;
+        expectReject("SafeZip: rejects Unix symlink entry", {sym});
+    }
+    {
+        auto enc = MakeStoredEntry("enc.txt", "secret");
+        enc.gpFlag = 0x0001u;
+        expectReject("SafeZip: rejects encrypted entry", {enc});
+    }
+    {
+        hdm::ZipExtractLimits lim3;
+        lim3.maxFiles = 3;
+        expectReject("SafeZip: enforces maxFiles limit",
+                     {MakeStoredEntry("1.txt", "a"), MakeStoredEntry("2.txt", "b"),
+                      MakeStoredEntry("3.txt", "c"), MakeStoredEntry("4.txt", "d")},
+                     lim3);
+    }
+    expectReject("SafeZip: rejects case-insensitive duplicate path",
+                 {MakeStoredEntry("a.txt", "1"), MakeStoredEntry("A.TXT", "2")});
+
+    // 8. Immediate pre-cancellation
+    {
+        std::atomic<bool> cancelled{true};
+        const auto zp = dir / L"cancel.zip";
+        const auto od = dir / L"out_cancel";
+        WriteBytesFile(zp, BuildCustomZip({MakeStoredEntry("ok.txt", "hi")}));
+        Check(!hdm::ExtractZipSafely(zp, od, &cancelled, &err),
+              "SafeZip: aborts immediately when cancelFlag is set", err);
+    }
+
+    // 9. Pre-existing NTFS junction inside destDir blocked before writing outside
+    {
+        std::error_code ec;
+        const auto outsideDir = dir / L"outside_target";
+        const auto juncDest = dir / L"out_junc";
+        const auto juncSub = juncDest / L"sub";
+        std::filesystem::create_directories(outsideDir, ec);
+        std::filesystem::create_directories(juncDest, ec);
+        if (CreateNtfsJunction(juncSub, outsideDir)) {
+            const auto zp = dir / L"junc_attack.zip";
+            WriteBytesFile(zp, BuildCustomZip({MakeStoredEntry("sub/pwn.txt", "PWNED")}));
+            Check(!hdm::ExtractZipSafely(zp, juncDest, nullptr, &err),
+                  "SafeZip: rejects NTFS junction inside destDir", err);
+            Check(!std::filesystem::exists(outsideDir / L"pwn.txt", ec),
+                  "SafeZip: junction target remains untouched");
+            RemoveDirectoryW(juncSub.c_str());
+        }
+    }
+}
+
 } // namespace
 
 int main() {
@@ -826,6 +1197,7 @@ int main() {
     TestZipAndDirectorySecurity();
     TestTrustedTempAndCliValidation();
     TestBoundedCopyAndPackageStaging();
+    TestSafeZipExtractor();
 
     std::cout << "\nSummary: " << g_passed << " passed, " << g_failed << " failed.\n";
     return g_failed == 0 ? 0 : 1;
