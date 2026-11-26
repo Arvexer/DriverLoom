@@ -113,16 +113,18 @@ public:
         bool forceInstall,
         bool createRestorePoint,
         const LogCallback& onLog,
-        std::atomic<float>* outProgress = nullptr);
+        std::atomic<float>* outProgress = nullptr,
+        const std::atomic<bool>* cancelFlag = nullptr);
 
-    // Synchronous removal of unused oem*.inf packages via DiUninstallDriverW (requires admin).
+    // Synchronous removal of unused oem*.inf packages via SetupUninstallOEMInfW (requires admin).
     static bool RemoveDriverStorePackagesSync(
         const std::vector<std::string>& oemInfNames,
         bool createRestorePoint,
         const LogCallback& onLog,
         size_t* outRemovedCount = nullptr,
         size_t* outFailedCount = nullptr,
-        bool* outRebootRequired = nullptr);
+        bool* outRebootRequired = nullptr,
+        const std::atomic<bool>* cancelFlag = nullptr);
 
 private:
     std::atomic<bool> picking_{false};

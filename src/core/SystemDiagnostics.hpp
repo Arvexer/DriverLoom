@@ -209,6 +209,7 @@ private:
     std::atomic<bool> stopRequested_{false};
     std::atomic<unsigned long> exportThreadId_{0};
     std::atomic<uint64_t> generation_{0};
+    std::atomic<uint64_t> snapshotEpoch_{0};
 
     mutable std::mutex dataMutex_;
     mutable std::mutex threadMutex_;

@@ -238,7 +238,10 @@ void ReadMonitorEdid(const std::wstring& instanceId, DeviceInfo& out) {
     }
 
     std::vector<BYTE> edid(bytes);
-    if (RegQueryValueExW(key.Get(), L"EDID", nullptr, &type, edid.data(), &bytes) != ERROR_SUCCESS) {
+    DWORD type2 = 0;
+    DWORD bytes2 = bytes;
+    if (RegQueryValueExW(key.Get(), L"EDID", nullptr, &type2, edid.data(), &bytes2) != ERROR_SUCCESS ||
+        type2 != REG_BINARY || bytes2 < 128 || bytes2 > edid.size()) {
         return;
     }
 
@@ -697,7 +700,7 @@ DeviceScanner::~DeviceScanner() {
     }
     for (auto& entry : props) {
         if (entry != nullptr) {
-            while (!entry->done.load()) {
+            for (int iter = 0; iter < 60 && !entry->done.load(); ++iter) {
                 const unsigned long tid = entry->tid.load();
                 if (tid != 0) {
                     EnumThreadWindows(
@@ -721,19 +724,30 @@ void DeviceScanner::OpenDevicePropertiesAsync(const std::string& instanceId, Log
     if (instanceId.empty()) {
         return;
     }
+    std::vector<std::unique_ptr<PropDialogThread>> finished;
+    {
+        std::lock_guard<std::mutex> lock(threadMutex_);
+        if (stopRequested_.load()) {
+            return;
+        }
+        for (auto it = propThreads_.begin(); it != propThreads_.end();) {
+            if ((*it)->done.load()) {
+                finished.push_back(std::move(*it));
+                it = propThreads_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (auto& doneEntry : finished) {
+        if (doneEntry != nullptr && doneEntry->thread.joinable()) {
+            doneEntry->thread.join();
+        }
+    }
+
     std::lock_guard<std::mutex> lock(threadMutex_);
     if (stopRequested_.load()) {
         return;
-    }
-    for (auto it = propThreads_.begin(); it != propThreads_.end();) {
-        if ((*it)->done.load()) {
-            if ((*it)->thread.joinable()) {
-                (*it)->thread.join();
-            }
-            it = propThreads_.erase(it);
-        } else {
-            ++it;
-        }
     }
 
     auto entry = std::make_unique<PropDialogThread>();
@@ -1251,15 +1265,16 @@ bool DeviceScanner::RestoreInboxDriverByHardwareKeySync(
     for (DWORD idx = 0; SetupDiEnumDeviceInfo(devInfoSet.Get(), idx, &enumData); ++idx) {
         const std::string instId =
             ToLowerAscii(WideToUtf8(GetDeviceInstanceIdString(devInfoSet.Get(), &enumData)));
-        bool exactMatch = (!instId.empty() && instId == keyNorm);
+        const bool exactInstanceMatch = (!instId.empty() && instId == keyNorm);
+        bool exactHwMatch = false;
         bool structuredMatch = false;
-        if (!exactMatch) {
+        if (!exactInstanceMatch) {
             const std::vector<std::wstring> hwIds =
                 GetDeviceRegistryPropertyMultiString(devInfoSet.Get(), &enumData, SPDRP_HARDWAREID);
             for (const auto& wId : hwIds) {
                 const std::string hwNorm = ToLowerAscii(WideToUtf8(wId));
                 if (hwNorm == keyNorm) {
-                    exactMatch = true;
+                    exactHwMatch = true;
                     break;
                 }
                 if (hasStructuredPnP && hwNorm.find(keyNorm) != std::string::npos) {
@@ -1267,10 +1282,10 @@ bool DeviceScanner::RestoreInboxDriverByHardwareKeySync(
                 }
             }
         }
-        if (exactMatch || structuredMatch) {
+        if (exactInstanceMatch || exactHwMatch || structuredMatch) {
             matchedData = enumData;
             ++matchCount;
-            if (exactMatch && isExplicitInstance) {
+            if (exactInstanceMatch) {
                 matchCount = 1;
                 break;
             }
@@ -1324,7 +1339,7 @@ bool DeviceScanner::RestoreInboxDriverByHardwareKeySync(
          ++dIdx) {
         DWORD reqBytes = 0;
         SetupDiGetDriverInfoDetailW(devInfoSet.Get(), &devInfoData, &drvData, nullptr, 0, &reqBytes);
-        if (reqBytes < sizeof(SP_DRVINFO_DETAIL_DATA_W)) {
+        if (reqBytes < sizeof(SP_DRVINFO_DETAIL_DATA_W) || reqBytes > 1024u * 1024u) {
             continue;
         }
         std::vector<BYTE> detailBuf(reqBytes);

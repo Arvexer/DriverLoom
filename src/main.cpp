@@ -685,6 +685,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         return 1;
     }
     g_mainHwnd = hwnd;
+    hdm::SetMainWindowHandle(hwnd);
 
     g_dpiScale = ImGui_ImplWin32_GetDpiScaleForHwnd(hwnd);
     if (g_dpiScale > 0.5f) {
@@ -776,6 +777,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         }
     }
 
+    hdm::SetMainWindowHandle(nullptr);
     g_mainHwnd = nullptr;
 
     ImGui_ImplDX11_Shutdown();

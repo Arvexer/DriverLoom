@@ -17,7 +17,7 @@ std::wstring ReadCatalogRegStr(HKEY key, const wchar_t* name) {
     DWORD type = 0;
     DWORD bytes = 0;
     if (RegQueryValueExW(key, name, nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS ||
-        bytes == 0 || (type != REG_SZ && type != REG_EXPAND_SZ)) {
+        bytes == 0 || bytes > 65536u || (type != REG_SZ && type != REG_EXPAND_SZ)) {
         return {};
     }
     std::wstring buf(bytes / sizeof(wchar_t) + 2, L'\0');
@@ -414,8 +414,17 @@ bool IsVersionNewer(const std::string& latest, const std::string& current) {
     if (latest.empty() || current.empty()) {
         return false;
     }
-    const auto a = ParseVersionParts(latest);
-    const auto b = ParseVersionParts(current);
+    auto splitPre = [](const std::string& s) {
+        const size_t dash = s.find('-');
+        if (dash == std::string::npos) {
+            return std::pair<std::string, std::string>{s, {}};
+        }
+        return std::pair<std::string, std::string>{s.substr(0, dash), s.substr(dash + 1)};
+    };
+    const auto [lCore, lPre] = splitPre(latest);
+    const auto [cCore, cPre] = splitPre(current);
+    const auto a = ParseVersionParts(lCore);
+    const auto b = ParseVersionParts(cCore);
     if (a.empty() || b.empty()) {
         return false;
     }
@@ -426,6 +435,12 @@ bool IsVersionNewer(const std::string& latest, const std::string& current) {
         if (va != vb) {
             return va > vb;
         }
+    }
+    if (lPre.empty() != cPre.empty()) {
+        return lPre.empty();
+    }
+    if (!lPre.empty() && !cPre.empty()) {
+        return ToLowerAscii(lPre) > ToLowerAscii(cPre);
     }
     return false;
 }
@@ -1058,7 +1073,13 @@ WingetManifestInfo ResolveWingetPkgManifest(
         }
     }
     const std::string& bestVer = !bestStable.empty() ? bestStable : bestAny;
-    if (bestVer.empty()) {
+    auto isSafeSingleSegment = [](std::string_view seg) {
+        return !seg.empty() && seg != "." && seg != ".." &&
+               seg.find('/') == std::string_view::npos &&
+               seg.find('\\') == std::string_view::npos &&
+               seg.find(':') == std::string_view::npos;
+    };
+    if (!isSafeSingleSegment(bestVer)) {
         return result;
     }
 
@@ -1083,7 +1104,7 @@ WingetManifestInfo ResolveWingetPkgManifest(
             break;
         }
     }
-    if (installerYaml.empty()) {
+    if (!isSafeSingleSegment(installerYaml)) {
         return result;
     }
 

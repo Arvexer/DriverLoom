@@ -23,7 +23,11 @@ jobs:
 
       - name: Build Release
         shell: pwsh
-        run: cmake --build build --config Release --target DriverLoom --parallel
+        run: cmake --build build --config Release --target DriverLoom DriverLoomTests --parallel
+
+      - name: Run Security & Regression Tests (CTest)
+        shell: pwsh
+        run: ctest --test-dir build -C Release --output-on-failure
 
       - name: Verify PE hardening flags & SHA-256
         shell: pwsh

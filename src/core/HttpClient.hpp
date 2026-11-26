@@ -18,11 +18,13 @@ namespace hdm {
 struct HttpRequestRegistry {
     std::mutex mtx;
     bool aborted{false};
+    bool shutdown{false};
     std::unordered_set<HINTERNET> handles;
 
     bool Register(HINTERNET h);
     void CloseIfOwned(HINTERNET h) noexcept;
     void AbortAll() noexcept;
+    void Shutdown() noexcept;
     void Reset() noexcept;
 };
 

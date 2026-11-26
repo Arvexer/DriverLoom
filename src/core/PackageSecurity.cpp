@@ -729,6 +729,18 @@ bool MatchesAnyPublisher(
 
 } // namespace
 
+bool MatchesAllowedPublisher(
+    std::string_view subject,
+    std::string_view cn,
+    std::string_view org,
+    const std::vector<std::string_view>& allowedPublishers) {
+    return MatchesAnyPublisher(
+        ToLowerAscii(subject),
+        ToLowerAscii(cn),
+        ToLowerAscii(org),
+        allowedPublishers);
+}
+
 bool ComputeFileSha256Hex(
     const std::filesystem::path& filePath,
     std::string& outHex,
@@ -911,10 +923,10 @@ bool VerifyAndLockAuthenticodeFile(
                             leafCert->pCert, CERT_NAME_ATTR_TYPE,
                             const_cast<LPSTR>(szOID_ORGANIZATION_NAME));
                         actualSigner = !org.empty() ? org : (!cn.empty() ? cn : simple);
-                        signerMatched = MatchesAnyPublisher(
-                            ToLowerAscii(simple),
-                            ToLowerAscii(cn),
-                            ToLowerAscii(org),
+                        signerMatched = MatchesAllowedPublisher(
+                            simple,
+                            cn,
+                            org,
                             allowedPublishers);
                     }
                 }
@@ -1023,6 +1035,7 @@ bool LaunchAndWaitProcess(
     SHELLEXECUTEINFOW sei{};
     sei.cbSize = sizeof(sei);
     sei.fMask = SEE_MASK_NOCLOSEPROCESS;
+    sei.hwnd = GetMainWindowHandle();
     sei.lpVerb = IsProcessElevated() ? L"open" : L"runas";
     const std::wstring wFile = exePath.wstring();
     const std::wstring wDir = exePath.parent_path().wstring();

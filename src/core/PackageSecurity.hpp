@@ -73,6 +73,13 @@ bool VerifyAndLockAuthenticodeFile(
 /// Returns the canonical Authenticode publisher allowlist for WHQL CAB driver packages.
 [[nodiscard]] const std::vector<std::string_view>& DefaultCabPublishers();
 
+/// Checks Authenticode Subject/CN/Organization fields against an allowlist using whole-token boundaries.
+[[nodiscard]] bool MatchesAllowedPublisher(
+    std::string_view subject,
+    std::string_view cn,
+    std::string_view org,
+    const std::vector<std::string_view>& allowedPublishers);
+
 /// Verifies every executable/library binary extracted into a temporary folder.
 bool VerifyExtractedDirectoryBinaries(
     const std::filesystem::path& dir,

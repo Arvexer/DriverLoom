@@ -95,7 +95,8 @@ std::wstring ResolveRedirectTarget(
     if (rawLocation.empty()) {
         return {};
     }
-    if (rawLocation.rfind(L"https://", 0) == 0 || rawLocation.rfind(L"http://", 0) == 0) {
+    if (_wcsnicmp(rawLocation.c_str(), L"https://", 8) == 0 ||
+        _wcsnicmp(rawLocation.c_str(), L"http://", 7) == 0) {
         return rawLocation;
     }
     if (rawLocation.rfind(L"//", 0) == 0) {
@@ -182,7 +183,7 @@ bool HttpRequestRegistry::Register(HINTERNET h) {
         return false;
     }
     std::lock_guard<std::mutex> lock(mtx);
-    if (aborted) {
+    if (aborted || shutdown) {
         return false;
     }
     handles.insert(h);
@@ -218,9 +219,27 @@ void HttpRequestRegistry::AbortAll() noexcept {
     }
 }
 
+void HttpRequestRegistry::Shutdown() noexcept {
+    std::unordered_set<HINTERNET> toClose;
+    {
+        std::lock_guard<std::mutex> lock(mtx);
+        shutdown = true;
+        aborted = true;
+        toClose = std::move(handles);
+        handles.clear();
+    }
+    for (HINTERNET h : toClose) {
+        if (h != nullptr) {
+            WinHttpCloseHandle(h);
+        }
+    }
+}
+
 void HttpRequestRegistry::Reset() noexcept {
     std::lock_guard<std::mutex> lock(mtx);
-    aborted = false;
+    if (!shutdown) {
+        aborted = false;
+    }
 }
 
 ScopedHttpRegistry::ScopedHttpRegistry(HttpRequestRegistry* reg) noexcept
@@ -266,46 +285,76 @@ std::string StripUrlQuery(std::string_view url) {
 
 std::string ExtractJsonStringField(const std::string& json, const std::string& key, size_t startPos) {
     const std::string pattern = "\"" + key + "\"";
-    const size_t pos = json.find(pattern, startPos);
-    if (pos == std::string::npos) {
-        return {};
-    }
-    const size_t colon = json.find(':', pos + pattern.size());
-    if (colon == std::string::npos) {
-        return {};
-    }
-    size_t q1 = colon + 1;
-    while (q1 < json.size() &&
-           (json[q1] == ' ' || json[q1] == '\t' || json[q1] == '\r' || json[q1] == '\n')) {
-        ++q1;
-    }
-    if (q1 >= json.size() || json[q1] != '"') {
-        return {};
-    }
-    std::string out;
-    bool escaped = false;
-    for (size_t i = q1 + 1; i < json.size(); ++i) {
-        const char ch = json[i];
-        if (escaped) {
-            if (ch == '"' || ch == '\\' || ch == '/') {
-                out.push_back(ch);
-            } else if (ch == 't') {
-                out.push_back('\t');
-            } else {
-                out.push_back('\\');
-                out.push_back(ch);
+    size_t searchPos = startPos;
+    while (searchPos < json.size()) {
+        const size_t pos = json.find(pattern, searchPos);
+        if (pos == std::string::npos) {
+            return {};
+        }
+        size_t colon = pos + pattern.size();
+        while (colon < json.size() &&
+               (json[colon] == ' ' || json[colon] == '\t' || json[colon] == '\r' || json[colon] == '\n')) {
+            ++colon;
+        }
+        if (colon >= json.size() || json[colon] != ':') {
+            searchPos = pos + pattern.size();
+            continue;
+        }
+        size_t q1 = colon + 1;
+        while (q1 < json.size() &&
+               (json[q1] == ' ' || json[q1] == '\t' || json[q1] == '\r' || json[q1] == '\n')) {
+            ++q1;
+        }
+        if (q1 >= json.size() || json[q1] != '"') {
+            return {};
+        }
+        std::string out;
+        bool escaped = false;
+        for (size_t i = q1 + 1; i < json.size(); ++i) {
+            const char ch = json[i];
+            if (escaped) {
+                if (ch == '"' || ch == '\\' || ch == '/') {
+                    out.push_back(ch);
+                } else if (ch == 't') {
+                    out.push_back('\t');
+                } else if (ch == 'u' && i + 4 < json.size()) {
+                    unsigned int code = 0;
+                    bool hexOk = true;
+                    for (size_t k = 1; k <= 4; ++k) {
+                        const char hc = json[i + k];
+                        code <<= 4;
+                        if (hc >= '0' && hc <= '9') code |= static_cast<unsigned int>(hc - '0');
+                        else if (hc >= 'a' && hc <= 'f') code |= static_cast<unsigned int>(hc - 'a' + 10);
+                        else if (hc >= 'A' && hc <= 'F') code |= static_cast<unsigned int>(hc - 'A' + 10);
+                        else {
+                            hexOk = false;
+                            break;
+                        }
+                    }
+                    if (hexOk && code >= 0x20u && code <= 0x7Eu) {
+                        out.push_back(static_cast<char>(code));
+                        i += 4;
+                    } else {
+                        out.push_back('\\');
+                        out.push_back(ch);
+                    }
+                } else {
+                    out.push_back('\\');
+                    out.push_back(ch);
+                }
+                escaped = false;
+                continue;
             }
-            escaped = false;
-            continue;
+            if (ch == '\\') {
+                escaped = true;
+                continue;
+            }
+            if (ch == '"') {
+                return out;
+            }
+            out.push_back(ch);
         }
-        if (ch == '\\') {
-            escaped = true;
-            continue;
-        }
-        if (ch == '"') {
-            return out;
-        }
-        out.push_back(ch);
+        return {};
     }
     return {};
 }

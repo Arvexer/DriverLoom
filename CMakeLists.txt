@@ -46,7 +46,7 @@ target_compile_definitions(imgui_lib PUBLIC
 if(MSVC)
     target_compile_options(imgui_lib PRIVATE /utf-8 /W3 /guard:cf)
 elseif(MINGW)
-    target_compile_options(imgui_lib PRIVATE -finput-charset=UTF-8 -fexec-charset=UTF-8)
+    target_compile_options(imgui_lib PRIVATE -finput-charset=UTF-8 -fexec-charset=UTF-8 -fstack-protector-strong)
 endif()
 
 add_executable(DriverLoom WIN32
@@ -144,3 +144,60 @@ elseif(MINGW)
         -static-libstdc++
     )
 endif()
+
+enable_testing()
+
+add_executable(DriverLoomTests
+    tests/DriverLoomTests.cpp
+    src/core/HttpClient.cpp
+    src/core/PackageSecurity.cpp
+    src/core/OnlineCatalogClient.cpp
+)
+
+target_include_directories(DriverLoomTests PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+)
+
+target_compile_definitions(DriverLoomTests PRIVATE
+    UNICODE
+    _UNICODE
+    NOMINMAX
+    WIN32_LEAN_AND_MEAN
+    _WIN32_WINNT=0x0A00
+    WINVER=0x0A00
+)
+
+target_link_libraries(DriverLoomTests PRIVATE
+    setupapi
+    ole32
+    oleaut32
+    winhttp
+    wintrust
+    crypt32
+    bcrypt
+    version
+    uuid
+    shell32
+    advapi32
+    user32
+)
+
+if(MSVC)
+    target_compile_options(DriverLoomTests PRIVATE /utf-8 /W4 /permissive- /guard:cf)
+elseif(MINGW)
+    target_compile_options(DriverLoomTests PRIVATE
+        -finput-charset=UTF-8
+        -fexec-charset=UTF-8
+        -fstack-protector-strong
+        -Wall
+        -Wextra
+        -Wpedantic
+    )
+    target_link_options(DriverLoomTests PRIVATE
+        -static
+        -static-libgcc
+        -static-libstdc++
+    )
+endif()
+
+add_test(NAME DriverLoomTests COMMAND DriverLoomTests)

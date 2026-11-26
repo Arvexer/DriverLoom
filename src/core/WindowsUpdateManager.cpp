@@ -1348,6 +1348,8 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
     };
 
     bool anySearchSucceeded = false;
+    bool onlineAttempted = false;
+    bool onlineSucceeded = false;
 
     // Pass 1: Fast offline search against the local WUA datastore already populated by scan.
     {
@@ -1377,6 +1379,7 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
     // Pass 2: Online fallback only if some requested UpdateIDs are absent from local cache.
     if (matchedById.size() < requestedSet.size() &&
         ((session && searcher) || RecreateWuSessionAndSearcher(session, searcher))) {
+        onlineAttempted = true;
         setProg(0.07f, "Запрос метаданных на сервере Windows Update...");
         if (onLog) {
             onLog(LogLevel::Info, "Запрос недостающих метаданных с сервера Windows Update...");
@@ -1404,6 +1407,7 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
         }
         if (SUCCEEDED(hr) && onlineResult) {
             anySearchSucceeded = true;
+            onlineSucceeded = true;
             collectMatches(onlineResult.Get());
         }
         if (driversOnly && matchedById.size() < requestedSet.size() && session && searcher) {
@@ -1424,6 +1428,7 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
             }
             if (SUCCEEDED(hr) && fullResult) {
                 anySearchSucceeded = true;
+                onlineSucceeded = true;
                 collectMatches(fullResult.Get());
             }
         }
@@ -1448,12 +1453,23 @@ WuInstallSummary WindowsUpdateManager::DownloadAndInstallSync(
     for (const auto& uid : updateIds) {
         auto it = matchedById.find(uid);
         if (it == matchedById.end()) {
-            if (onLog) {
-                onLog(LogLevel::Warning,
-                      "Обновление " + uid + " уже установлено или больше не найдено в Windows Update.");
-            }
-            if (onItemUpdate) {
-                onItemUpdate(uid, true, false, "Актуален / не требуется");
+            if (onlineAttempted && !onlineSucceeded) {
+                ++summary.failedCount;
+                if (onLog) {
+                    onLog(LogLevel::Error,
+                          "Не удалось получить метаданные обновления " + uid + " с сервера Windows Update.");
+                }
+                if (onItemUpdate) {
+                    onItemUpdate(uid, false, false, "Ошибка сетевого поиска Windows Update");
+                }
+            } else {
+                if (onLog) {
+                    onLog(LogLevel::Warning,
+                          "Обновление " + uid + " уже установлено или больше не найдено в Windows Update.");
+                }
+                if (onItemUpdate) {
+                    onItemUpdate(uid, true, false, "Актуален / не требуется");
+                }
             }
             continue;
         }

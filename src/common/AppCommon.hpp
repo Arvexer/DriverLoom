@@ -545,6 +545,19 @@ private:
 
 // --- Elevation Helpers ---
 
+inline std::atomic<HWND>& MainWindowHandleStorage() noexcept {
+    static std::atomic<HWND> g_hwnd{nullptr};
+    return g_hwnd;
+}
+
+inline void SetMainWindowHandle(HWND hwnd) noexcept {
+    MainWindowHandleStorage().store(hwnd, std::memory_order_release);
+}
+
+inline HWND GetMainWindowHandle() noexcept {
+    return MainWindowHandleStorage().load(std::memory_order_acquire);
+}
+
 inline bool IsProcessElevated() {
     HANDLE tokenRaw = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tokenRaw)) {
@@ -605,7 +618,8 @@ inline ElevatedRunResult ExecuteElevatedSelf(
     SHELLEXECUTEINFOW sei{};
     sei.cbSize = sizeof(sei);
     sei.fMask = waitForCompletion ? SEE_MASK_NOCLOSEPROCESS : 0;
-    sei.hwnd = (ownerHwnd != nullptr) ? ownerHwnd : GetActiveWindow();
+    const HWND mainHwnd = GetMainWindowHandle();
+    sei.hwnd = (ownerHwnd != nullptr) ? ownerHwnd : (mainHwnd != nullptr ? mainHwnd : GetActiveWindow());
     sei.lpVerb = L"runas";
     const std::wstring exeDir = std::filesystem::path(exePath).parent_path().wstring();
     sei.lpFile = exePath.c_str();
@@ -693,7 +707,14 @@ inline ElevatedRunResult ExecuteElevatedSelf(
                     abortSignaled = true;
                     result.cancelled = true;
                     if (cancelMarkerPath != nullptr && !cancelMarkerPath->empty()) {
-                        std::ofstream marker(*cancelMarkerPath, std::ios::binary | std::ios::trunc);
+                        HandleGuard marker(CreateFileW(
+                            cancelMarkerPath->c_str(),
+                            GENERIC_WRITE,
+                            0,
+                            nullptr,
+                            CREATE_NEW,
+                            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+                            nullptr));
                     }
                     abortDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(15);
                 } else if (std::chrono::steady_clock::now() >= abortDeadline) {
@@ -772,16 +793,20 @@ inline std::filesystem::path CreateTempLogPath(const wchar_t* prefix) {
         const std::filesystem::path candidate = tempRoot / (L"DriverLoom_" + cleanPrefix + suffix);
         HandleGuard file(CreateFileW(
             candidate.c_str(),
-            GENERIC_WRITE,
+            GENERIC_WRITE | FILE_READ_ATTRIBUTES,
             FILE_SHARE_READ,
             nullptr,
             CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL,
+            FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
             nullptr));
         if (file.IsValid()) {
+            BY_HANDLE_FILE_INFORMATION fi{};
+            const bool safeFile =
+                GetFileInformationByHandle(file.Get(), &fi) &&
+                (fi.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY)) == 0 &&
+                fi.nNumberOfLinks == 1;
             file.Reset();
-            const DWORD attrs = GetFileAttributesW(candidate.c_str());
-            if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0) {
+            if (safeFile) {
                 return candidate;
             }
             std::error_code rmEc;

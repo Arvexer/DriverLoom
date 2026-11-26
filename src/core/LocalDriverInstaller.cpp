@@ -392,7 +392,7 @@ void LocalDriverInstaller::InstallFromFolderAsync(
                 statusMessage_ = "Установка .inf через DiInstallDriverW...";
             }
             summary = InstallFromFolderSync(
-                folderPath, forceInstall, createRestorePoint, log, &progress_);
+                folderPath, forceInstall, createRestorePoint, log, &progress_, &shuttingDown_);
         } else {
             if (log) {
                 log(LogLevel::Info,
@@ -493,7 +493,8 @@ LocalInstallSummary LocalDriverInstaller::InstallFromFolderSync(
     bool forceInstall,
     bool createRestorePoint,
     const LogCallback& onLog,
-    std::atomic<float>* outProgress) {
+    std::atomic<float>* outProgress,
+    const std::atomic<bool>* cancelFlag) {
     LocalInstallSummary summary;
 
     if (createRestorePoint) {
@@ -542,6 +543,9 @@ LocalInstallSummary LocalDriverInstaller::InstallFromFolderSync(
     const DWORD flags = forceInstall ? DIIRFLAG_FORCE_INF : 0;
 
     for (size_t i = 0; i < files.size(); ++i) {
+        if (cancelFlag != nullptr && cancelFlag->load()) {
+            break;
+        }
         const InfFileEntry& entry = files[i];
         if (onLog) {
             onLog(LogLevel::Info,
@@ -1059,7 +1063,8 @@ bool LocalDriverInstaller::RemoveDriverStorePackagesSync(
     const LogCallback& onLog,
     size_t* outRemovedCount,
     size_t* outFailedCount,
-    bool* outRebootRequired) {
+    bool* outRebootRequired,
+    const std::atomic<bool>* cancelFlag) {
     if (outRemovedCount) *outRemovedCount = 0;
     if (outFailedCount) *outFailedCount = 0;
     if (outRebootRequired) *outRebootRequired = false;
@@ -1077,6 +1082,9 @@ bool LocalDriverInstaller::RemoveDriverStorePackagesSync(
     }
 
     for (const auto& name : oemInfNames) {
+        if (cancelFlag != nullptr && cancelFlag->load()) {
+            break;
+        }
         if (ParseOemInfNumber(name) < 0) {
             ++failed;
             if (onLog) {
@@ -1177,7 +1185,7 @@ void LocalDriverInstaller::RemoveDriverStorePackagesAsync(
 
         if (IsProcessElevated()) {
             RemoveDriverStorePackagesSync(
-                names, createRestorePoint, log, &removedCount, &failedCount, &rebootReq);
+                names, createRestorePoint, log, &removedCount, &failedCount, &rebootReq, &shuttingDown_);
             progress_.store(1.0f);
         } else {
             if (log) {

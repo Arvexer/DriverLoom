@@ -40,24 +40,34 @@ private:
 };
 
 std::wstring ReadRegStringVal(HKEY key, const wchar_t* name) {
+    constexpr DWORD kMaxRegBytes = 1048576u;
     DWORD type = 0;
     DWORD bytes = 0;
     if (RegQueryValueExW(key, name, nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS ||
-        bytes == 0 || (type != REG_SZ && type != REG_EXPAND_SZ && type != REG_MULTI_SZ)) {
+        bytes == 0 || bytes > kMaxRegBytes ||
+        (type != REG_SZ && type != REG_EXPAND_SZ && type != REG_MULTI_SZ)) {
         return {};
     }
-    std::wstring buf(bytes / sizeof(wchar_t) + 2, L'\0');
+    std::wstring buf(bytes / sizeof(wchar_t) + 3, L'\0');
+    DWORD readBytes = bytes;
     if (RegQueryValueExW(key, name, nullptr, &type,
-                         reinterpret_cast<LPBYTE>(buf.data()), &bytes) != ERROR_SUCCESS) {
+                         reinterpret_cast<LPBYTE>(buf.data()), &readBytes) != ERROR_SUCCESS ||
+        readBytes > bytes) {
         return {};
     }
     if (type == REG_MULTI_SZ) {
         std::string joined;
-        const wchar_t* p = buf.c_str();
-        while (*p != L'\0') {
+        const wchar_t* p = buf.data();
+        const wchar_t* end = buf.data() + buf.size();
+        while (p < end && *p != L'\0') {
             if (!joined.empty()) joined += " ";
-            joined += WideToUtf8(p);
-            p += std::wcslen(p) + 1;
+            const size_t rem = static_cast<size_t>(end - p);
+            size_t len = 0;
+            while (len < rem && p[len] != L'\0') {
+                ++len;
+            }
+            joined += WideToUtf8(std::wstring_view(p, len));
+            p += len + 1;
         }
         return Utf8ToWide(joined);
     }
@@ -1178,16 +1188,19 @@ void SystemDiagnostics::StartScanAsync(
         return;
     }
 
-    scanThread_ = std::thread([this, devs = std::move(devicesSnapshot), log = std::move(onLog)]() {
+    const uint64_t myEpoch = snapshotEpoch_.load();
+    scanThread_ = std::thread([this, myEpoch, devs = std::move(devicesSnapshot), log = std::move(onLog)]() {
         auto snap = CollectSynchronously(devs);
         const size_t disabledSvc = snap.disabledCriticalServices;
         const size_t attCtrl = snap.attentionControllers;
-        if (!stopRequested_.load() && !runningAction_.load()) {
+        if (!stopRequested_.load() && !runningAction_.load() && snapshotEpoch_.load() == myEpoch) {
             {
                 std::lock_guard<std::mutex> dataLock(dataMutex_);
-                snapshot_ = std::move(snap);
+                if (snapshotEpoch_.load() == myEpoch && !runningAction_.load()) {
+                    snapshot_ = std::move(snap);
+                    generation_.fetch_add(1);
+                }
             }
-            generation_.fetch_add(1);
         }
         scanning_.store(false);
         if (!stopRequested_.load() && log && (disabledSvc > 0 || attCtrl > 0)) {
@@ -1210,13 +1223,19 @@ void SystemDiagnostics::RunMaintenanceAsync(
     if (stopRequested_.load()) {
         return;
     }
-    if (runningAction_.exchange(true)) {
+    if (scanning_.load() || runningAction_.exchange(true)) {
         lock.unlock();
         if (onLog) {
-            onLog(LogLevel::Warning, "Операция обслуживания уже выполняется.");
+            onLog(LogLevel::Warning,
+                  scanning_.load() ? "Дождитесь завершения сканирования системы."
+                                   : "Операция обслуживания уже выполняется.");
+        }
+        if (onComplete) {
+            onComplete(false);
         }
         return;
     }
+    snapshotEpoch_.fetch_add(1);
     if (actionThread_.joinable()) {
         oldThread = std::move(actionThread_);
     }
@@ -1356,6 +1375,7 @@ void SystemDiagnostics::RunMaintenanceAsync(
             auto refreshed = CollectSynchronously(devs);
             {
                 std::lock_guard<std::mutex> dataLock(dataMutex_);
+                snapshotEpoch_.fetch_add(1);
                 snapshot_ = std::move(refreshed);
             }
             generation_.fetch_add(1);
@@ -1661,6 +1681,15 @@ bool SystemDiagnostics::RunSystemToolSync(
     HandleGuard thread(pi.hThread);
     pipeWrite.Reset();
 
+    HandleGuard job(CreateJobObjectW(nullptr, nullptr));
+    if (job.IsValid()) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION jeli{};
+        jeli.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        if (SetInformationJobObject(job.Get(), JobObjectExtendedLimitInformation, &jeli, sizeof(jeli))) {
+            AssignProcessToJobObject(job.Get(), proc.Get());
+        }
+    }
+
     if (onLog) {
         onLog(LogLevel::Info, "Запущена утилита: " + title + "...");
     }
@@ -1675,8 +1704,8 @@ bool SystemDiagnostics::RunSystemToolSync(
     for (;;) {
         if (cancelFlag != nullptr && cancelFlag->load()) {
             cancelled = true;
-            GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pi.dwProcessId);
-            if (WaitForSingleObject(proc.Get(), 3000) == WAIT_TIMEOUT) {
+            const BOOL ctrlSent = GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, pi.dwProcessId);
+            if (!ctrlSent || WaitForSingleObject(proc.Get(), 3000) == WAIT_TIMEOUT) {
                 TerminateProcess(proc.Get(), 1);
                 WaitForSingleObject(proc.Get(), 2000);
             }

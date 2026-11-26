@@ -35,7 +35,7 @@ std::wstring ReadRegStr(HKEY key, const wchar_t* name) {
     DWORD type = 0;
     DWORD bytes = 0;
     if (RegQueryValueExW(key, name, nullptr, &type, nullptr, &bytes) != ERROR_SUCCESS ||
-        bytes == 0 || (type != REG_SZ && type != REG_EXPAND_SZ)) {
+        bytes == 0 || bytes > 65536u || (type != REG_SZ && type != REG_EXPAND_SZ)) {
         return {};
     }
     std::wstring buf(bytes / sizeof(wchar_t) + 2, L'\0');
@@ -568,13 +568,16 @@ SystemComponentsScanner::SystemComponentsScanner()
       installHttpRegistry_(std::make_shared<HttpRequestRegistry>()) {}
 
 SystemComponentsScanner::~SystemComponentsScanner() {
-    stopRequested_.store(true);
-    cancelInstallRequested_.store(true);
-    if (onlineHttpRegistry_) {
-        onlineHttpRegistry_->AbortAll();
-    }
-    if (installHttpRegistry_) {
-        installHttpRegistry_->AbortAll();
+    {
+        std::lock_guard<std::mutex> lock(threadMutex_);
+        stopRequested_.store(true);
+        cancelInstallRequested_.store(true);
+        if (onlineHttpRegistry_) {
+            onlineHttpRegistry_->Shutdown();
+        }
+        if (installHttpRegistry_) {
+            installHttpRegistry_->Shutdown();
+        }
     }
     for (;;) {
         std::thread scanT;
@@ -589,6 +592,8 @@ SystemComponentsScanner::~SystemComponentsScanner() {
         if (!scanT.joinable() && !onlineT.joinable() && !installT.joinable()) {
             break;
         }
+        if (onlineHttpRegistry_) onlineHttpRegistry_->AbortAll();
+        if (installHttpRegistry_) installHttpRegistry_->AbortAll();
         if (installT.joinable()) installT.join();
         if (onlineT.joinable()) onlineT.join();
         if (scanT.joinable()) scanT.join();
@@ -596,6 +601,7 @@ SystemComponentsScanner::~SystemComponentsScanner() {
 }
 
 void SystemComponentsScanner::RequestCancelInstall() noexcept {
+    std::lock_guard<std::mutex> lock(threadMutex_);
     cancelInstallRequested_.store(true);
     if (installHttpRegistry_) {
         installHttpRegistry_->AbortAll();
@@ -778,33 +784,70 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
             }
         }
 
-        // Group 1: .NET Desktop Runtime 8.0, 9.0 & 10.0
+        // Group 1: .NET Desktop Runtime 8.0, 9.0 & 10.0 (via compact releases-index.json ~7 KB)
         auto fDotnet = std::async(std::launch::async, [&]() {
             ScopedHttpRegistry onlineScope(onlineHttpRegistry_.get());
-            const auto checkDotnet = [&](const std::string& compId, const std::wstring& metaUrl) {
-                const HttpResponse resp = WinHttpRequest(metaUrl, L"GET", true, 4 * 1024 * 1024);
-                if (!resp.ok || resp.truncated || resp.body.empty()) {
-                    updateItem(compId, [](SystemComponentItem& item) {
-                        item.latestVersion = "Недоступно";
-                        item.onlineChecked = true;
-                    });
-                    return;
+            const HttpResponse indexResp = WinHttpRequest(
+                L"https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/releases-index.json",
+                L"GET",
+                true,
+                256 * 1024);
+            const auto markUnavailable = [&](const std::string& compId) {
+                updateItem(compId, [](SystemComponentItem& item) {
+                    item.latestVersion = "Недоступно";
+                    item.onlineChecked = true;
+                });
+            };
+            if (!indexResp.ok || indexResp.truncated || indexResp.body.empty()) {
+                markUnavailable("rt_dotnet8");
+                markUnavailable("rt_dotnet9");
+                markUnavailable("rt_dotnet10");
+                return;
+            }
+
+            const std::pair<const char*, const char*> kChannels[3] = {
+                {"rt_dotnet8", "8.0"},
+                {"rt_dotnet9", "9.0"},
+                {"rt_dotnet10", "10.0"},
+            };
+            for (const auto& [compId, channelVer] : kChannels) {
+                std::string latest;
+                size_t searchPos = 0;
+                while (searchPos < indexResp.body.size()) {
+                    const size_t keyPos = indexResp.body.find("\"channel-version\"", searchPos);
+                    if (keyPos == std::string::npos) {
+                        break;
+                    }
+                    const std::string foundCh =
+                        ExtractJsonStringField(indexResp.body, "channel-version", keyPos);
+                    if (foundCh == channelVer) {
+                        const size_t objStart = indexResp.body.rfind('{', keyPos);
+                        const size_t objEnd = indexResp.body.find('}', keyPos);
+                        if (objStart != std::string::npos && objEnd != std::string::npos &&
+                            objEnd > objStart) {
+                            const std::string objSlice =
+                                indexResp.body.substr(objStart, objEnd - objStart + 1);
+                            latest = ExtractJsonStringField(objSlice, "latest-runtime");
+                        }
+                        break;
+                    }
+                    searchPos = keyPos + 17;
                 }
-                const std::string latest = ExtractJsonStringField(resp.body, "latest-runtime");
+
                 bool validDotnetVer = !latest.empty() &&
                                       std::isdigit(static_cast<unsigned char>(latest.front())) != 0 &&
                                       std::isdigit(static_cast<unsigned char>(latest.back())) != 0 &&
                                       latest.find('.') != std::string::npos &&
                                       latest.find("..") == std::string::npos;
                 for (unsigned char ch : latest) {
-                    const bool ok = std::isdigit(ch) || ch == '.';
-                    if (!ok) {
+                    if (!std::isdigit(ch) && ch != '.') {
                         validDotnetVer = false;
                         break;
                     }
                 }
                 if (!validDotnetVer) {
-                    return;
+                    markUnavailable(compId);
+                    continue;
                 }
                 const std::string dlUrl =
                     "https://builds.dotnet.microsoft.com/dotnet/WindowsDesktop/" + latest +
@@ -815,13 +858,7 @@ void SystemComponentsScanner::StartOnlineVersionCheckAsync(LogCallback onLog) {
                     item.installerArgs = "/install /passive /norestart";
                     ApplyResolvedVersionToItem(item, latest);
                 });
-            };
-            checkDotnet("rt_dotnet8",
-                        L"https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/8.0/releases.json");
-            checkDotnet("rt_dotnet9",
-                        L"https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/9.0/releases.json");
-            checkDotnet("rt_dotnet10",
-                        L"https://dotnetcli.blob.core.windows.net/dotnet/release-metadata/10.0/releases.json");
+            }
         });
 
         // Group 2: Microsoft Edge WebView2 + LunarG Vulkan Runtime
