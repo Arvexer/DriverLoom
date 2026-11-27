@@ -866,6 +866,13 @@ void TestBoundedCopyAndPackageStaging() {
     Check(!verifySub(L"v_pe_dat", L"payload.dat", peBlob, err),
           "ExtractVerify: rejects renamed unsigned PE binary (.dat)", err);
 
+    std::vector<uint8_t> peOverlap(64, 0);
+    peOverlap[0] = 'M'; peOverlap[1] = 'Z';
+    peOverlap[0x10] = 'P'; peOverlap[0x11] = 'E'; peOverlap[0x12] = 0; peOverlap[0x13] = 0;
+    peOverlap[0x3C] = 0x10; // Overlapping e_lfanew = 16 (< 64) accepted by Windows loader
+    Check(!verifySub(L"v_pe_overlap", L"overlap.dat", peOverlap, err),
+          "ExtractVerify: rejects overlapping unsigned PE header (4 <= e_lfanew < 64)", err);
+
     const std::vector<uint8_t> safeMzTxt{'M', 'Z', ' ', 'n', 'o', 't', '_', 'p', 'e'};
     Check(verifySub(L"v_txt_mz", L"readme.txt", safeMzTxt, err),
           "ExtractVerify: allows harmless .txt starting with 'MZ ' without PE signature", err);

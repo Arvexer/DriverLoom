@@ -137,6 +137,102 @@ void OpenUrlInBrowser(const std::string& url) {
     ShellExecuteW(nullptr, L"open", wUrl.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 }
 
+void LaunchSystem32Tool(HWND hwnd, const wchar_t* exeName, bool requestElevationWhenUnelevated) {
+    if (exeName == nullptr || exeName[0] == L'\0') {
+        return;
+    }
+    for (const wchar_t* p = exeName; *p != L'\0'; ++p) {
+        if (*p == L'\\' || *p == L'/' || *p == L':') {
+            return;
+        }
+    }
+
+    wchar_t sysDir[MAX_PATH]{};
+    const UINT sysLen = GetSystemDirectoryW(sysDir, MAX_PATH);
+    if (sysLen == 0 || sysLen >= MAX_PATH) {
+        return;
+    }
+
+    std::wstring sysRoot(sysDir, sysLen);
+    std::wstring fullPath = sysRoot;
+    if (!fullPath.empty() && fullPath.back() != L'\\') {
+        fullPath.push_back(L'\\');
+    }
+    fullPath += exeName;
+
+    if (hdm::IsProcessElevated() || !requestElevationWhenUnelevated) {
+        std::wstring cmdLine = hdm::QuoteWin32Arg(fullPath);
+        STARTUPINFOW si{};
+        si.cb = sizeof(si);
+        si.dwFlags = STARTF_USESHOWWINDOW;
+        si.wShowWindow = SW_SHOWNORMAL;
+        PROCESS_INFORMATION pi{};
+        if (CreateProcessW(
+                fullPath.c_str(),
+                cmdLine.data(),
+                nullptr,
+                nullptr,
+                FALSE,
+                0,
+                nullptr,
+                sysRoot.c_str(),
+                &si,
+                &pi)) {
+            hdm::HandleGuard threadGuard(pi.hThread);
+            hdm::HandleGuard procGuard(pi.hProcess);
+        }
+        return;
+    }
+
+    hdm::CoInitGuard comInit(COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    SHELLEXECUTEINFOW sei{};
+    sei.cbSize = sizeof(sei);
+    sei.hwnd = hwnd;
+    sei.lpVerb = L"runas";
+    sei.lpFile = fullPath.c_str();
+    sei.lpDirectory = sysRoot.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+    ShellExecuteExW(&sei);
+}
+
+void LaunchDeviceManager(HWND hwnd) {
+    (void)hwnd;
+    wchar_t sysDir[MAX_PATH]{};
+    const UINT sysLen = GetSystemDirectoryW(sysDir, MAX_PATH);
+    if (sysLen == 0 || sysLen >= MAX_PATH) {
+        return;
+    }
+
+    std::wstring sysRoot(sysDir, sysLen);
+    std::wstring base = sysRoot;
+    if (!base.empty() && base.back() != L'\\') {
+        base.push_back(L'\\');
+    }
+    const std::wstring mmcPath = base + L"mmc.exe";
+    const std::wstring mscPath = base + L"devmgmt.msc";
+    std::wstring cmdLine = hdm::QuoteWin32Arg(mmcPath) + L" " + hdm::QuoteWin32Arg(mscPath);
+
+    STARTUPINFOW si{};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_SHOWNORMAL;
+    PROCESS_INFORMATION pi{};
+    if (CreateProcessW(
+            mmcPath.c_str(),
+            cmdLine.data(),
+            nullptr,
+            nullptr,
+            FALSE,
+            0,
+            nullptr,
+            sysRoot.c_str(),
+            &si,
+            &pi)) {
+        hdm::HandleGuard threadGuard(pi.hThread);
+        hdm::HandleGuard procGuard(pi.hProcess);
+    }
+}
+
 // --- Semantic Theme & Typography Helpers ---
 ImVec4 SidebarBgColor() {
     return g_isLightTheme

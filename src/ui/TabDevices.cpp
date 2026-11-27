@@ -1,7 +1,6 @@
 #include "ui/DriverLoomApp.hpp"
 
 #include <cfgmgr32.h>
-#include <shellapi.h>
 
 #include <algorithm>
 #include <cmath>
@@ -447,7 +446,7 @@ void DriverLoomApp::RenderDevicesTab() {
                             scanner_.OpenDevicePropertiesAsync(dev.instanceId, MakeLogger());
                         }
                         if (ImGui::MenuItem(hdm::Tr("Диспетчер устройств Windows", "Диспетчер пристроїв Windows", "Windows Device Manager"))) {
-                            ShellExecuteW(nullptr, L"open", L"devmgmt.msc", nullptr, nullptr, SW_SHOWNORMAL);
+                            LaunchDeviceManager(hwnd_);
                         }
                         if (ImGui::MenuItem(hdm::Tr("Показать в DriverStore", "Показати у DriverStore", "Show in DriverStore"), nullptr, false, IsOemInfName(dev.infName))) {
                             JumpToDriverStorePackage(dev.infName);

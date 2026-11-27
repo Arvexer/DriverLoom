@@ -1,7 +1,5 @@
 #include "ui/DriverLoomApp.hpp"
 
-#include <shellapi.h>
-
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -777,13 +775,6 @@ void DriverLoomApp::RenderDiagnosticsTab() {
         ImGui::AlignTextToFramePadding();
         ImGui::TextDisabled("%s", trimTxt);
     } else if (diagSectionIndex_ == 2) {
-        auto launchSystem32Tool = [&](const wchar_t* exeName) {
-            wchar_t sysDir[MAX_PATH]{};
-            GetSystemDirectoryW(sysDir, MAX_PATH);
-            const std::filesystem::path fullPath = std::filesystem::path(sysDir) / exeName;
-            ShellExecuteW(hwnd_, L"open", fullPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-        };
-
         ImGui::BeginDisabled(systemRestore_.IsBusy());
         if (RenderPrimaryButton(hdm::Tr("Создать точку отката###FtRpCreate", "Створити точку відкату###FtRpCreate", "Create Restore Point###FtRpCreate"))) {
             systemRestore_.CreateRestorePointAsync(
@@ -799,11 +790,11 @@ void DriverLoomApp::RenderDiagnosticsTab() {
         const char* protLbl = hdm::Tr("Настроить защиту диска###FtProt", "Налаштувати захист диска###FtProt", "Protection Settings###FtProt");
         SameLineWrapIfNeeded(CalcButtonWidth(rstruiLbl));
         if (RenderSecondaryButton(rstruiLbl)) {
-            launchSystem32Tool(L"rstrui.exe");
+            LaunchSystem32Tool(hwnd_, L"rstrui.exe", true);
         }
         SameLineWrapIfNeeded(CalcButtonWidth(protLbl));
         if (RenderSecondaryButton(protLbl)) {
-            launchSystem32Tool(L"SystemPropertiesProtection.exe");
+            LaunchSystem32Tool(hwnd_, L"SystemPropertiesProtection.exe", true);
         }
     } else if (diagSectionIndex_ == 4) {
         ImGui::BeginDisabled(devicesCache_.empty());

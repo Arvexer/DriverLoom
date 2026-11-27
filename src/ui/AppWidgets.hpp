@@ -93,6 +93,8 @@ void SetWindowTitleBarDark(HWND hwnd, bool useDark);
 
 std::string UrlEncode(const std::string& value);
 void OpenUrlInBrowser(const std::string& url);
+void LaunchSystem32Tool(HWND hwnd, const wchar_t* exeName, bool requestElevationWhenUnelevated = true);
+void LaunchDeviceManager(HWND hwnd);
 
 // Semantic theme colors
 ImVec4 SidebarBgColor();

@@ -401,6 +401,16 @@ int RunCliModeIfRequested() {
             fileLogger(hdm::LogLevel::Error, "Недопустимый тип пакета установки.");
             return 1;
         }
+        if (pkgKindArg == L"directx") {
+            for (const auto& pub : publishers) {
+                if (pub != "Microsoft Corporation" && pub != "Microsoft Windows") {
+                    fileLogger(
+                        hdm::LogLevel::Error,
+                        "Для пакета DirectX допустимы только издатели Microsoft.");
+                    return 1;
+                }
+            }
+        }
 
         hdm::StagedPackageOptions opts;
         opts.sourcePackagePath = std::filesystem::path(targetArg);

@@ -1204,7 +1204,7 @@ std::vector<std::string_view> GetAllowedDownloadHostsForItem(
         item.id == "rt_vc2013" || item.id == "rt_vc2012" || item.id == "rt_vc2010" ||
         item.id == "rt_dx_legacy" || item.id == "rt_dotnet8" || item.id == "rt_dotnet9" ||
         item.id == "rt_dotnet10" || item.id == "rt_netfx48" || item.id == "rt_webview2") {
-        return {"microsoft.com", "aka.ms", "windowsupdate.com", "dotnetcli.azureedge.net", "msecnd.net"};
+        return {"microsoft.com", "aka.ms", "windowsupdate.com", "dotnetcli.azureedge.net"};
     }
     if (item.id == "rt_vulkan") {
         return {"lunarg.com"};

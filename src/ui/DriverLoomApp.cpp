@@ -2482,13 +2482,7 @@ void DriverLoomApp::RenderSystemProtectionModal() {
 
         SameLineWrapIfNeeded(CalcButtonWidth(winSetLbl));
         if (RenderSecondaryButton(winSetLbl)) {
-            wchar_t sysDir[MAX_PATH]{};
-            const UINT sysLen = GetSystemDirectoryW(sysDir, MAX_PATH);
-            if (sysLen > 0 && sysLen < MAX_PATH) {
-                const std::filesystem::path fullPath =
-                    std::filesystem::path(sysDir) / L"SystemPropertiesProtection.exe";
-                ShellExecuteW(hwnd_, L"open", fullPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-            }
+            LaunchSystem32Tool(hwnd_, L"SystemPropertiesProtection.exe", true);
         }
 
         SameLineWrapIfNeeded(CalcButtonWidth(skipLbl));

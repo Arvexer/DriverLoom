@@ -1046,7 +1046,8 @@ bool IsKnownAllowedPublisher(std::string_view token) {
 
 namespace {
 
-bool HasPeBinaryHeader(const std::filesystem::path& filePath) {
+bool InspectPeBinaryHeader(const std::filesystem::path& filePath, bool& outIsPe) {
+    outIsPe = false;
     HandleGuard file(CreateFileW(
         filePath.c_str(),
         GENERIC_READ,
@@ -1067,7 +1068,7 @@ bool HasPeBinaryHeader(const std::filesystem::path& filePath) {
         (static_cast<uint64_t>(fi.nFileSizeHigh) << 32) |
         static_cast<uint64_t>(fi.nFileSizeLow);
     if (fileSize < 64ULL) {
-        return false;
+        return true;
     }
     BYTE dosHdr[64]{};
     DWORD readBytes = 0;
@@ -1075,12 +1076,12 @@ bool HasPeBinaryHeader(const std::filesystem::path& filePath) {
         return false;
     }
     if (dosHdr[0] != 'M' || dosHdr[1] != 'Z') {
-        return false;
+        return true;
     }
     uint32_t eLfanew = 0;
     std::memcpy(&eLfanew, dosHdr + 0x3C, sizeof(eLfanew));
-    if (eLfanew < 64ULL || static_cast<uint64_t>(eLfanew) > fileSize - 4ULL) {
-        return false;
+    if (eLfanew < 4ULL || static_cast<uint64_t>(eLfanew) > fileSize - 4ULL) {
+        return true;
     }
     LARGE_INTEGER offset{};
     offset.QuadPart = static_cast<LONGLONG>(eLfanew);
@@ -1092,7 +1093,8 @@ bool HasPeBinaryHeader(const std::filesystem::path& filePath) {
     if (!ReadFile(file.Get(), peSig, sizeof(peSig), &readBytes, nullptr) || readBytes != sizeof(peSig)) {
         return false;
     }
-    return peSig[0] == 'P' && peSig[1] == 'E' && peSig[2] == 0 && peSig[3] == 0;
+    outIsPe = (peSig[0] == 'P' && peSig[1] == 'E' && peSig[2] == 0 && peSig[3] == 0);
+    return true;
 }
 
 bool IsForbiddenScriptOrRedirectExtension(std::string_view ext) {
@@ -1156,7 +1158,19 @@ bool VerifyExtractedDirectoryBinaries(
             }
             return false;
         }
-        if (IsBinaryVerificationExtension(ext) || HasPeBinaryHeader(it->path())) {
+        bool needsAuthVerify = IsBinaryVerificationExtension(ext);
+        if (!needsAuthVerify) {
+            bool isPe = false;
+            if (!InspectPeBinaryHeader(it->path(), isPe)) {
+                if (outReason != nullptr) {
+                    *outReason = WideToUtf8(it->path().filename().wstring()) +
+                                 ": не удалось открыть файл для проверки заголовка.";
+                }
+                return false;
+            }
+            needsAuthVerify = isPe;
+        }
+        if (needsAuthVerify) {
             std::string reason;
             HandleGuard fileLock;
             if (!VerifyAndLockAuthenticodeFile(
