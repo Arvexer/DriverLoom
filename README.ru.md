@@ -18,7 +18,7 @@
 
 ---
 
-**DriverLoom** — лёгкий автономный `.exe` (~2.2 МБ) без Electron, WebView, .NET-зависимостей и сторонних DLL. Написан на чистом **C++20** с нативными вызовами Win32 API (`SetupAPI`, `CfgMgr32`, `DXGI`, `Windows Update Agent COM`, `WinHTTP`, `WinVerifyTrust`, `SRSetRestorePointW`, `DiInstallDriverW`), аппаратным рендерингом **DirectX 11** и интерфейсом на **Dear ImGui (`docking`)**.
+**DriverLoom** — лёгкий автономный `.exe` (~2.5 МБ) без Electron, WebView, .NET-зависимостей и сторонних DLL. Написан на чистом **C++20** с нативными вызовами Win32 API (`SetupAPI`, `CfgMgr32`, `DXGI`, `Windows Update Agent COM`, `WinHTTP`, `WinVerifyTrust`, `SRSetRestorePointW`, `WMI SystemRestore`, `DiInstallDriverW`), аппаратным рендерингом **DirectX 11** и интерфейсом на **Dear ImGui (`docking`)**.
 
 ---
 
@@ -106,7 +106,7 @@
 - **Игровые и системные библиотеки**: `Visual C++ Redistributable (2010–2022)`, `DirectX End-User Runtime`, `.NET Desktop Runtime 8 / 9 / 10`, `.NET Framework 4.8.1`, `WebView2`, `Vulkan Runtime`, `OpenAL`.
 - **Драйверы и GPU / чипсет**: определяет видеокарты NVIDIA, AMD, Intel, чипсеты, встроенное аудио, LAN, Wi-Fi и Bluetooth с поиском актуальных версий и WHQL-пакетов.
 - **Фирменное доп. ПО (`Доп. ПО`)**: распознаёт софт периферии (мыши, клавиатуры), материнских плат (например, ASUS Armoury Crate) и утилиты мониторов, помечает их статусом **«По желанию»** и не включает в рекомендуемую пакетную установку.
-- **Карточный интерфейс**: фильтры `Все`, `Игры`, `Драйверы и GPU`, `Доп. ПО`, проверка контрольных сумм `InstallerSha256` из манифестов, верификация цифровой подписи (`WinVerifyTrust`) и издателя Authenticode перед запуском, а также автоматическая точка восстановления.
+- **Карточный интерфейс**: фильтры `Все`, `Игры`, `Драйверы и GPU`, `Доп. ПО`, скрытие уведомлений об обновлениях для выбранных компонентов (`Скрыть уведомления`), проверка контрольных сумм `InstallerSha256` из манифестов, верификация цифровой подписи (`WinVerifyTrust`) и издателя Authenticode перед запуском, а также автоматическая точка восстановления.
 
 ### Раздел 3 — Обновления Windows
 - **Интеграция с Windows Update Agent (WUA COM API)**: понятный стартовый экран запуска проверки, асинхронный поиск драйверов и системных обновлений Windows (`IUpdateSession`), загрузка и установка со шкалой прогресса (`BeginDownload` / `BeginInstall`).
@@ -125,7 +125,7 @@
 - **Бэкап драйверов и обезличенный отчёт**: быстрый экспорт резервной копии сторонних драйверов и сохранение/копирование отчёта **Markdown (`.md`)**, **TXT** или **JSON** с автоматической санитизацией личных путей и имён пользователей.
 - **Диагностические подразделы**:
   1. **Драйверы платы**: аудит драйверов GPU (`[VRAM]`), чипсета, сети LAN, Wi-Fi, аудио и Bluetooth с установкой WHQL из Catalog (или возвратом системного драйвера Windows).
-  2. **Точки отката**: история точек восстановления из журнала событий Windows и быстрый вызов `rstrui.exe` / настроек защиты.
+  2. **Точки отката**: история точек восстановления из журнала событий Windows и быстрый вызов `rstrui.exe` / настроек защиты; если защита системы выключена перед установкой, DriverLoom предложит включить её в 1 клик через нативный WMI (`SystemRestore::Enable`).
   3. **Диски и питание**: состояние контроллеров `NVMe` / `SATA AHCI` и дисков, статус `NTFS TRIM` и переключатель схем электропитания Windows (`powrprof.dll`).
   4. **Службы** *(в режиме «Эксперт»)*: аудит критичных служб (`wuauserv`, `BITS`, `TrustedInstaller`, `CryptSvc`, `PlugPlay`, `VSS`, `UsoSvc` и др.), их включение и запуск `SFC /scannow`, `DISM CheckHealth`, `DISM RestoreHealth`.
   5. **До / После** *(в режиме «Эксперт»)*: сравнение текущих версий и статусов драйверов с сохранённым базовым снимком.
@@ -154,8 +154,8 @@
 - **Минимальные привилегии (`asInvoker`)**: в [`resources/app.manifest`](resources/app.manifest) отключён принудительный `requireAdministrator`; запрос UAC (`ShellExecuteExW` с `"runas"`) выполняется только при реальной установке, очистке или изменении системных параметров.
 - **Защита от DLL Search-Order Hijacking**: вызов `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)` в самом начале `WinMain`, флаг линковщика `/DEPENDENTLOADFLAG:0x800` в сборках MSVC и загрузка динамических DLL исключительно через `LoadLibraryExW(..., LOAD_LIBRARY_SEARCH_SYSTEM32)`.
 - **Проверка SHA-256 и издателя Authenticode**: сверяет `InstallerSha256` из манифестов WinGet до распаковки/запуска, проверяет скачиваемые `.cab`-пакеты и установщики через Windows **Authenticode (`WinVerifyTrust`)** с контролем ожидаемого издателя (`Subject CN/O`), удерживает дескриптор для защиты от TOCTOU и проверяет сопутствующие бинарники внутри распакованных архивов (`DXSETUP.exe`, `DSETUP.dll`, `dsetup32.dll`).
-- **Защищённые загрузки, распаковка и DriverStore**: принудительный HTTPS с TLS 1.2/1.3 (`WinHTTP`) и белыми списками хостов, строгие лимиты распаковки архивов (размер, число файлов, защита от traversal, NTFS ADS `:` и репарс-поинтов), безопасное удаление неиспользуемых пакетов `DriverStore` через `SetupUninstallOEMInfW` (без принудительного удаления) и проверка канонических путей `%TEMP%` в повышенном `CliWorker`.
-- **Защитные флаги PE и метаданные**: корректный `VERSIONINFO` (`1.2.0.0`, издатель `Arvexer`) в [`resources/version.rc`](resources/version.rc); сборки MSVC Release включают статический CRT (`/MT`), Control Flow Guard (`/GUARD:CF`), ASLR (`/DYNAMICBASE`, `/HIGHENTROPYVA`), DEP (`/NXCOMPAT`) и Shadow Stack (`/CETCOMPAT`) с автоматической проверкой в GitHub Actions CI.
+- **Защищённые загрузки, распаковка и запуски**: принудительный HTTPS с TLS 1.2/1.3 (`WinHTTP`) и белыми списками хостов, строгие лимиты нативной распаковки через `SafeZipExtractor` (размер, число файлов, защита от traversal, NTFS ADS `:` и репарс-поинтов) и проверка перекрывающихся PE-заголовков, безопасный запуск системных утилит и повышенных установщиков через `CreateProcessW`, безопасное удаление неиспользуемых пакетов `DriverStore` через `SetupUninstallOEMInfW` (без принудительного удаления) и проверка канонических путей `%TEMP%` в повышенном `CliWorker`.
+- **Защитные флаги PE и метаданные**: корректный `VERSIONINFO` (`1.2.1.0`, издатель `Arvexer`) в [`resources/version.rc`](resources/version.rc); сборки MSVC Release включают статический CRT (`/MT`), Control Flow Guard (`/GUARD:CF`), ASLR (`/DYNAMICBASE`, `/HIGHENTROPYVA`), DEP (`/NXCOMPAT`) и Shadow Stack (`/CETCOMPAT`) с автоматической проверкой в GitHub Actions CI.
 - **Чистый нативный код**: предпочтение нативных Win32/COM API (`DiInstallDriverW`), строгое RAII-освобождение `HDEVINFO` / дескрипторов / COM-объектов, безопасное экранирование аргументов CLI, ноль телеметрии и отсутствие упаковщиков исполняемых файлов (UPX и аналогов).
 
 ---
@@ -164,39 +164,44 @@
 
 ```text
 ├── CMakeLists.txt                     # Конфигурация CMake + FetchContent (ImGui docking)
+├── cmake/
+│   └── CheckHygiene.cmake             # Статические проверки безопасности/гигиены и 4-сторонней синхронизации версии
 ├── LICENSE                            # Лицензия MIT (Arvexer)
 ├── README.md                          # Документация (EN)
 ├── README.ru.md                       # Документация (RU)
 ├── resources/
 │   ├── app.ico                        # Иконка приложения
 │   ├── app.manifest                   # Манифест (asInvoker, PerMonitorV2 DPI, Win10/11)
-│   └── version.rc                     # PE VERSIONINFO (DriverLoom v1.2.0.0, Arvexer)
-└── src/
-    ├── main.cpp                       # Точка входа WinMain, DX11 swapchain, текстура лого, WndProc
-    ├── app/
-    │   └── CliWorker.hpp/.cpp         # Повышенный UAC CLI-воркер (установка, WUA, службы, DriverStore)
-    ├── ui/
-    │   ├── AppWidgets.hpp/.cpp        # Темы Dark/Light, шрифты, DWM, настройки в реестре и UI-виджеты
-    │   ├── DriverLoomApp.hpp/.cpp     # Контроллер UI: боковая панель, Настройки, журнал, About/обновления
-    │   ├── TabOverview.cpp            # Раздел 0: Обзор и быстрые рекомендации
-    │   ├── TabComponents.cpp          # Раздел 1: Игры и ПО (библиотеки, драйверы и доп. ПО)
-    │   ├── TabWindowsUpdate.cpp       # Раздел 2: Обновления Windows
-    │   ├── TabDevices.cpp             # Раздел 3: Устройства и мониторы
-    │   ├── TabDiagnostics.cpp         # Раздел 4: Защита, система, диски/питание и «До/После»
-    │   └── TabLocalInstaller.cpp      # Раздел 5: Локальные (.inf) и хранилище DriverStore
-    ├── common/
-    │   ├── AppCommon.hpp              # UTF-8/UTF-16, RAII-гарды, квотинг CLI, логгер, UAC runas
-    │   └── Localization.hpp           # Локализация RU / UA / EN (статика + динамические статусы/логи)
-    └── core/
-        ├── DeviceScanner.hpp/.cpp     # PnP SetupAPI/CfgMgr32, EDID мониторов, GDI режимы, DXGI VRAM
-        ├── HttpClient.hpp/.cpp        # HTTPS-клиент WinHTTP и реестр отмены запросов
-        ├── PackageSecurity.hpp/.cpp   # TOCTOU-блокировка Authenticode, безопасные temp-папки, парсер YAML
-        ├── OnlineCatalogClient.hpp/.cpp # MS Update Catalog, winget-pkgs, парсеры Vulkan и AMD
-        ├── SystemComponentsScanner.*  # Аудит библиотек/периферии/GPU и установка из MS Update Catalog
-        ├── WindowsUpdateManager.*     # Поиск, установка и скрытие обновлений через WUA COM API
-        ├── LocalDriverInstaller.*     # DiInstallDriverW, анализ/бэкап/очистка DriverStore
-        ├── SystemRestore.*            # Создание точек восстановления (SRSetRestorePointW)
-        └── SystemDiagnostics.*        # SMBIOS, службы, контроллеры, NVMe/SATA, питание, отчёты
+│   └── version.rc                     # PE VERSIONINFO (DriverLoom v1.2.1.0, Arvexer)
+├── src/
+│   ├── main.cpp                       # Точка входа WinMain, DX11 swapchain, текстура лого, WndProc
+│   ├── app/
+│   │   └── CliWorker.hpp/.cpp         # Повышенный UAC CLI-воркер (установка, WUA, службы, DriverStore, SystemRestore)
+│   ├── ui/
+│   │   ├── AppWidgets.hpp/.cpp        # Темы Dark/Light, шрифты, DWM, настройки в реестре и UI-виджеты
+│   │   ├── DriverLoomApp.hpp/.cpp     # Контроллер UI: боковая панель, Настройки, журнал, About/обновления
+│   │   ├── TabOverview.cpp            # Раздел 0: Обзор и быстрые рекомендации
+│   │   ├── TabComponents.cpp          # Раздел 1: Игры и ПО (библиотеки, драйверы и доп. ПО)
+│   │   ├── TabWindowsUpdate.cpp       # Раздел 2: Обновления Windows
+│   │   ├── TabDevices.cpp             # Раздел 3: Устройства и мониторы
+│   │   ├── TabDiagnostics.cpp         # Раздел 4: Защита, система, диски/питание и «До/После»
+│   │   └── TabLocalInstaller.cpp      # Раздел 5: Локальные (.inf) и хранилище DriverStore
+│   ├── common/
+│   │   ├── AppCommon.hpp              # UTF-8/UTF-16, RAII-гарды, квотинг CLI, логгер, UAC runas
+│   │   └── Localization.hpp           # Локализация RU / UA / EN (статика + динамические статусы/логи)
+│   └── core/
+│       ├── DeviceScanner.hpp/.cpp     # PnP SetupAPI/CfgMgr32, EDID мониторов, GDI режимы, DXGI VRAM
+│       ├── HttpClient.hpp/.cpp        # HTTPS-клиент WinHTTP и реестр отмены запросов
+│       ├── PackageSecurity.hpp/.cpp   # TOCTOU-блокировка Authenticode, безопасные temp-папки, PE/архивы/YAML
+│       ├── SafeZipExtractor.hpp/.cpp  # Нативная распаковка ZIP с лимитами размера, путей и ADS
+│       ├── OnlineCatalogClient.hpp/.cpp # MS Update Catalog, winget-pkgs, парсеры Vulkan и AMD
+│       ├── SystemComponentsScanner.*  # Аудит библиотек/периферии/GPU и установка из MS Update Catalog
+│       ├── WindowsUpdateManager.*     # Поиск, установка и скрытие обновлений через WUA COM API
+│       ├── LocalDriverInstaller.*     # DiInstallDriverW, анализ/бэкап/очистка DriverStore
+│       ├── SystemRestore.*            # Точки восстановления (SRSetRestorePointW) и WMI SystemRestore::Enable
+│       └── SystemDiagnostics.*        # SMBIOS, службы, контроллеры, NVMe/SATA, питание, отчёты
+└── tests/
+    └── DriverLoomTests.cpp            # Юнит-тесты безопасности, парсеров, WMI/SR-состояний и архивов
 ```
 
 ---

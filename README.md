@@ -18,7 +18,7 @@
 
 ---
 
-**DriverLoom** is a lightweight, standalone `.exe` (~2.2 MB) with zero Electron, WebView, .NET, or external DLL dependencies. Built in pure **C++20** with native Win32 APIs (`SetupAPI`, `CfgMgr32`, `DXGI`, `Windows Update Agent COM`, `WinHTTP`, `WinVerifyTrust`, `SRSetRestorePointW`, `DiInstallDriverW`), **DirectX 11** hardware rendering, and **Dear ImGui (`docking`)**.
+**DriverLoom** is a lightweight, standalone `.exe` (~2.5 MB) with zero Electron, WebView, .NET, or external DLL dependencies. Built in pure **C++20** with native Win32 APIs (`SetupAPI`, `CfgMgr32`, `DXGI`, `Windows Update Agent COM`, `WinHTTP`, `WinVerifyTrust`, `SRSetRestorePointW`, `WMI SystemRestore`, `DiInstallDriverW`), **DirectX 11** hardware rendering, and **Dear ImGui (`docking`)**.
 
 ---
 
@@ -106,7 +106,7 @@
 - **Gaming & System Runtimes**: `Visual C++ Redistributable (2010–2022)`, `DirectX End-User Runtime`, `.NET Desktop Runtime 8 / 9 / 10`, `.NET Framework 4.8.1`, `Edge WebView2`, `Vulkan Runtime`, and `OpenAL`.
 - **Drivers & GPU / Chipset**: detects NVIDIA, AMD, Intel GPUs, AMD/Intel chipsets, onboard audio, LAN, Wi-Fi, and Bluetooth adapters and resolves WHQL/vendor updates.
 - **Optional Third-Party Software (`Optional Apps`)**: detects connected peripherals (mice, keyboards), motherboards (e.g., ASUS Armoury Crate), and monitor companion tools, clearly marking them **Optional** and excluding them from recommended automatic batch installs.
-- **Verified Installation**: card-based layout with `All`, `Gaming`, `Drivers & GPU`, and `Optional Apps` filters, `InstallerSha256` manifest verification, Authenticode (`WinVerifyTrust`) trust-chain & expected publisher checks before launch, and automatic Restore Point protection.
+- **Verified Installation**: card-based layout with `All`, `Gaming`, `Drivers & GPU`, and `Optional Apps` filters, per-component update notification muting (`Mute Notifications`), `InstallerSha256` manifest verification, Authenticode (`WinVerifyTrust`) trust-chain & expected publisher checks before launch, and automatic Restore Point protection.
 
 ### Page 3 — Windows Update
 - **Windows Update Agent (WUA COM API)**: welcoming scan prompt on entry, asynchronous driver and optional Windows system update discovery (`IUpdateSession`), download, and installation with live progress (`BeginDownload` / `BeginInstall`).
@@ -125,7 +125,7 @@
 - **Driver Backup & Clean PC Report**: exports third-party drivers or saves/copies a **Markdown (`.md`)**, **TXT**, or **JSON** summary report with automatic sanitization of personal paths and usernames.
 - **Built-in Diagnostic Views**:
   1. **Board Drivers**: audits GPU (`[VRAM]`), chipset, LAN, Wi-Fi, audio, and Bluetooth drivers with one-click Microsoft Update Catalog WHQL installation (or inbox Windows driver restoration when applicable).
-  2. **Restore Points**: lists recent System Restore points from the Windows Event Log with shortcuts to `rstrui.exe` and System Protection settings.
+  2. **Restore Points**: lists recent System Restore points from the Windows Event Log with shortcuts to `rstrui.exe` and System Protection settings; if System Protection is disabled before an installation, DriverLoom prompts with a 1-click native WMI enable (`SystemRestore::Enable`).
   3. **Storage & Power**: displays `NVMe` / `SATA AHCI` controller and disk status, `NTFS TRIM` state, and a live Windows power plan switcher (`powrprof.dll`).
   4. **Services & Updates** *(Expert Mode)*: audits critical services (`wuauserv`, `BITS`, `TrustedInstaller`, `CryptSvc`, `PlugPlay`, `VSS`, `UsoSvc`, etc.), enables disabled services, and runs `SFC /scannow`, `DISM CheckHealth`, and `DISM RestoreHealth`.
   5. **Before / After Diff** *(Expert Mode)*: compares current driver versions and device health against a saved baseline (`Driver Updated`, `Issue Fixed`, `New Issue`, `Added`, `Removed`).
@@ -154,8 +154,8 @@
 - **Least Privilege (`asInvoker`)**: [`resources/app.manifest`](resources/app.manifest) avoids forced startup elevation; UAC (`ShellExecuteExW` with `"runas"`) is requested on demand only for actual driver installation, `DriverStore` cleanup, or system repair actions.
 - **DLL Search-Order Hijacking Protection**: calls `SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32)` at the very start of `WinMain`, enables `/DEPENDENTLOADFLAG:0x800` in MSVC builds, and restricts dynamic `LoadLibraryExW` calls exclusively to `System32` (`LOAD_LIBRARY_SEARCH_SYSTEM32`).
 - **SHA-256 & Authenticode Publisher Verification**: validates `InstallerSha256` checksums from WinGet manifests before extraction/launch, verifies downloaded `.cab` packages and vendor installers via Windows `WinVerifyTrust` against expected publishers (`Subject CN/O`), holds open file locks against TOCTOU tampering, and verifies companion binaries inside extracted archives (`DXSETUP.exe`, `DSETUP.dll`, `dsetup32.dll`).
-- **Hardened Downloads, Archives & DriverStore Safety**: enforces HTTPS with TLS 1.2/1.3 (`WinHTTP`) and download host allowlists, bounds archive extraction (total size, file count, path traversal, NTFS ADS `:`, and reparse-point checks), safely removes unused `DriverStore` packages via `SetupUninstallOEMInfW` (without forced deletion), and validates canonical `%TEMP%` paths for elevated `CliWorker` logs and cancel files.
-- **PE Hardening & Complete Metadata**: [`resources/version.rc`](resources/version.rc) provides full `VERSIONINFO` metadata (`DriverLoom v1.2.0.0`, publisher `Arvexer`); MSVC Release builds enable static CRT (`/MT`), Control Flow Guard (`/GUARD:CF`), ASLR (`/DYNAMICBASE`, `/HIGHENTROPYVA`), DEP (`/NXCOMPAT`), and Shadow Stack (`/CETCOMPAT`) — verified automatically in GitHub Actions CI.
+- **Hardened Downloads, Archives & Launches**: enforces HTTPS with TLS 1.2/1.3 (`WinHTTP`) and download host allowlists, bounds native archive extraction via `SafeZipExtractor` (total size, file count, path traversal, NTFS ADS `:`, and reparse-point checks) with overlapping-PE inspection, launches System32 tools and elevated packages directly via `CreateProcessW`, safely removes unused `DriverStore` packages via `SetupUninstallOEMInfW` (without forced deletion), and validates canonical `%TEMP%` paths for elevated `CliWorker` logs and cancel files.
+- **PE Hardening & Complete Metadata**: [`resources/version.rc`](resources/version.rc) provides full `VERSIONINFO` metadata (`DriverLoom v1.2.1.0`, publisher `Arvexer`); MSVC Release builds enable static CRT (`/MT`), Control Flow Guard (`/GUARD:CF`), ASLR (`/DYNAMICBASE`, `/HIGHENTROPYVA`), DEP (`/NXCOMPAT`), and Shadow Stack (`/CETCOMPAT`) — verified automatically in GitHub Actions CI.
 - **Clean Native Code**: prioritizes Win32/COM APIs (`DiInstallDriverW`), uses strict RAII guards for `HDEVINFO` and COM interfaces, safely quotes elevated worker CLI arguments, uses zero telemetry, and uses no executable packers (no UPX or similar).
 
 ---
@@ -164,39 +164,44 @@
 
 ```text
 ├── CMakeLists.txt                     # CMake build configuration + FetchContent (ImGui docking)
+├── cmake/
+│   └── CheckHygiene.cmake             # Static security/hygiene & 4-way version sync checks
 ├── LICENSE                            # MIT License (Arvexer)
 ├── README.md                          # Documentation (EN)
 ├── README.ru.md                       # Documentation (RU)
 ├── resources/
 │   ├── app.ico                        # Application icon
 │   ├── app.manifest                   # Win32 manifest (asInvoker, PerMonitorV2 DPI, Win10/11)
-│   └── version.rc                     # PE VERSIONINFO (DriverLoom v1.2.0.0, Arvexer)
-└── src/
-    ├── main.cpp                       # WinMain entry point, DX11 swapchain, logo texture, WndProc
-    ├── app/
-    │   └── CliWorker.hpp/.cpp         # Elevated UAC CLI worker (INF, WUA, services, DriverStore, inbox)
-    ├── ui/
-    │   ├── AppWidgets.hpp/.cpp        # Dark/Light themes, fonts, DWM, registry prefs & custom widgets
-    │   ├── DriverLoomApp.hpp/.cpp     # UI controller: sidebar, settings, status/log drawer, About/updater
-    │   ├── TabOverview.cpp            # Page 0: Overview dashboard & Quick Recommendations
-    │   ├── TabComponents.cpp          # Page 1: Games, Runtimes, Drivers & Optional Apps
-    │   ├── TabWindowsUpdate.cpp       # Page 2: Windows Update
-    │   ├── TabDevices.cpp             # Page 3: Devices & Monitors
-    │   ├── TabDiagnostics.cpp         # Page 4: System, Protection, Storage/Power & Diff
-    │   └── TabLocalInstaller.cpp      # Page 5: Local (.inf) & DriverStore
-    ├── common/
-    │   ├── AppCommon.hpp              # UTF-8/UTF-16, RAII guards, CLI quoting, logger, UAC runas
-    │   └── Localization.hpp           # EN / RU / UA localization (static UI & dynamic logs/statuses)
-    └── core/
-        ├── DeviceScanner.hpp/.cpp     # PnP SetupAPI/CfgMgr32, monitor EDID, display modes, DXGI VRAM
-        ├── HttpClient.hpp/.cpp        # WinHTTP HTTPS client & cancellation registry
-        ├── PackageSecurity.hpp/.cpp   # Authenticode TOCTOU lock, safe temp dirs, archive/YAML hardening
-        ├── OnlineCatalogClient.hpp/.cpp # MS Update Catalog, winget-pkgs, Vulkan & AMD parsers
-        ├── SystemComponentsScanner.*  # Runtime/peripheral/GPU audit & MS Update Catalog CAB installer
-        ├── WindowsUpdateManager.*     # WUA COM API search, install progress & update hiding
-        ├── LocalDriverInstaller.*     # DiInstallDriverW, DriverStore analysis, backup & cleanup
-        ├── SystemRestore.*            # System Restore Point creation (SRSetRestorePointW)
-        └── SystemDiagnostics.*        # SMBIOS, services, controllers, NVMe/SATA, power, clean reports
+│   └── version.rc                     # PE VERSIONINFO (DriverLoom v1.2.1.0, Arvexer)
+├── src/
+│   ├── main.cpp                       # WinMain entry point, DX11 swapchain, logo texture, WndProc
+│   ├── app/
+│   │   └── CliWorker.hpp/.cpp         # Elevated UAC CLI worker (INF, WUA, services, DriverStore, SystemRestore, inbox)
+│   ├── ui/
+│   │   ├── AppWidgets.hpp/.cpp        # Dark/Light themes, fonts, DWM, registry prefs & custom widgets
+│   │   ├── DriverLoomApp.hpp/.cpp     # UI controller: sidebar, settings, status/log drawer, About/updater
+│   │   ├── TabOverview.cpp            # Page 0: Overview dashboard & Quick Recommendations
+│   │   ├── TabComponents.cpp          # Page 1: Games, Runtimes, Drivers & Optional Apps
+│   │   ├── TabWindowsUpdate.cpp       # Page 2: Windows Update
+│   │   ├── TabDevices.cpp             # Page 3: Devices & Monitors
+│   │   ├── TabDiagnostics.cpp         # Page 4: System, Protection, Storage/Power & Diff
+│   │   └── TabLocalInstaller.cpp      # Page 5: Local (.inf) & DriverStore
+│   ├── common/
+│   │   ├── AppCommon.hpp              # UTF-8/UTF-16, RAII guards, CLI quoting, logger, UAC runas
+│   │   └── Localization.hpp           # EN / RU / UA localization (static UI & dynamic logs/statuses)
+│   └── core/
+│       ├── DeviceScanner.hpp/.cpp     # PnP SetupAPI/CfgMgr32, monitor EDID, display modes, DXGI VRAM
+│       ├── HttpClient.hpp/.cpp        # WinHTTP HTTPS client & cancellation registry
+│       ├── PackageSecurity.hpp/.cpp   # Authenticode TOCTOU lock, safe temp dirs, PE/archive/YAML hardening
+│       ├── SafeZipExtractor.hpp/.cpp  # Native ZIP archive extraction with size/path/ADS limits
+│       ├── OnlineCatalogClient.hpp/.cpp # MS Update Catalog, winget-pkgs, Vulkan & AMD parsers
+│       ├── SystemComponentsScanner.*  # Runtime/peripheral/GPU audit & MS Update Catalog CAB installer
+│       ├── WindowsUpdateManager.*     # WUA COM API search, install progress & update hiding
+│       ├── LocalDriverInstaller.*     # DiInstallDriverW, DriverStore analysis, backup & cleanup
+│       ├── SystemRestore.*            # Restore Point creation (SRSetRestorePointW) & WMI SystemRestore::Enable
+│       └── SystemDiagnostics.*        # SMBIOS, services, controllers, NVMe/SATA, power, clean reports
+└── tests/
+    └── DriverLoomTests.cpp            # Unit tests for security, parsing, WMI/SR state & archive hardening
 ```
 
 ---
