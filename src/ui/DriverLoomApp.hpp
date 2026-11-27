@@ -40,7 +40,7 @@ public:
         bool advancedMode,
         bool lightTheme,
         int selectDevRow = -1);
-    void OpenSystemProtectionPreviewModal() noexcept;
+    void OpenSystemProtectionPreviewModal();
 
 private:
     enum NavPage : int {
@@ -99,6 +99,7 @@ private:
     void RenderRebootBanner();
     void StartAppUpdateCheckAsync(bool manual);
     void RenderAboutModal();
+    [[nodiscard]] bool IsSystemProtectionOperationPending() const noexcept;
     void RequestProtectedInstall(
         std::string actionTitle,
         bool wantRestorePoint,

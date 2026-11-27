@@ -1,4 +1,5 @@
 #include "core/SystemDiagnostics.hpp"
+#include "core/SystemRestore.hpp"
 
 #include <shobjidl.h>
 #include <winsvc.h>
@@ -236,31 +237,9 @@ WindowsReadinessInfo ReadWindowsReadiness() {
     }
 
     {
-        RegKeyGuard srKey;
-        if (RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\SystemRestore",
-                0,
-                KEY_READ,
-                srKey.Put()) == ERROR_SUCCESS) {
-            DWORD rpInterval = 0;
-            if (ReadRegDwordVal(srKey.Get(), L"RPSessionInterval", rpInterval)) {
-                r.systemRestoreEnabled = (rpInterval != 0);
-            }
-        }
-        RegKeyGuard polKey;
-        if (RegOpenKeyExW(
-                HKEY_LOCAL_MACHINE,
-                L"SOFTWARE\\Policies\\Microsoft\\Windows NT\\SystemRestore",
-                0,
-                KEY_READ,
-                polKey.Put()) == ERROR_SUCCESS) {
-            DWORD disableSr = 0;
-            if (ReadRegDwordVal(polKey.Get(), L"DisableSR", disableSr) && disableSr != 0) {
-                r.systemRestorePolicyDisabled = true;
-                r.systemRestoreEnabled = false;
-            }
-        }
+        const SystemProtectionState srState = SystemRestore::QuerySystemProtectionState();
+        r.systemRestorePolicyDisabled = (srState == SystemProtectionState::DisabledByPolicy);
+        r.systemRestoreEnabled = (srState == SystemProtectionState::Enabled);
     }
     {
         RegKeyGuard fsKey;

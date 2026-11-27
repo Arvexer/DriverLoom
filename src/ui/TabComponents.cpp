@@ -73,7 +73,8 @@ void DriverLoomApp::RenderComponentsTab() {
     const bool busy =
         componentsScanner_.IsScanning() ||
         componentsScanner_.IsCheckingOnline() ||
-        componentsScanner_.IsInstalling();
+        componentsScanner_.IsInstalling() ||
+        IsSystemProtectionOperationPending();
 
     std::vector<hdm::SystemComponentItem> batchTargets;
     std::vector<hdm::SystemComponentItem> selectedTargets;
@@ -601,9 +602,9 @@ void DriverLoomApp::RenderComponentsTab() {
                 RequestProtectedInstall(
                     item.name,
                     compRestoreBefore_,
-                    [this, itemCopy = item](bool) {
+                    [this, itemCopy = item](bool rp) {
                         componentsScanner_.DownloadAndInstallAsync(
-                            itemCopy, devicesCache_, MakeLogger());
+                            itemCopy, devicesCache_, MakeLogger(), rp);
                         selectedComponentIds_.erase(itemCopy.id);
                     });
             }

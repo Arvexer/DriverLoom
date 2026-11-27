@@ -38,10 +38,16 @@ bool ReadDwordRegValue(HKEY key, const wchar_t* valueName, DWORD& outVal) noexce
 SystemProtectionState SystemRestore::ClassifySystemProtectionState(
     bool hasPolicyDisable,
     DWORD policyDisableVal,
+    bool hasLocalDisable,
+    DWORD localDisableVal,
     bool hasRpInterval,
-    DWORD rpIntervalVal) noexcept {
+    DWORD rpIntervalVal,
+    bool vssServiceDisabled) noexcept {
     if (hasPolicyDisable && policyDisableVal != 0) {
         return SystemProtectionState::DisabledByPolicy;
+    }
+    if ((hasLocalDisable && localDisableVal != 0) || vssServiceDisabled) {
+        return SystemProtectionState::Disabled;
     }
     if (hasRpInterval && rpIntervalVal != 0) {
         return SystemProtectionState::Enabled;
@@ -64,6 +70,8 @@ SystemProtectionState SystemRestore::QuerySystemProtectionState() noexcept {
         }
     }
 
+    bool hasLocalDisable = false;
+    DWORD localDisableVal = 0;
     bool hasRpInterval = false;
     DWORD rpIntervalVal = 0;
     {
@@ -74,12 +82,36 @@ SystemProtectionState SystemRestore::QuerySystemProtectionState() noexcept {
                 0,
                 KEY_READ,
                 srKey.Put()) == ERROR_SUCCESS) {
+            hasLocalDisable = ReadDwordRegValue(srKey.Get(), L"DisableSR", localDisableVal);
             hasRpInterval = ReadDwordRegValue(srKey.Get(), L"RPSessionInterval", rpIntervalVal);
         }
     }
 
+    bool vssDisabled = false;
+    {
+        RegKeyGuard vssKey;
+        if (RegOpenKeyExW(
+                HKEY_LOCAL_MACHINE,
+                L"SYSTEM\\CurrentControlSet\\Services\\VSS",
+                0,
+                KEY_READ,
+                vssKey.Put()) == ERROR_SUCCESS) {
+            DWORD startVal = 0;
+            if (ReadDwordRegValue(vssKey.Get(), L"Start", startVal) &&
+                startVal == SERVICE_DISABLED) {
+                vssDisabled = true;
+            }
+        }
+    }
+
     return ClassifySystemProtectionState(
-        hasPolicyDisable, policyDisableVal, hasRpInterval, rpIntervalVal);
+        hasPolicyDisable,
+        policyDisableVal,
+        hasLocalDisable,
+        localDisableVal,
+        hasRpInterval,
+        rpIntervalVal,
+        vssDisabled);
 }
 
 std::wstring SystemRestore::GetSystemDriveRootW() {
@@ -183,10 +215,10 @@ void SystemRestore::CreateRestorePointAsync(
             }
         }
 
-        busy_.store(false);
         if (complete && !stopRequested_.load()) {
             complete(ok, outMsg);
         }
+        busy_.store(false);
     });
 }
 
@@ -314,8 +346,13 @@ void SystemRestore::EnableSystemProtectionAsync(
         if (IsProcessElevated()) {
             ok = EnableSystemProtectionSync(log, &outMsg);
             if (ok && createRestorePointAfter && !stopRequested_.load()) {
-                CreateRestorePointSync(
-                    restorePointDescription.empty() ? "DriverLoom" : restorePointDescription, log);
+                if (!CreateRestorePointSync(
+                        restorePointDescription.empty() ? "DriverLoom" : restorePointDescription,
+                        log) &&
+                    log) {
+                    log(LogLevel::Warning,
+                        "Защита системы включена, но точку восстановления создать не удалось (возможно ограничение частоты Windows).");
+                }
             }
         } else {
             if (log) {
@@ -361,10 +398,10 @@ void SystemRestore::EnableSystemProtectionAsync(
             }
         }
 
-        busy_.store(false);
         if (complete && !stopRequested_.load()) {
             complete(ok, outMsg);
         }
+        busy_.store(false);
     });
 }
 

@@ -1881,10 +1881,47 @@ bool SystemComponentsScanner::InstallSingleComponentSync(
     return succeeded;
 }
 
+void SystemComponentsScanner::CreateRestorePointBeforeInstallSync(
+    const std::string& description,
+    const LogCallback& log) {
+    if (cancelInstallRequested_.load() || stopRequested_.load()) {
+        return;
+    }
+    SetPhaseMessage("Создание точки восстановления...");
+    const std::string desc = description.empty() ? "DriverLoom" : description;
+    if (IsProcessElevated()) {
+        SystemRestore::CreateRestorePointSync(desc, log);
+        return;
+    }
+    if (!stopRequested_.load() && log) {
+        log(LogLevel::Info,
+            "Запрос прав администратора (UAC) для создания точки восстановления...");
+    }
+    const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_sr_comp");
+    std::wstring args = L"--cli-restore-point " + QuoteWin32Arg(Utf8ToWide(desc));
+    if (!tempLog.empty()) {
+        args += L" --log " + QuoteWin32Arg(tempLog.wstring());
+    }
+    const ElevatedRunResult run = ExecuteElevatedSelf(
+        args, true, tempLog.empty() ? nullptr : &tempLog, log, nullptr, &cancelInstallRequested_);
+    std::error_code ec;
+    if (!tempLog.empty()) {
+        std::filesystem::remove(tempLog, ec);
+    }
+    if (!run.launched && !stopRequested_.load() && log) {
+        log(LogLevel::Warning,
+            run.launchError == ERROR_CANCELLED
+                ? "Пользователь отменил UAC при создании точки восстановления — продолжается установка."
+                : ("Не удалось создать точку восстановления: " +
+                   FormatWin32Error(run.launchError)));
+    }
+}
+
 void SystemComponentsScanner::DownloadAndInstallAsync(
     const SystemComponentItem& item,
     std::vector<DeviceInfo> devicesSnapshot,
-    LogCallback onLog) {
+    LogCallback onLog,
+    bool createRestorePointBefore) {
     std::unique_lock<std::mutex> lock(threadMutex_);
     if (stopRequested_.load()) {
         return;
@@ -1920,10 +1957,20 @@ void SystemComponentsScanner::DownloadAndInstallAsync(
     cancelInstallRequested_.store(false);
     progress_.store(0.0f);
 
-    installThread_ = std::thread([this, item, devs = std::move(devicesSnapshot), log = std::move(onLog)]() mutable {
+    installThread_ = std::thread([this,
+                                  item,
+                                  devs = std::move(devicesSnapshot),
+                                  log = std::move(onLog),
+                                  createRestorePointBefore]() mutable {
         ScopedHttpRegistry installScope(installHttpRegistry_.get());
+        if (createRestorePointBefore && !cancelInstallRequested_.load() && !stopRequested_.load()) {
+            progress_.store(0.03f);
+            CreateRestorePointBeforeInstallSync("DriverLoom (перед установкой " + item.name + ")", log);
+        }
+        const float startBase = createRestorePointBefore ? 0.08f : 0.0f;
+        const float span = 1.0f - startBase;
         bool rebootReq = false;
-        const bool ok = InstallSingleComponentSync(item, 0.0f, 1.0f, devs, log, &rebootReq);
+        const bool ok = InstallSingleComponentSync(item, startBase, span, devs, log, &rebootReq);
         progress_.store(1.0f);
         if (!stopRequested_.load()) {
             SetPhaseMessage(
@@ -1992,36 +2039,9 @@ void SystemComponentsScanner::DownloadAndInstallBatchAsync(
         }
 
         if (createRestorePointBefore && !cancelInstallRequested_.load() && !stopRequested_.load()) {
-            SetPhaseMessage("Создание точки восстановления...");
             progress_.store(0.03f);
-            constexpr const char* kRpDesc =
-                "DriverLoom (перед пакетным обновлением компонентов)";
-            if (IsProcessElevated()) {
-                SystemRestore::CreateRestorePointSync(kRpDesc, log);
-            } else {
-                if (!stopRequested_.load() && log) {
-                    log(LogLevel::Info,
-                        "Запрос прав администратора (UAC) для создания точки восстановления...");
-                }
-                const std::filesystem::path tempLog = CreateTempLogPath(L"hdm_sr_comp");
-                std::wstring args = L"--cli-restore-point " + QuoteWin32Arg(Utf8ToWide(kRpDesc));
-                if (!tempLog.empty()) {
-                    args += L" --log " + QuoteWin32Arg(tempLog.wstring());
-                }
-                const ElevatedRunResult run = ExecuteElevatedSelf(
-                    args, true, tempLog.empty() ? nullptr : &tempLog, log, nullptr, &cancelInstallRequested_);
-                std::error_code ec;
-                if (!tempLog.empty()) {
-                    std::filesystem::remove(tempLog, ec);
-                }
-                if (!run.launched && !stopRequested_.load() && log) {
-                    log(LogLevel::Warning,
-                        run.launchError == ERROR_CANCELLED
-                            ? "Пользователь отменил UAC при создании точки восстановления — продолжается обновление компонентов."
-                            : ("Не удалось создать точку восстановления: " +
-                               FormatWin32Error(run.launchError)));
-                }
-            }
+            CreateRestorePointBeforeInstallSync(
+                "DriverLoom (перед пакетным обновлением компонентов)", log);
             SetPhaseMessage("Пакетное обновление компонентов...");
         }
 
@@ -2070,7 +2090,8 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
     const std::string& installedVersion,
     std::vector<DeviceInfo> devicesSnapshot,
     LogCallback onLog,
-    CatalogInstallCallback onComplete) {
+    CatalogInstallCallback onComplete,
+    bool createRestorePointBefore) {
     std::unique_lock<std::mutex> lock(threadMutex_);
     if (stopRequested_.load()) {
         return;
@@ -2112,7 +2133,8 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
                                   installedVersion,
                                   devs = std::move(devicesSnapshot),
                                   log = std::move(onLog),
-                                  cb = std::move(onComplete)]() mutable {
+                                  cb = std::move(onComplete),
+                                  createRestorePointBefore]() mutable {
         ScopedHttpRegistry installScope(installHttpRegistry_.get());
         const std::string primaryKey =
             !searchHardwareKey.empty() ? searchHardwareKey : fullHardwareId;
@@ -2185,6 +2207,10 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
                     }
                 }
                 if (usesOemInf) {
+                    if (createRestorePointBefore && !cancelInstallRequested_.load() && !stopRequested_.load()) {
+                        CreateRestorePointBeforeInstallSync(
+                            "DriverLoom (перед восстановлением драйвера " + deviceName + ")", log);
+                    }
                     SetPhaseMessage("Восстановление системного драйвера Windows...");
                     if (!stopRequested_.load() && log) {
                         log(LogLevel::Info,
@@ -2267,6 +2293,13 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
                     " — загрузка и установка (.cab)...");
         }
 
+        if (createRestorePointBefore && !cancelInstallRequested_.load() && !stopRequested_.load()) {
+            progress_.store(0.18f);
+            CreateRestorePointBeforeInstallSync(
+                "DriverLoom (перед установкой драйвера " + deviceName + ")", log);
+            SetPhaseMessage("Установка драйвера " + deviceName + "...");
+        }
+
         SystemComponentItem tempItem;
         tempItem.id = "catalog_autoinstall";
         tempItem.name = deviceName + " (WHQL " + catVer + ")";
@@ -2274,7 +2307,7 @@ void SystemComponentsScanner::SearchAndInstallFromCatalogAsync(
 
         bool rebootReq = false;
         const bool ok = InstallSingleComponentSync(
-            tempItem, 0.15f, 0.85f, devs, log, &rebootReq);
+            tempItem, createRestorePointBefore ? 0.22f : 0.15f, createRestorePointBefore ? 0.78f : 0.85f, devs, log, &rebootReq);
 
         if (!stopRequested_.load()) {
             SetPhaseMessage(ok ? ("Установлен драйвер " + catVer + " для " + deviceName)

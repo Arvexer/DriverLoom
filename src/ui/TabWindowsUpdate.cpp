@@ -39,7 +39,7 @@ void DriverLoomApp::RenderWindowsUpdateTab() {
             "Офіційні драйвери та оновлення напряму з серверів Microsoft (Windows Update).",
             "Official hardware drivers and system updates directly from Microsoft Windows Update."));
 
-    const bool busy = wuManager_.IsBusy();
+    const bool busy = wuManager_.IsBusy() || IsSystemProtectionOperationPending();
 
     size_t visibleCount = 0;
     size_t hiddenCount = 0;

@@ -11,7 +11,7 @@ void DriverLoomApp::RenderOverviewTab() {
     const bool scanning = scanner_.IsScanning() || componentsScanner_.IsScanning() ||
                           componentsScanner_.IsCheckingOnline() || diagnostics_.IsScanning();
     const bool installing = componentsScanner_.IsInstalling() || wuManager_.IsInstalling() ||
-                            localInstaller_.IsInstalling();
+                            localInstaller_.IsInstalling() || IsSystemProtectionOperationPending();
     const bool anyBusy = scanning || installing || scanner_.IsBusy() || diagnostics_.IsBusy();
 
     // Collect recommended actionable batch targets (excluding optional peripheral software)
@@ -666,7 +666,8 @@ void DriverLoomApp::RenderOverviewTab() {
         int shownRows = 0;
         constexpr int kMaxQuickRows = 4;
         const float btnW = CalcButtonWidth(hdm::Tr("Установить", "Встановити", "Install")) + 12.0f * uiScale;
-        const bool busyInstall = componentsScanner_.IsInstalling() || diagnostics_.IsBusy();
+        const bool busyInstall = componentsScanner_.IsInstalling() || diagnostics_.IsBusy() ||
+                                 IsSystemProtectionOperationPending();
 
         // First: Outdated / missing board controllers
         if (diagCache_.valid) {
@@ -711,7 +712,7 @@ void DriverLoomApp::RenderOverviewTab() {
                          devName = ctrl.deviceName,
                          searchKey = ctrl.searchKey,
                          hwId = ctrl.hardwareId,
-                         drvVer = ctrl.driverVersion](bool) {
+                         drvVer = ctrl.driverVersion](bool rp) {
                             componentsScanner_.SearchAndInstallFromCatalogAsync(
                                 devName,
                                 searchKey,
@@ -722,7 +723,8 @@ void DriverLoomApp::RenderOverviewTab() {
                                 [this](bool ok, bool rebootReq) {
                                     if (rebootReq) rebootRequired_.store(true);
                                     if (ok) pendingDeviceRescan_.store(true);
-                                });
+                                },
+                                rp);
                         });
                 }
                 ImGui::EndDisabled();
@@ -763,9 +765,9 @@ void DriverLoomApp::RenderOverviewTab() {
                 RequestProtectedInstall(
                     comp.name,
                     true,
-                    [this, compCopy = comp](bool) {
+                    [this, compCopy = comp](bool rp) {
                         componentsScanner_.DownloadAndInstallAsync(
-                            compCopy, devicesCache_, MakeLogger());
+                            compCopy, devicesCache_, MakeLogger(), rp);
                     });
             }
             ImGui::EndDisabled();

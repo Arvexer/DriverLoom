@@ -388,6 +388,12 @@ void TestLocalizationTrDyn() {
     Check(hdm::TrDyn("Ошибка сетевого поиска Windows Update") ==
               "Windows Update online search failed",
           "TrDyn(EN): WU online search failed");
+    Check(hdm::TrDyn("Не удалось включить защиту системы (код 1).") ==
+              "Failed to enable System Protection (code 1).",
+          "TrDyn(EN): System Protection error code translates cleanly");
+    Check(hdm::TrDyn("Класс WMI SystemRestore недоступен: x") ==
+              "WMI SystemRestore class unavailable: x",
+          "TrDyn(EN): WMI error translates cleanly");
 
     hdm::SetLang(hdm::Lang::Uk);
     Check(hdm::TrDyn("Восстановление образа Windows (DISM /RestoreHealth)...") ==
@@ -1344,19 +1350,25 @@ void TestComponentIdSetSerialization() {
 
 void TestSystemRestoreHelpers() {
     using State = hdm::SystemProtectionState;
-    Check(hdm::SystemRestore::ClassifySystemProtectionState(true, 1, true, 1) ==
+    Check(hdm::SystemRestore::ClassifySystemProtectionState(true, 1, false, 0, true, 1, false) ==
               State::DisabledByPolicy,
           "SysRestore: Group Policy DisableSR=1 overrides enabled RPSessionInterval");
-    Check(hdm::SystemRestore::ClassifySystemProtectionState(true, 0, true, 1) ==
+    Check(hdm::SystemRestore::ClassifySystemProtectionState(true, 0, false, 0, true, 1, false) ==
               State::Enabled,
           "SysRestore: DisableSR=0 with RPSessionInterval=1 reports Enabled");
-    Check(hdm::SystemRestore::ClassifySystemProtectionState(false, 0, true, 1) ==
+    Check(hdm::SystemRestore::ClassifySystemProtectionState(false, 0, true, 1, true, 1, false) ==
+              State::Disabled,
+          "SysRestore: local DisableSR=1 reports Disabled even with RPSessionInterval=1");
+    Check(hdm::SystemRestore::ClassifySystemProtectionState(false, 0, false, 0, true, 1, true) ==
+              State::Disabled,
+          "SysRestore: disabled VSS service reports Disabled even with RPSessionInterval=1");
+    Check(hdm::SystemRestore::ClassifySystemProtectionState(false, 0, false, 0, true, 1, false) ==
               State::Enabled,
           "SysRestore: RPSessionInterval=1 reports Enabled");
-    Check(hdm::SystemRestore::ClassifySystemProtectionState(false, 0, true, 0) ==
+    Check(hdm::SystemRestore::ClassifySystemProtectionState(false, 0, false, 0, true, 0, false) ==
               State::Disabled,
           "SysRestore: RPSessionInterval=0 reports Disabled");
-    Check(hdm::SystemRestore::ClassifySystemProtectionState(false, 0, false, 0) ==
+    Check(hdm::SystemRestore::ClassifySystemProtectionState(false, 0, false, 0, false, 0, false) ==
               State::Disabled,
           "SysRestore: missing keys default safely to Disabled");
 

@@ -5,6 +5,7 @@
 #include <winhttp.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1356,7 +1357,12 @@ void DriverLoomApp::SyncScannerSnapshots() {
             !pendingDeviceRescan_.load() &&
             !componentsScanner_.IsScanning() &&
             !componentsScanner_.IsInstalling() &&
-            !componentsScanner_.IsCheckingOnline()) {
+            !componentsScanner_.IsCheckingOnline() &&
+            !IsSystemProtectionOperationPending() &&
+            !srPromptModalOpen_ &&
+            !openSrPromptNextFrame_ &&
+            !localInstaller_.IsInstalling() &&
+            !wuManager_.IsBusy()) {
             lastFocusRefreshTime_ = now;
             silentDeviceRescan_ = true;
             scanner_.StartScanAsync(nullptr);
@@ -1881,6 +1887,10 @@ void DriverLoomApp::JumpToDriverStorePackage(const std::string& infName) {
 }
 
 void DriverLoomApp::HandleKeyboardShortcuts() {
+    if (aboutModalOpen_ || srPromptModalOpen_ || openSrPromptNextFrame_ ||
+        ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId)) {
+        return;
+    }
     const ImGuiIO& io = ImGui::GetIO();
 
     if (ImGui::IsKeyPressed(ImGuiKey_F5, false)) {
@@ -2212,18 +2222,27 @@ void DriverLoomApp::RenderStatusBarAndLogDrawer() {
     ImGui::EndChild();
 }
 
-void DriverLoomApp::OpenSystemProtectionPreviewModal() noexcept {
+void DriverLoomApp::OpenSystemProtectionPreviewModal() {
     srPromptState_ = hdm::SystemProtectionState::Disabled;
     srPromptActionTitle_ = "NVIDIA GeForce / Display Driver";
     srPromptInstallCallback_ = nullptr;
     openSrPromptNextFrame_ = true;
 }
 
+bool DriverLoomApp::IsSystemProtectionOperationPending() const noexcept {
+    return systemRestore_.IsBusy() ||
+           srEnablePendingResult_.load() ||
+           static_cast<bool>(srPendingAfterEnableCallback_);
+}
+
 void DriverLoomApp::RequestProtectedInstall(
     std::string actionTitle,
     bool wantRestorePoint,
     std::function<void(bool createRestorePoint)> startInstall) {
-    if (!startInstall) {
+    if (!startInstall ||
+        IsSystemProtectionOperationPending() ||
+        srPromptModalOpen_ ||
+        openSrPromptNextFrame_) {
         return;
     }
     if (!wantRestorePoint) {
@@ -2243,28 +2262,37 @@ void DriverLoomApp::RequestProtectedInstall(
 }
 
 void DriverLoomApp::ProcessPendingSystemProtectionResult() {
-    if (!srEnablePendingResult_.exchange(false)) {
+    if (!srEnablePendingResult_.load()) {
         return;
     }
+    const bool succeeded = srEnableSucceeded_.load();
+    if (succeeded &&
+        (scanner_.IsScanning() ||
+         componentsScanner_.IsScanning() ||
+         componentsScanner_.IsCheckingOnline() ||
+         componentsScanner_.IsInstalling() ||
+         localInstaller_.IsScanningStore() ||
+         localInstaller_.IsScanningInf() ||
+         localInstaller_.IsInstalling() ||
+         wuManager_.IsBusy())) {
+        return;
+    }
+    srEnablePendingResult_.store(false);
     pendingDiagRescan_.store(true);
     std::function<void(bool)> pendingInstall = std::move(srPendingAfterEnableCallback_);
     srPendingAfterEnableCallback_ = nullptr;
 
-    std::string resultMsg;
     {
         std::lock_guard<std::mutex> lock(srEnableMsgMutex_);
-        resultMsg = std::move(srEnableResultMsg_);
         srEnableResultMsg_.clear();
     }
 
-    if (srEnableSucceeded_.load()) {
+    if (succeeded) {
         diagCache_.readiness.systemRestoreEnabled = true;
         diagCache_.readiness.systemRestorePolicyDisabled = false;
         if (pendingInstall) {
             pendingInstall(false);
         }
-    } else if (!resultMsg.empty()) {
-        logBuffer_.Push(hdm::LogLevel::Warning, resultMsg);
     }
 }
 
@@ -2463,7 +2491,7 @@ void DriverLoomApp::RenderSystemProtectionModal() {
             srPendingAfterEnableCallback_ = std::move(cb);
             srPromptModalOpen_ = false;
             ImGui::CloseCurrentPopup();
-            if (cb || srPendingAfterEnableCallback_) {
+            if (srPendingAfterEnableCallback_) {
                 systemRestore_.EnableSystemProtectionAsync(
                     true,
                     "DriverLoom (перед установкой драйвера/компонента)",
@@ -2518,7 +2546,7 @@ void DriverLoomApp::RenderSystemProtectionModal() {
         "Скасувати###SrCancelBtn",
         "Cancel###SrCancelBtn");
     SameLineWrapIfNeeded(CalcButtonWidth(cancelLbl) + style.ItemSpacing.x);
-    if (RenderSecondaryButton(cancelLbl)) {
+    if (RenderSecondaryButton(cancelLbl) || ImGui::IsKeyPressed(ImGuiKey_Escape, false)) {
         srPromptInstallCallback_ = nullptr;
         srPromptActionTitle_.clear();
         srPromptModalOpen_ = false;

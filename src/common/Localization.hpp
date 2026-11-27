@@ -583,9 +583,54 @@ inline void ReplaceAllInPlace(std::string& s, std::string_view from, std::string
         {"Включение защиты системы для диска ",
          "Увімкнення захисту системи для диска ",
          "Enabling System Protection for drive "},
+        {"Защита системы включена, но точку восстановления создать не удалось (возможно ограничение частоты Windows).",
+         "Захист системи увімкнено, але точку відновлення створити не вдалося (можливе обмеження частоти Windows).",
+         "System Protection was enabled, but creating a restore point failed (Windows frequency limit may apply)."},
+        {"Операция с защитой системы уже выполняется.",
+         "Операція із захистом системи вже виконується.",
+         "A System Protection operation is already running."},
+        {"Не удалось включить защиту системы (код ",
+         "Не вдалося увімкнути захист системи (код ",
+         "Failed to enable System Protection (code "},
+        {"Не удалось включить защиту системы (WMI ExecMethod): ",
+         "Не вдалося увімкнути захист системи (WMI ExecMethod): ",
+         "Failed to enable System Protection (WMI ExecMethod): "},
+        {"Не удалось включить защиту системы: ",
+         "Не вдалося увімкнути захист системи: ",
+         "Failed to enable System Protection: "},
         {"Не удалось включить защиту системы",
          "Не вдалося увімкнути захист системи",
          "Failed to enable System Protection"},
+        {"Ошибка инициализации COM (WMI): ",
+         "Помилка ініціалізації COM (WMI): ",
+         "COM initialization error (WMI): "},
+        {"Ошибка CoInitializeSecurity: ",
+         "Помилка CoInitializeSecurity: ",
+         "CoInitializeSecurity failed: "},
+        {"Не удалось создать WMI Locator: ",
+         "Не вдалося створити WMI Locator: ",
+         "Failed to create WMI Locator: "},
+        {"Не удалось подключиться к WMI ROOT\\DEFAULT: ",
+         "Не вдалося підключитися до WMI ROOT\\DEFAULT: ",
+         "Failed to connect to WMI ROOT\\DEFAULT: "},
+        {"Ошибка CoSetProxyBlanket (WMI): ",
+         "Помилка CoSetProxyBlanket (WMI): ",
+         "CoSetProxyBlanket failed (WMI): "},
+        {"Класс WMI SystemRestore недоступен: ",
+         "Клас WMI SystemRestore недоступний: ",
+         "WMI SystemRestore class unavailable: "},
+        {"Метод WMI SystemRestore::Enable недоступен: ",
+         "Метод WMI SystemRestore::Enable недоступний: ",
+         "WMI SystemRestore::Enable method unavailable: "},
+        {"Ошибка подготовки параметров WMI: ",
+         "Помилка підготовки параметрів WMI: ",
+         "Failed to prepare WMI parameters: "},
+        {"Ошибка задания параметра диска WMI: ",
+         "Помилка задання параметра диска WMI: ",
+         "Failed to set WMI Drive parameter: "},
+        {"Недостаточно памяти при передаче имени диска в WMI.",
+         "Недостатньо пам'яті під час передачі імені диска в WMI.",
+         "Out of memory passing drive name to WMI."},
         {" пропущен: используется системой или устройством ",
          " пропущено: використовується системою або пристроєм ",
          " skipped: in use by system or device "},
@@ -679,22 +724,22 @@ inline void ReplaceAllInPlace(std::string& s, std::string_view from, std::string
     }
 
     if (lang == Lang::En) {
-        auto replaceByteUnit = [](std::string& text, std::string_view from, std::string_view to) {
+        auto replaceByteUnit = [](std::string& str, std::string_view from, std::string_view to) {
             size_t pos = 0;
-            while ((pos = text.find(from, pos)) != std::string::npos) {
+            while ((pos = str.find(from, pos)) != std::string::npos) {
                 const bool precededByDigit =
-                    (pos > 0 && text[pos - 1] >= '0' && text[pos - 1] <= '9');
+                    (pos > 0 && str[pos - 1] >= '0' && str[pos - 1] <= '9');
                 const size_t afterPos = pos + from.size();
                 const unsigned char nextCh =
-                    (afterPos < text.size()) ? static_cast<unsigned char>(text[afterPos]) : 0;
+                    (afterPos < str.size()) ? static_cast<unsigned char>(str[afterPos]) : 0;
                 const bool followedByWordChar =
-                    (afterPos < text.size()) &&
+                    (afterPos < str.size()) &&
                     ((nextCh >= 'A' && nextCh <= 'Z') ||
                      (nextCh >= 'a' && nextCh <= 'z') ||
                      (nextCh >= '0' && nextCh <= '9') ||
                      (nextCh >= 0x80));
                 if (precededByDigit && !followedByWordChar) {
-                    text.replace(pos, from.size(), to);
+                    str.replace(pos, from.size(), to);
                     pos += to.size();
                 } else {
                     pos += from.size();

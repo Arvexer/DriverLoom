@@ -78,7 +78,8 @@ void DriverLoomApp::RenderDriverStoreSection() {
                       localInstaller_.IsScanningStore() ||
                       localInstaller_.IsExportingBackup() ||
                       localInstaller_.IsRemovingStorePackages() ||
-                      localInstaller_.IsInstalling();
+                      localInstaller_.IsInstalling() ||
+                      IsSystemProtectionOperationPending();
 
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(std::round(8.5f * uiScale), style.FramePadding.y));
     ImGui::BeginDisabled(busy);
@@ -174,15 +175,20 @@ void DriverLoomApp::RenderDriverStoreSection() {
             }
         }
         if (!targets.empty()) {
-            localInstaller_.RemoveDriverStorePackagesAsync(
-                std::move(targets),
+            RequestProtectedInstall(
+                hdm::Tr("Очистка хранилища DriverStore", "Очищення сховища DriverStore", "DriverStore Package Cleanup"),
                 storeRestoreBefore_,
-                devicesCache_,
-                MakeLogger(),
-                [this](size_t removed, size_t failed, bool rebootReq) {
-                    (void)failed;
-                    if (rebootReq) rebootRequired_.store(true);
-                    if (removed > 0) pendingDeviceRescan_.store(true);
+                [this, targets = std::move(targets)](bool rp) mutable {
+                    localInstaller_.RemoveDriverStorePackagesAsync(
+                        std::move(targets),
+                        rp,
+                        devicesCache_,
+                        MakeLogger(),
+                        [this](size_t removed, size_t failed, bool rebootReq) {
+                            (void)failed;
+                            if (rebootReq) rebootRequired_.store(true);
+                            if (removed > 0) pendingDeviceRescan_.store(true);
+                        });
                 });
         }
     }
@@ -476,15 +482,20 @@ void DriverLoomApp::RenderDriverStoreSection() {
                 if (RenderSecondaryButton(
                         hdm::Tr("Удалить###DsRm", "Видалити###DsRm", "Remove###DsRm"),
                         ImVec2(rmBtnW, 0.0f))) {
-                    localInstaller_.RemoveDriverStorePackagesAsync(
-                        {pkg.oemInfName},
+                    RequestProtectedInstall(
+                        pkg.oemInfName,
                         storeRestoreBefore_,
-                        devicesCache_,
-                        MakeLogger(),
-                        [this](size_t removed, size_t failed, bool rebootReq) {
-                            (void)failed;
-                            if (rebootReq) rebootRequired_.store(true);
-                            if (removed > 0) pendingDeviceRescan_.store(true);
+                        [this, oem = pkg.oemInfName](bool rp) {
+                            localInstaller_.RemoveDriverStorePackagesAsync(
+                                {oem},
+                                rp,
+                                devicesCache_,
+                                MakeLogger(),
+                                [this](size_t removed, size_t failed, bool rebootReq) {
+                                    (void)failed;
+                                    if (rebootReq) rebootRequired_.store(true);
+                                    if (removed > 0) pendingDeviceRescan_.store(true);
+                                });
                         });
                 }
                 ImGui::EndDisabled();
@@ -566,7 +577,8 @@ void DriverLoomApp::RenderLocalInstallerTab() {
         localInstaller_.IsScanningInf() ||
         localInstaller_.IsInstalling() ||
         localInstaller_.IsExportingBackup() ||
-        localInstaller_.IsRemovingStorePackages();
+        localInstaller_.IsRemovingStorePackages() ||
+        IsSystemProtectionOperationPending();
 
     const char* folderLbl = hdm::Tr("Папка с драйверами:", "Папка з драйверами:", "Drivers Folder:");
     const char* pickLbl = hdm::Tr("Обзор папки...###LocPick", "Огляд папки...###LocPick", "Browse Folder...###LocPick");

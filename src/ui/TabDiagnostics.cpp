@@ -95,7 +95,7 @@ void DriverLoomApp::RenderDiagnosticsTab() {
         ImGui::EndDisabled();
     }
 
-    const bool compInstalling = componentsScanner_.IsInstalling();
+    const bool compInstalling = componentsScanner_.IsInstalling() || IsSystemProtectionOperationPending();
     if (diagnostics_.IsRunningAction()) {
         SameLineWrapIfNeeded(CalcButtonWidth(hdm::Tr("Отмена", "Скасувати", "Cancel")));
         if (RenderSecondaryButton(hdm::Tr("Отмена###DiagCancel", "Скасувати###DiagCancel", "Cancel###DiagCancel"))) {
@@ -476,7 +476,7 @@ void DriverLoomApp::RenderDiagnosticsTab() {
                          devName = item.deviceName,
                          searchKey = item.searchKey,
                          hwId = item.hardwareId,
-                         drvVer = item.driverVersion](bool) {
+                         drvVer = item.driverVersion](bool rp) {
                             componentsScanner_.SearchAndInstallFromCatalogAsync(
                                 devName,
                                 searchKey,
@@ -487,7 +487,8 @@ void DriverLoomApp::RenderDiagnosticsTab() {
                                 [this](bool ok, bool rebootReq) {
                                     if (rebootReq) rebootRequired_.store(true);
                                     if (ok) pendingDeviceRescan_.store(true);
-                                });
+                                },
+                                rp);
                         });
                 }
                 ImGui::EndDisabled();
@@ -641,7 +642,7 @@ void DriverLoomApp::RenderDiagnosticsTab() {
                              devName = st.deviceName,
                              searchKey = st.searchKey,
                              hwId = st.hardwareId,
-                             drvVer = st.driverVersion](bool) {
+                             drvVer = st.driverVersion](bool rp) {
                                 componentsScanner_.SearchAndInstallFromCatalogAsync(
                                     devName,
                                     searchKey,
@@ -652,7 +653,8 @@ void DriverLoomApp::RenderDiagnosticsTab() {
                                     [this](bool ok, bool rebootReq) {
                                         if (rebootReq) rebootRequired_.store(true);
                                         if (ok) pendingDeviceRescan_.store(true);
-                                    });
+                                    },
+                                    rp);
                             });
                     }
                     ImGui::EndDisabled();

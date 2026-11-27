@@ -95,7 +95,7 @@ void DriverLoomApp::RenderDevicesTab() {
             "Click any device below to view details or install an official driver."));
 
     const bool scanning = scanner_.IsScanning();
-    const bool catalogBusy = componentsScanner_.IsInstalling();
+    const bool catalogBusy = componentsScanner_.IsInstalling() || IsSystemProtectionOperationPending();
     const bool devBusy = scanner_.IsBusy() || catalogBusy;
 
     // Row 1: Filter Pills + Scan + Summary Badge
@@ -391,7 +391,7 @@ void DriverLoomApp::RenderDevicesTab() {
                              devName = dev.name,
                              searchKey = dev.searchHardwareKey,
                              hwId = dev.hardwareId,
-                             drvVer = dev.driverVersion](bool) {
+                             drvVer = dev.driverVersion](bool rp) {
                                 componentsScanner_.SearchAndInstallFromCatalogAsync(
                                     devName,
                                     searchKey,
@@ -402,7 +402,8 @@ void DriverLoomApp::RenderDevicesTab() {
                                     [this](bool ok, bool rebootReq) {
                                         if (rebootReq) rebootRequired_.store(true);
                                         if (ok) pendingDeviceRescan_.store(true);
-                                    });
+                                    },
+                                    rp);
                             });
                     }
                     ImGui::Separator();
@@ -678,7 +679,7 @@ void DriverLoomApp::RenderDevicesTab() {
                  devName = selectedDev->name,
                  searchKey = selectedDev->searchHardwareKey,
                  hwId = selectedDev->hardwareId,
-                 drvVer = selectedDev->driverVersion](bool) {
+                 drvVer = selectedDev->driverVersion](bool rp) {
                     componentsScanner_.SearchAndInstallFromCatalogAsync(
                         devName,
                         searchKey,
@@ -689,7 +690,8 @@ void DriverLoomApp::RenderDevicesTab() {
                         [this](bool ok, bool rebootReq) {
                             if (rebootReq) rebootRequired_.store(true);
                             if (ok) pendingDeviceRescan_.store(true);
-                        });
+                        },
+                        rp);
                 });
         }
         ImGui::EndDisabled();

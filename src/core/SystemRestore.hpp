@@ -29,8 +29,11 @@ public:
     [[nodiscard]] static SystemProtectionState ClassifySystemProtectionState(
         bool hasPolicyDisable,
         DWORD policyDisableVal,
+        bool hasLocalDisable,
+        DWORD localDisableVal,
         bool hasRpInterval,
-        DWORD rpIntervalVal) noexcept;
+        DWORD rpIntervalVal,
+        bool vssServiceDisabled = false) noexcept;
 
     [[nodiscard]] static SystemProtectionState QuerySystemProtectionState() noexcept;
     [[nodiscard]] static std::wstring GetSystemDriveRootW();

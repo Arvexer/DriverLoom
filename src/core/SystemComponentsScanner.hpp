@@ -79,7 +79,8 @@ public:
     void DownloadAndInstallAsync(
         const SystemComponentItem& item,
         std::vector<DeviceInfo> devicesSnapshot,
-        LogCallback onLog);
+        LogCallback onLog,
+        bool createRestorePointBefore = true);
 
     void DownloadAndInstallBatchAsync(
         std::vector<SystemComponentItem> itemsToInstall,
@@ -97,7 +98,8 @@ public:
         const std::string& installedVersion,
         std::vector<DeviceInfo> devicesSnapshot,
         LogCallback onLog,
-        CatalogInstallCallback onComplete = nullptr);
+        CatalogInstallCallback onComplete = nullptr,
+        bool createRestorePointBefore = true);
 
     void RequestCancelInstall() noexcept;
 
@@ -118,6 +120,9 @@ public:
 
 private:
     void SetPhaseMessage(const std::string& msg);
+    void CreateRestorePointBeforeInstallSync(
+        const std::string& description,
+        const LogCallback& log);
     bool InstallSingleComponentSync(
         const SystemComponentItem& item,
         float baseProgress,

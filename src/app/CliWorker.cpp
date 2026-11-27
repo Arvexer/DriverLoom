@@ -277,8 +277,12 @@ int RunCliModeIfRequested() {
             return 1;
         }
         if (!restoreDescArg.empty()) {
-            hdm::SystemRestore::CreateRestorePointSync(
-                hdm::WideToUtf8(restoreDescArg), fileLogger);
+            if (!hdm::SystemRestore::CreateRestorePointSync(
+                    hdm::WideToUtf8(restoreDescArg), fileLogger)) {
+                fileLogger(
+                    hdm::LogLevel::Warning,
+                    "Защита системы включена, но точку восстановления создать не удалось (возможно ограничение частоты Windows).");
+            }
         }
         return 0;
     }
