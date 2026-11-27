@@ -157,6 +157,7 @@ void DriverLoomApp::RenderFrame() {
     }
 
     SyncScannerSnapshots();
+    ProcessPendingSystemProtectionResult();
 
     bool appHasUpdate = false;
     {
@@ -306,6 +307,7 @@ void DriverLoomApp::RenderFrame() {
 
     HandleKeyboardShortcuts();
     RenderAboutModal();
+    RenderSystemProtectionModal();
 
     ImGui::End();
 }
@@ -2208,4 +2210,326 @@ void DriverLoomApp::RenderStatusBarAndLogDrawer() {
     }
     ImGui::EndChild();
     ImGui::EndChild();
+}
+
+void DriverLoomApp::OpenSystemProtectionPreviewModal() noexcept {
+    srPromptState_ = hdm::SystemProtectionState::Disabled;
+    srPromptActionTitle_ = "NVIDIA GeForce / Display Driver";
+    srPromptInstallCallback_ = nullptr;
+    openSrPromptNextFrame_ = true;
+}
+
+void DriverLoomApp::RequestProtectedInstall(
+    std::string actionTitle,
+    bool wantRestorePoint,
+    std::function<void(bool createRestorePoint)> startInstall) {
+    if (!startInstall) {
+        return;
+    }
+    if (!wantRestorePoint) {
+        startInstall(false);
+        return;
+    }
+    const hdm::SystemProtectionState st = hdm::SystemRestore::QuerySystemProtectionState();
+    if (st == hdm::SystemProtectionState::Enabled) {
+        startInstall(true);
+        return;
+    }
+    srPromptState_ = st;
+    lastSrPromptPollTime_ = ImGui::GetTime();
+    srPromptActionTitle_ = std::move(actionTitle);
+    srPromptInstallCallback_ = std::move(startInstall);
+    openSrPromptNextFrame_ = true;
+}
+
+void DriverLoomApp::ProcessPendingSystemProtectionResult() {
+    if (!srEnablePendingResult_.exchange(false)) {
+        return;
+    }
+    pendingDiagRescan_.store(true);
+    std::function<void(bool)> pendingInstall = std::move(srPendingAfterEnableCallback_);
+    srPendingAfterEnableCallback_ = nullptr;
+
+    std::string resultMsg;
+    {
+        std::lock_guard<std::mutex> lock(srEnableMsgMutex_);
+        resultMsg = std::move(srEnableResultMsg_);
+        srEnableResultMsg_.clear();
+    }
+
+    if (srEnableSucceeded_.load()) {
+        diagCache_.readiness.systemRestoreEnabled = true;
+        diagCache_.readiness.systemRestorePolicyDisabled = false;
+        if (pendingInstall) {
+            pendingInstall(false);
+        }
+    } else if (!resultMsg.empty()) {
+        logBuffer_.Push(hdm::LogLevel::Warning, resultMsg);
+    }
+}
+
+void DriverLoomApp::RenderSystemProtectionModal() {
+    const char* modalTitle = hdm::Tr(
+        "Защита системы отключена###SrPromptModal",
+        "Захист системи вимкнено###SrPromptModal",
+        "System Protection Is Off###SrPromptModal");
+
+    if (openSrPromptNextFrame_) {
+        srPromptModalOpen_ = true;
+        lastSrPromptPollTime_ = ImGui::GetTime();
+        ImGui::OpenPopup(modalTitle);
+        openSrPromptNextFrame_ = false;
+    }
+
+    const ImGuiViewport* vp = ImGui::GetMainViewport();
+    const float uiScale = EffectiveUiScale();
+    const float modalW = std::min(560.0f * uiScale, vp->WorkSize.x * 0.92f);
+    const float maxModalH = std::max(240.0f * uiScale, vp->WorkSize.y * 0.90f);
+    ImGui::SetNextWindowPos(vp->GetCenter(), ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(modalW, 0.0f), ImVec2(modalW, maxModalH));
+
+    if (!ImGui::BeginPopupModal(
+            modalTitle,
+            &srPromptModalOpen_,
+            ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoSavedSettings)) {
+        if (!srPromptModalOpen_ && srPromptInstallCallback_) {
+            srPromptInstallCallback_ = nullptr;
+            srPromptActionTitle_.clear();
+        }
+        return;
+    }
+
+    const double now = ImGui::GetTime();
+    if (ImGui::IsWindowAppearing() || now - lastSrPromptPollTime_ >= 0.5) {
+        if (srPromptInstallCallback_) {
+            srPromptState_ = hdm::SystemRestore::QuerySystemProtectionState();
+        }
+        lastSrPromptPollTime_ = now;
+    }
+
+    const ImGuiStyle& style = ImGui::GetStyle();
+    {
+        PushFontSafe(g_fontSecondaryHeader);
+        const float iconSz = std::round(24.0f * uiScale);
+        const float txtH = ImGui::GetTextLineHeight();
+        const float rowH = std::max(iconSz, txtH);
+        const ImVec2 p0 = ImGui::GetCursorScreenPos();
+        const ImVec4 hdrCol =
+            (srPromptState_ == hdm::SystemProtectionState::Enabled)
+                ? HealthyColor()
+                : (srPromptState_ == hdm::SystemProtectionState::DisabledByPolicy
+                       ? DangerColor()
+                       : WarningColor());
+        ImGui::Dummy(ImVec2(iconSz, rowH));
+        DrawAppIcon(
+            ImGui::GetWindowDrawList(),
+            ImVec2(p0.x + iconSz * 0.5f, p0.y + rowH * 0.5f),
+            iconSz,
+            AppIcon::Shield,
+            ImGui::ColorConvertFloat4ToU32(hdrCol));
+        ImGui::SameLine(0.0f, std::round(10.0f * uiScale));
+        ImGui::SetCursorPosY(ImGui::GetCursorPosY() + (rowH - txtH) * 0.5f);
+        const char* headerText =
+            (srPromptState_ == hdm::SystemProtectionState::Enabled)
+                ? hdm::Tr(
+                      "Защита системы включена",
+                      "Захист системи увімкнено",
+                      "System Protection Enabled")
+                : (srPromptState_ == hdm::SystemProtectionState::DisabledByPolicy
+                       ? hdm::Tr(
+                             "Точки восстановления запрещены политикой",
+                             "Точки відновлення заборонено політикою",
+                             "Restore Points Blocked by Policy")
+                       : hdm::Tr(
+                             "Защита системы для точек отката выключена",
+                             "Захист системи для точок відкату вимкнено",
+                             "System Protection for Restore Points Is Off"));
+        ImGui::TextColored(CardHeaderTextColor(), "%s", headerText);
+        PopFontSafe(g_fontSecondaryHeader);
+    }
+
+    if (!srPromptActionTitle_.empty()) {
+        PushFontSafe(g_fontSmall);
+        ImGui::TextColored(
+            MutedTextColor(),
+            "%s %s",
+            hdm::Tr("Действие:", "Дія:", "Action:"),
+            hdm::TrDyn(srPromptActionTitle_).c_str());
+        PopFontSafe(g_fontSmall);
+    }
+
+    ImGui::Spacing();
+    if (srPromptState_ == hdm::SystemProtectionState::Enabled) {
+        ImGui::TextWrapped(
+            "%s",
+            hdm::Tr(
+                "Защита системного диска теперь активна. Можно создать точку восстановления и безопасно продолжить установку.",
+                "Захист системного диска тепер активний. Можна створити точку відновлення та безпечно продовжити встановлення.",
+                "System drive protection is now active. You can create a restore point and safely proceed with installation."));
+    } else if (srPromptState_ == hdm::SystemProtectionState::DisabledByPolicy) {
+        ImGui::TextWrapped(
+            "%s",
+            hdm::Tr(
+                "Создание точек восстановления заблокировано групповой политикой Windows (DisableSR). Автоматический откат перед установкой невозможен.",
+                "Створення точок відновлення заблоковано груповою політикою Windows (DisableSR). Автоматичний відкат перед встановленням неможливий.",
+                "Restore point creation is blocked by Windows Group Policy (DisableSR). Automatic rollback before installation is unavailable."));
+    } else {
+        ImGui::TextWrapped(
+            "%s",
+            hdm::Tr(
+                "Перед установкой драйвера или компонента DriverLoom создаёт точку восстановления Windows, но защита системного диска сейчас отключена. Рекомендуется включить её перед продолжением.",
+                "Перед встановленням драйвера або компонента DriverLoom створює точку відновлення Windows, але захист системного диска зараз вимкнено. Рекомендується увімкнути його перед продовженням.",
+                "Before installing a driver or component, DriverLoom creates a Windows Restore Point, but System Protection on your system drive is currently off. Enabling it before continuing is recommended."));
+    }
+
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_Border, PanelBorderColor());
+    ImGui::BeginChild(
+        "##SrPromptStatusCard",
+        ImVec2(0.0f, 0.0f),
+        ImGuiChildFlags_Borders | ImGuiChildFlags_AutoResizeY,
+        ImGuiWindowFlags_NoScrollbar);
+    ImGui::PopStyleColor();
+    {
+        const std::string driveUtf8 = hdm::WideToUtf8(hdm::SystemRestore::GetSystemDriveRootW());
+        PushFontSafe(g_fontSmall);
+        if (srPromptState_ == hdm::SystemProtectionState::Enabled) {
+            const std::string okTxt =
+                std::string(hdm::Tr("Системный диск (", "Системний диск (", "System drive (")) +
+                driveUtf8 +
+                hdm::Tr("): защита включена", "): захист увімкнено", "): protection enabled");
+            RenderStatusBadge(HealthyColor(), okTxt.c_str(), true);
+        } else if (srPromptState_ == hdm::SystemProtectionState::DisabledByPolicy) {
+            RenderStatusBadge(
+                DangerColor(),
+                hdm::Tr(
+                    "Ограничение политики Windows (DisableSR = 1)",
+                    "Обмеження політики Windows (DisableSR = 1)",
+                    "Windows Policy restriction (DisableSR = 1)"),
+                true);
+        } else {
+            const std::string warnTxt =
+                std::string(hdm::Tr("Системный диск (", "Системний диск (", "System drive (")) +
+                driveUtf8 +
+                hdm::Tr("): защита отключена", "): захист вимкнено", "): protection disabled");
+            RenderStatusBadge(WarningColor(), warnTxt.c_str(), true);
+        }
+        PopFontSafe(g_fontSmall);
+    }
+    ImGui::EndChild();
+
+    ImGui::Spacing();
+    const bool srBusy = systemRestore_.IsBusy();
+
+    if (srPromptState_ == hdm::SystemProtectionState::Enabled) {
+        const char* contLbl = hdm::Tr(
+            "Продолжить установку###SrContBtn",
+            "Продовжити встановлення###SrContBtn",
+            "Continue Installation###SrContBtn");
+        ImGui::BeginDisabled(srBusy);
+        if (RenderPrimaryButton(contLbl)) {
+            std::function<void(bool)> cb = std::move(srPromptInstallCallback_);
+            srPromptInstallCallback_ = nullptr;
+            srPromptActionTitle_.clear();
+            diagCache_.readiness.systemRestoreEnabled = true;
+            diagCache_.readiness.systemRestorePolicyDisabled = false;
+            pendingDiagRescan_.store(true);
+            srPromptModalOpen_ = false;
+            ImGui::CloseCurrentPopup();
+            if (cb) {
+                cb(true);
+            }
+        }
+        ImGui::EndDisabled();
+    } else if (srPromptState_ == hdm::SystemProtectionState::Disabled) {
+        const char* enableLbl = hdm::Tr(
+            "Включить защиту и продолжить###SrEnableContBtn",
+            "Увімкнути захист і продовжити###SrEnableContBtn",
+            "Enable Protection & Continue###SrEnableContBtn");
+        const char* winSetLbl = hdm::Tr(
+            "Настройки Windows...###SrWinSetBtn",
+            "Налаштування Windows...###SrWinSetBtn",
+            "Windows Settings...###SrWinSetBtn");
+        const char* skipLbl = hdm::Tr(
+            "Установить без точки отката###SrSkipBtn",
+            "Встановити без точки відкату###SrSkipBtn",
+            "Install Without Restore Point###SrSkipBtn");
+
+        ImGui::BeginDisabled(srBusy);
+        if (RenderPrimaryButton(enableLbl)) {
+            std::function<void(bool)> cb = std::move(srPromptInstallCallback_);
+            srPromptInstallCallback_ = nullptr;
+            srPromptActionTitle_.clear();
+            srPendingAfterEnableCallback_ = std::move(cb);
+            srPromptModalOpen_ = false;
+            ImGui::CloseCurrentPopup();
+            if (cb || srPendingAfterEnableCallback_) {
+                systemRestore_.EnableSystemProtectionAsync(
+                    true,
+                    "DriverLoom (перед установкой драйвера/компонента)",
+                    MakeLogger(),
+                    [this](bool ok, const std::string& msg) {
+                        {
+                            std::lock_guard<std::mutex> lock(srEnableMsgMutex_);
+                            srEnableResultMsg_ = msg;
+                        }
+                        srEnableSucceeded_.store(ok);
+                        srEnablePendingResult_.store(true);
+                    });
+            }
+        }
+        ImGui::EndDisabled();
+
+        SameLineWrapIfNeeded(CalcButtonWidth(winSetLbl));
+        if (RenderSecondaryButton(winSetLbl)) {
+            wchar_t sysDir[MAX_PATH]{};
+            const UINT sysLen = GetSystemDirectoryW(sysDir, MAX_PATH);
+            if (sysLen > 0 && sysLen < MAX_PATH) {
+                const std::filesystem::path fullPath =
+                    std::filesystem::path(sysDir) / L"SystemPropertiesProtection.exe";
+                ShellExecuteW(hwnd_, L"open", fullPath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            }
+        }
+
+        SameLineWrapIfNeeded(CalcButtonWidth(skipLbl));
+        if (RenderSecondaryButton(skipLbl)) {
+            std::function<void(bool)> cb = std::move(srPromptInstallCallback_);
+            srPromptInstallCallback_ = nullptr;
+            srPromptActionTitle_.clear();
+            srPromptModalOpen_ = false;
+            ImGui::CloseCurrentPopup();
+            if (cb) {
+                cb(false);
+            }
+        }
+    } else {
+        const char* skipLbl = hdm::Tr(
+            "Установить без точки отката###SrSkipBtn",
+            "Встановити без точки відкату###SrSkipBtn",
+            "Install Without Restore Point###SrSkipBtn");
+        if (RenderSecondaryButton(skipLbl)) {
+            std::function<void(bool)> cb = std::move(srPromptInstallCallback_);
+            srPromptInstallCallback_ = nullptr;
+            srPromptActionTitle_.clear();
+            srPromptModalOpen_ = false;
+            ImGui::CloseCurrentPopup();
+            if (cb) {
+                cb(false);
+            }
+        }
+    }
+
+    const char* cancelLbl = hdm::Tr(
+        "Отмена###SrCancelBtn",
+        "Скасувати###SrCancelBtn",
+        "Cancel###SrCancelBtn");
+    SameLineWrapIfNeeded(CalcButtonWidth(cancelLbl) + style.ItemSpacing.x);
+    if (RenderSecondaryButton(cancelLbl)) {
+        srPromptInstallCallback_ = nullptr;
+        srPromptActionTitle_.clear();
+        srPromptModalOpen_ = false;
+        ImGui::CloseCurrentPopup();
+    }
+
+    ImGui::EndPopup();
 }

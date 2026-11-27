@@ -258,8 +258,13 @@ void DriverLoomApp::RenderOverviewTab() {
                 }
                 ImGui::BeginDisabled(anyBusy);
                 if (RenderSecondaryButton(instAllLbl, ImVec2(0.0f, btnH))) {
-                    componentsScanner_.DownloadAndInstallBatchAsync(
-                        batchTargets, devicesCache_, MakeLogger(), true);
+                    RequestProtectedInstall(
+                        hdm::Tr("Установка рекомендуемых обновлений", "Встановлення рекомендованих оновлень", "Install Recommended Updates"),
+                        true,
+                        [this, targets = batchTargets](bool rp) {
+                            componentsScanner_.DownloadAndInstallBatchAsync(
+                                targets, devicesCache_, MakeLogger(), rp);
+                        });
                 }
                 ImGui::EndDisabled();
                 hasPrevBtn = true;
@@ -269,8 +274,13 @@ void DriverLoomApp::RenderOverviewTab() {
             std::snprintf(instAllLbl, sizeof(instAllLbl), instAllLblFmt, batchTargets.size());
             ImGui::BeginDisabled(anyBusy);
             if (RenderPrimaryButton(instAllLbl, ImVec2(0.0f, btnH))) {
-                componentsScanner_.DownloadAndInstallBatchAsync(
-                    batchTargets, devicesCache_, MakeLogger(), true);
+                RequestProtectedInstall(
+                    hdm::Tr("Установка рекомендуемых обновлений", "Встановлення рекомендованих оновлень", "Install Recommended Updates"),
+                    true,
+                    [this, targets = batchTargets](bool rp) {
+                        componentsScanner_.DownloadAndInstallBatchAsync(
+                            targets, devicesCache_, MakeLogger(), rp);
+                    });
             }
             ImGui::EndDisabled();
             hasPrevBtn = true;
@@ -694,16 +704,25 @@ void DriverLoomApp::RenderOverviewTab() {
                 if (RenderPrimaryButton(
                         hdm::Tr("Обновить###QCtrl", "Оновити###QCtrl", "Update###QCtrl"),
                         ImVec2(btnW, 0.0f))) {
-                    componentsScanner_.SearchAndInstallFromCatalogAsync(
+                    RequestProtectedInstall(
                         ctrl.deviceName,
-                        ctrl.searchKey,
-                        ctrl.hardwareId,
-                        ctrl.driverVersion,
-                        devicesCache_,
-                        MakeLogger(),
-                        [this](bool ok, bool rebootReq) {
-                            if (rebootReq) rebootRequired_.store(true);
-                            if (ok) pendingDeviceRescan_.store(true);
+                        true,
+                        [this,
+                         devName = ctrl.deviceName,
+                         searchKey = ctrl.searchKey,
+                         hwId = ctrl.hardwareId,
+                         drvVer = ctrl.driverVersion](bool) {
+                            componentsScanner_.SearchAndInstallFromCatalogAsync(
+                                devName,
+                                searchKey,
+                                hwId,
+                                drvVer,
+                                devicesCache_,
+                                MakeLogger(),
+                                [this](bool ok, bool rebootReq) {
+                                    if (rebootReq) rebootRequired_.store(true);
+                                    if (ok) pendingDeviceRescan_.store(true);
+                                });
                         });
                 }
                 ImGui::EndDisabled();
@@ -741,7 +760,13 @@ void DriverLoomApp::RenderOverviewTab() {
                     ? hdm::Tr("Установить###QComp", "Встановити###QComp", "Install###QComp")
                     : hdm::Tr("Обновить###QComp", "Оновити###QComp", "Update###QComp");
             if (RenderPrimaryButton(actLbl, ImVec2(btnW, 0.0f))) {
-                componentsScanner_.DownloadAndInstallAsync(comp, devicesCache_, MakeLogger());
+                RequestProtectedInstall(
+                    comp.name,
+                    true,
+                    [this, compCopy = comp](bool) {
+                        componentsScanner_.DownloadAndInstallAsync(
+                            compCopy, devicesCache_, MakeLogger());
+                    });
             }
             ImGui::EndDisabled();
             ImGui::PopID();

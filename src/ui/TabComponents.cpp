@@ -172,13 +172,16 @@ void DriverLoomApp::RenderComponentsTab() {
     SameLineWrapIfNeeded(mainW);
     ImGui::BeginDisabled(busy || (!useSelectedBatch && batchTargets.empty()));
     if (RenderActionButton(mainActLbl, ImVec2(mainW, 0.0f), !batchTargets.empty() || useSelectedBatch)) {
-        if (useSelectedBatch) {
-            componentsScanner_.DownloadAndInstallBatchAsync(
-                std::move(selectedTargets), devicesCache_, MakeLogger(), compRestoreBefore_);
-        } else {
-            componentsScanner_.DownloadAndInstallBatchAsync(
-                batchTargets, devicesCache_, MakeLogger(), compRestoreBefore_);
-        }
+        auto targets = useSelectedBatch ? std::move(selectedTargets) : batchTargets;
+        RequestProtectedInstall(
+            useSelectedBatch
+                ? hdm::Tr("Установка выбранных компонентов", "Встановлення вибраних компонентів", "Install Selected Components")
+                : hdm::Tr("Установка рекомендуемых компонентов", "Встановлення рекомендованих компонентів", "Install Recommended Components"),
+            compRestoreBefore_,
+            [this, targets = std::move(targets)](bool rp) mutable {
+                componentsScanner_.DownloadAndInstallBatchAsync(
+                    std::move(targets), devicesCache_, MakeLogger(), rp);
+            });
     }
     ImGui::EndDisabled();
 
@@ -595,8 +598,14 @@ void DriverLoomApp::RenderComponentsTab() {
                            : hdm::Tr("Переуст.###CAct", "Перевст.###CAct", "Reinstall###CAct"));
             ImGui::BeginDisabled(busy);
             if (RenderActionButton(btnLbl, ImVec2(primaryW, 0.0f), needAction)) {
-                componentsScanner_.DownloadAndInstallAsync(item, devicesCache_, MakeLogger());
-                selectedComponentIds_.erase(item.id);
+                RequestProtectedInstall(
+                    item.name,
+                    compRestoreBefore_,
+                    [this, itemCopy = item](bool) {
+                        componentsScanner_.DownloadAndInstallAsync(
+                            itemCopy, devicesCache_, MakeLogger());
+                        selectedComponentIds_.erase(itemCopy.id);
+                    });
             }
             ImGui::EndDisabled();
             ImGui::SameLine();

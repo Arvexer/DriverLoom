@@ -118,6 +118,7 @@ int RunCliModeIfRequested() {
     enum class Mode {
         None,
         RestorePoint,
+        EnableSystemProtection,
         InstallInf,
         InstallCab,
         InstallPackage,
@@ -148,6 +149,7 @@ int RunCliModeIfRequested() {
     std::wstring installerArgsArg;
     std::wstring nestedHintArg;
     std::wstring pkgKindArg;
+    std::wstring restoreDescArg;
     std::wstring logPath;
     std::wstring cancelFilePath;
     bool forceInf = false;
@@ -160,6 +162,10 @@ int RunCliModeIfRequested() {
         if (arg == L"--cli-restore-point" && i + 1 < argc) {
             setMode(Mode::RestorePoint);
             targetArg = argv[++i];
+        } else if (arg == L"--cli-enable-system-protection") {
+            setMode(Mode::EnableSystemProtection);
+        } else if (arg == L"--restore-desc" && i + 1 < argc) {
+            restoreDescArg = argv[++i];
         } else if (arg == L"--cli-install-inf" && i + 1 < argc) {
             setMode(Mode::InstallInf);
             targetArg = argv[++i];
@@ -264,6 +270,17 @@ int RunCliModeIfRequested() {
         const bool ok = hdm::SystemRestore::CreateRestorePointSync(
             hdm::WideToUtf8(targetArg), fileLogger);
         return ok ? 0 : 1;
+    }
+
+    if (mode == Mode::EnableSystemProtection) {
+        if (!hdm::SystemRestore::EnableSystemProtectionSync(fileLogger)) {
+            return 1;
+        }
+        if (!restoreDescArg.empty()) {
+            hdm::SystemRestore::CreateRestorePointSync(
+                hdm::WideToUtf8(restoreDescArg), fileLogger);
+        }
+        return 0;
     }
 
     if (mode == Mode::InstallInf) {

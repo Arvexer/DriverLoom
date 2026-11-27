@@ -96,6 +96,7 @@ target_link_libraries(DriverLoom PRIVATE
     newdev
     ole32
     oleaut32
+    wbemuuid
     cfgmgr32
     winhttp
     wintrust
@@ -154,6 +155,7 @@ add_executable(DriverLoomTests
     src/core/PackageSecurity.cpp
     src/core/SafeZipExtractor.cpp
     src/core/OnlineCatalogClient.cpp
+    src/core/SystemRestore.cpp
 )
 
 target_include_directories(DriverLoomTests PRIVATE
@@ -173,6 +175,7 @@ target_link_libraries(DriverLoomTests PRIVATE
     setupapi
     ole32
     oleaut32
+    wbemuuid
     winhttp
     wintrust
     crypt32

@@ -385,16 +385,25 @@ void DriverLoomApp::RenderDevicesTab() {
                             nullptr,
                             false,
                             !devBusy && hasHwKey)) {
-                        componentsScanner_.SearchAndInstallFromCatalogAsync(
+                        RequestProtectedInstall(
                             dev.name,
-                            dev.searchHardwareKey,
-                            dev.hardwareId,
-                            dev.driverVersion,
-                            devicesCache_,
-                            MakeLogger(),
-                            [this](bool ok, bool rebootReq) {
-                                if (rebootReq) rebootRequired_.store(true);
-                                if (ok) pendingDeviceRescan_.store(true);
+                            true,
+                            [this,
+                             devName = dev.name,
+                             searchKey = dev.searchHardwareKey,
+                             hwId = dev.hardwareId,
+                             drvVer = dev.driverVersion](bool) {
+                                componentsScanner_.SearchAndInstallFromCatalogAsync(
+                                    devName,
+                                    searchKey,
+                                    hwId,
+                                    drvVer,
+                                    devicesCache_,
+                                    MakeLogger(),
+                                    [this](bool ok, bool rebootReq) {
+                                        if (rebootReq) rebootRequired_.store(true);
+                                        if (ok) pendingDeviceRescan_.store(true);
+                                    });
                             });
                     }
                     ImGui::Separator();
@@ -663,16 +672,25 @@ void DriverLoomApp::RenderDevicesTab() {
 
         ImGui::BeginDisabled(devBusy || !hasHwKey);
         if (RenderActionButton(catBtnLbl, ImVec2(0.0f, 0.0f), highlightCatalog)) {
-            componentsScanner_.SearchAndInstallFromCatalogAsync(
+            RequestProtectedInstall(
                 selectedDev->name,
-                selectedDev->searchHardwareKey,
-                selectedDev->hardwareId,
-                selectedDev->driverVersion,
-                devicesCache_,
-                MakeLogger(),
-                [this](bool ok, bool rebootReq) {
-                    if (rebootReq) rebootRequired_.store(true);
-                    if (ok) pendingDeviceRescan_.store(true);
+                true,
+                [this,
+                 devName = selectedDev->name,
+                 searchKey = selectedDev->searchHardwareKey,
+                 hwId = selectedDev->hardwareId,
+                 drvVer = selectedDev->driverVersion](bool) {
+                    componentsScanner_.SearchAndInstallFromCatalogAsync(
+                        devName,
+                        searchKey,
+                        hwId,
+                        drvVer,
+                        devicesCache_,
+                        MakeLogger(),
+                        [this](bool ok, bool rebootReq) {
+                            if (rebootReq) rebootRequired_.store(true);
+                            if (ok) pendingDeviceRescan_.store(true);
+                        });
                 });
         }
         ImGui::EndDisabled();

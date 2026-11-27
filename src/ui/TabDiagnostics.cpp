@@ -471,16 +471,25 @@ void DriverLoomApp::RenderDiagnosticsTab() {
                             : hdm::Tr("Установить###CInst", "Встановити###CInst", "Install###CInst"),
                         ImVec2(instW, 0.0f),
                         instPrimary)) {
-                    componentsScanner_.SearchAndInstallFromCatalogAsync(
+                    RequestProtectedInstall(
                         item.deviceName,
-                        item.searchKey,
-                        item.hardwareId,
-                        item.driverVersion,
-                        devicesCache_,
-                        MakeLogger(),
-                        [this](bool ok, bool rebootReq) {
-                            if (rebootReq) rebootRequired_.store(true);
-                            if (ok) pendingDeviceRescan_.store(true);
+                        true,
+                        [this,
+                         devName = item.deviceName,
+                         searchKey = item.searchKey,
+                         hwId = item.hardwareId,
+                         drvVer = item.driverVersion](bool) {
+                            componentsScanner_.SearchAndInstallFromCatalogAsync(
+                                devName,
+                                searchKey,
+                                hwId,
+                                drvVer,
+                                devicesCache_,
+                                MakeLogger(),
+                                [this](bool ok, bool rebootReq) {
+                                    if (rebootReq) rebootRequired_.store(true);
+                                    if (ok) pendingDeviceRescan_.store(true);
+                                });
                         });
                 }
                 ImGui::EndDisabled();
@@ -627,11 +636,25 @@ void DriverLoomApp::RenderDiagnosticsTab() {
                     const bool instPrimary = (st.health != hdm::ControllerHealth::Ok);
                     ImGui::BeginDisabled(busy || compInstalling || !hasKey);
                     if (RenderActionButton(hdm::Tr("Обновить###StInst", "Оновити###StInst", "Update###StInst"), ImVec2(instW, 0.0f), instPrimary)) {
-                        componentsScanner_.SearchAndInstallFromCatalogAsync(
-                            st.deviceName, st.searchKey, st.hardwareId, st.driverVersion, devicesCache_, MakeLogger(),
-                            [this](bool ok, bool rebootReq) {
-                                if (rebootReq) rebootRequired_.store(true);
-                                if (ok) pendingDeviceRescan_.store(true);
+                        RequestProtectedInstall(
+                            st.deviceName,
+                            true,
+                            [this,
+                             devName = st.deviceName,
+                             searchKey = st.searchKey,
+                             hwId = st.hardwareId,
+                             drvVer = st.driverVersion](bool) {
+                                componentsScanner_.SearchAndInstallFromCatalogAsync(
+                                    devName,
+                                    searchKey,
+                                    hwId,
+                                    drvVer,
+                                    devicesCache_,
+                                    MakeLogger(),
+                                    [this](bool ok, bool rebootReq) {
+                                        if (rebootReq) rebootRequired_.store(true);
+                                        if (ok) pendingDeviceRescan_.store(true);
+                                    });
                             });
                     }
                     ImGui::EndDisabled();

@@ -569,6 +569,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
     int initialSelectedDeviceRow = -1;
     std::wstring screenshotPath;
     std::wstring captureSuiteDir;
+    bool previewSrModal = false;
     bool hasLocalSectionArg = false;
     bool hasModeArg = false;
 
@@ -630,6 +631,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
                         g_uiScalePercent = scalePct;
                         g_cliOverrideUiScale = true;
                     }
+                } else if (arg == L"--preview-sr-modal") {
+                    previewSrModal = true;
                 }
             }
             LocalFree(argv);
@@ -753,6 +756,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int) {
         app.SetInitialDiagSection(initialDiagSection);
         app.SetInitialLocalSection(initialLocalSection);
         app.SetInitialSelectedDeviceRow(initialSelectedDeviceRow);
+        if (previewSrModal && !screenshotPath.empty()) {
+            app.OpenSystemProtectionPreviewModal();
+        }
 
         struct AppInstanceGuard {
             explicit AppInstanceGuard(DriverLoomApp* ptr) { g_appInstance = ptr; }

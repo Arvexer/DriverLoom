@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -39,6 +40,7 @@ public:
         bool advancedMode,
         bool lightTheme,
         int selectDevRow = -1);
+    void OpenSystemProtectionPreviewModal() noexcept;
 
 private:
     enum NavPage : int {
@@ -97,6 +99,12 @@ private:
     void RenderRebootBanner();
     void StartAppUpdateCheckAsync(bool manual);
     void RenderAboutModal();
+    void RequestProtectedInstall(
+        std::string actionTitle,
+        bool wantRestorePoint,
+        std::function<void(bool createRestorePoint)> startInstall);
+    void RenderSystemProtectionModal();
+    void ProcessPendingSystemProtectionResult();
 
     enum class AppUpdateState {
         Idle,
@@ -228,6 +236,19 @@ private:
     std::atomic<bool> stopAppUpdate_{false};
     std::mutex appHttpMutex_;
     void* activeAppUpdateRequest_{nullptr};
+
+    // Pre-install System Protection prompt modal & 1-click enable state
+    bool openSrPromptNextFrame_{false};
+    bool srPromptModalOpen_{false};
+    hdm::SystemProtectionState srPromptState_{hdm::SystemRestore::QuerySystemProtectionState()};
+    double lastSrPromptPollTime_{-1.0};
+    std::string srPromptActionTitle_;
+    std::function<void(bool)> srPromptInstallCallback_;
+    std::function<void(bool)> srPendingAfterEnableCallback_;
+    std::atomic<bool> srEnablePendingResult_{false};
+    std::atomic<bool> srEnableSucceeded_{false};
+    std::mutex srEnableMsgMutex_;
+    std::string srEnableResultMsg_;
 
     // Background worker managers must be declared after caches, logBuffer_, and flags so they join first on destruction.
     hdm::DeviceScanner scanner_;

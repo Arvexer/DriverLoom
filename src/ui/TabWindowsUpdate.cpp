@@ -207,19 +207,24 @@ void DriverLoomApp::RenderWindowsUpdateTab() {
 
     ImGui::BeginDisabled(busy || selectedIds.empty());
     if (RenderPrimaryButton(installLbl)) {
-        wuManager_.StartDownloadAndInstallAsync(
-            selectedIds,
+        RequestProtectedInstall(
+            hdm::Tr("Установка обновлений Windows Update", "Встановлення оновлень Windows Update", "Install Windows Update Packages"),
             wuRestoreBefore_,
-            MakeLogger(),
-            [this](const hdm::WuInstallSummary& summary) {
-                if (summary.rebootRequired) {
-                    rebootRequired_.store(true);
-                }
-                if (summary.installedCount > 0) {
-                    pendingDeviceRescan_.store(true);
-                }
-            },
-            !wuIncludeSystemUpdates_);
+            [this, ids = selectedIds, driversOnly = !wuIncludeSystemUpdates_](bool rp) {
+                wuManager_.StartDownloadAndInstallAsync(
+                    ids,
+                    rp,
+                    MakeLogger(),
+                    [this](const hdm::WuInstallSummary& summary) {
+                        if (summary.rebootRequired) {
+                            rebootRequired_.store(true);
+                        }
+                        if (summary.installedCount > 0) {
+                            pendingDeviceRescan_.store(true);
+                        }
+                    },
+                    driversOnly);
+            });
     }
     ImGui::EndDisabled();
 

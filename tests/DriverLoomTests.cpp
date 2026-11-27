@@ -4,6 +4,7 @@
 #include "core/OnlineCatalogClient.hpp"
 #include "core/PackageSecurity.hpp"
 #include "core/SafeZipExtractor.hpp"
+#include "core/SystemRestore.hpp"
 
 #include <setupapi.h>
 #include <winioctl.h>
@@ -1334,6 +1335,35 @@ void TestComponentIdSetSerialization() {
           "IdSet: caps serialized char length <= 16380 to stay within Registry read limit");
 }
 
+void TestSystemRestoreHelpers() {
+    using State = hdm::SystemProtectionState;
+    Check(hdm::SystemRestore::ClassifySystemProtectionState(true, 1, true, 1) ==
+              State::DisabledByPolicy,
+          "SysRestore: Group Policy DisableSR=1 overrides enabled RPSessionInterval");
+    Check(hdm::SystemRestore::ClassifySystemProtectionState(true, 0, true, 1) ==
+              State::Enabled,
+          "SysRestore: DisableSR=0 with RPSessionInterval=1 reports Enabled");
+    Check(hdm::SystemRestore::ClassifySystemProtectionState(false, 0, true, 1) ==
+              State::Enabled,
+          "SysRestore: RPSessionInterval=1 reports Enabled");
+    Check(hdm::SystemRestore::ClassifySystemProtectionState(false, 0, true, 0) ==
+              State::Disabled,
+          "SysRestore: RPSessionInterval=0 reports Disabled");
+    Check(hdm::SystemRestore::ClassifySystemProtectionState(false, 0, false, 0) ==
+              State::Disabled,
+          "SysRestore: missing keys default safely to Disabled");
+
+    const std::wstring driveRoot = hdm::SystemRestore::GetSystemDriveRootW();
+    Check(driveRoot.size() == 3 && driveRoot[0] >= L'A' && driveRoot[0] <= L'Z' &&
+              driveRoot[1] == L':' && driveRoot[2] == L'\\',
+          "SysRestore: GetSystemDriveRootW returns canonical X:\\ drive root");
+
+    const State liveState = hdm::SystemRestore::QuerySystemProtectionState();
+    Check(liveState == State::Enabled || liveState == State::Disabled ||
+              liveState == State::DisabledByPolicy,
+          "SysRestore: QuerySystemProtectionState returns valid enum");
+}
+
 } // namespace
 
 int main() {
@@ -1354,6 +1384,7 @@ int main() {
     TestSafeZipExtractor();
     TestChunkStrings();
     TestComponentIdSetSerialization();
+    TestSystemRestoreHelpers();
 
     std::cout << "\nSummary: " << g_passed << " passed, " << g_failed << " failed.\n";
     return g_failed == 0 ? 0 : 1;

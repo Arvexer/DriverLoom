@@ -659,18 +659,23 @@ void DriverLoomApp::RenderLocalInstallerTab() {
             "Установить все .inf (DiInstallDriverW)###LocInstAll",
             "Встановити всі .inf (DiInstallDriverW)###LocInstAll",
             "Install All .inf (DiInstallDriverW)###LocInstAll"))) {
-        localInstaller_.InstallFromFolderAsync(
-            hdm::Utf8ToWide(localFolderBuf_),
-            localForceInstall_,
+        RequestProtectedInstall(
+            hdm::Tr("Установка локальных драйверов (.inf)", "Встановлення локальних драйверів (.inf)", "Install Local .inf Drivers"),
             localRestoreBefore_,
-            MakeLogger(),
-            [this](const hdm::LocalInstallSummary& summary) {
-                if (summary.rebootRequired) {
-                    rebootRequired_.store(true);
-                }
-                if (summary.installedCount > 0 || summary.stagedOnlyCount > 0) {
-                    pendingDeviceRescan_.store(true);
-                }
+            [this, folderW = hdm::Utf8ToWide(localFolderBuf_), force = localForceInstall_](bool rp) {
+                localInstaller_.InstallFromFolderAsync(
+                    folderW,
+                    force,
+                    rp,
+                    MakeLogger(),
+                    [this](const hdm::LocalInstallSummary& summary) {
+                        if (summary.rebootRequired) {
+                            rebootRequired_.store(true);
+                        }
+                        if (summary.installedCount > 0 || summary.stagedOnlyCount > 0) {
+                            pendingDeviceRescan_.store(true);
+                        }
+                    });
             });
     }
     ImGui::EndDisabled();
